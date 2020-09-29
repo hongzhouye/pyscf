@@ -123,6 +123,13 @@ def init_guess_by_chkfile(mol, chkfile_name, project=None):
 def get_init_guess(mol, key='minao'):
     return UHF(mol).get_init_guess(mol, key)
 
+def get_mom_guess(nocc, mo_coeff0, orb_swap):
+    dm0 = [None] * 2
+    for s in [0,1]:
+        dm0[s] = hf.get_mom_guess(nocc[s], mo_coeff0[s], orb_swap[s]) * 0.5
+
+    return numpy.asarray(dm0)
+
 def make_rdm1(mo_coeff, mo_occ, **kwargs):
     '''One-particle density matrix
 
@@ -245,17 +252,31 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
              hf.level_shift(s1e, dm[1], f[1], shiftb))
     return numpy.array(f)
 
-def get_occ(mf, mo_energy=None, mo_coeff=None):
+def get_occ(mf, mo_energy=None, mo_coeff=None, dmref=None, s1e=None):
     if mo_energy is None: mo_energy = mf.mo_energy
-    e_idx_a = numpy.argsort(mo_energy[0])
-    e_idx_b = numpy.argsort(mo_energy[1])
-    e_sort_a = mo_energy[0][e_idx_a]
-    e_sort_b = mo_energy[1][e_idx_b]
-    nmo = mo_energy[0].size
-    n_a, n_b = mf.nelec
-    mo_occ = numpy.zeros_like(mo_energy)
-    mo_occ[0,e_idx_a[:n_a]] = 1
-    mo_occ[1,e_idx_b[:n_b]] = 1
+    if dmref is None:
+        e_idx_a = numpy.argsort(mo_energy[0])
+        e_idx_b = numpy.argsort(mo_energy[1])
+        e_sort_a = mo_energy[0][e_idx_a]
+        e_sort_b = mo_energy[1][e_idx_b]
+        nmo = mo_energy[0].size
+        n_a, n_b = mf.nelec
+        mo_occ = numpy.zeros_like(mo_energy)
+        mo_occ[0,e_idx_a[:n_a]] = 1
+        mo_occ[1,e_idx_b[:n_b]] = 1
+    else:
+        if s1e is None: s1e = mf.get_ovlp()
+        e_sort = [None] * 2
+        nmo = mo_energy[0].size
+        mo_occ = numpy.zeros_like(mo_energy)
+        for s in [0,1]:
+            SC = s1e @ mo_coeff[s]
+            proj_pop = numpy.diag(SC.T @ dmref[s] @ SC)
+            pop_idx = numpy.argsort(proj_pop)[::-1]
+            e_sort[s] = mo_energy[s][pop_idx]
+            mo_occ[s][pop_idx[:mf.nelec[s]]] = 1
+        e_sort_a, e_sort_b = e_sort
+        n_a, n_b = mf.nelec
     if mf.verbose >= logger.INFO and n_a < nmo and n_b > 0 and n_b < nmo:
         if e_sort_a[n_a-1]+1e-3 > e_sort_a[n_a]:
             logger.warn(mf, 'alpha nocc = %d  HOMO %.15g >= LUMO %.15g',
@@ -723,6 +744,11 @@ class UHF(hf.SCF):
             level shift (in Eh) for alpha and beta Fock if two-element list is given.
         init_guess_breaksym : logical
             If given, overwrite BREAKSYM.
+        mom : boolean
+            If set True, mo_occ will be determined using maximal overlap method
+        orb_swap : list of two lists, each being a list of two-number list
+            E.g., [[[0,1],[1,3]],[]] promotes one spin-alpha electron from HOMO to LUMO (0->1) and the other spin-alpha electron from HOMO-1 to LUMO+2 (1->3).
+            E.g., [[[0,1]],[[1,2]]] promotes one spin-alpha electron from HOMO to LUMO (0->1) and the other spin-beta electron from HOMO-1 to LUMO+1 (1->2).
 
     Examples:
 
@@ -852,6 +878,9 @@ class UHF(hf.SCF):
     def init_guess_by_chkfile(self, chkfile=None, project=None):
         if chkfile is None: chkfile = self.chkfile
         return init_guess_by_chkfile(self.mol, chkfile, project=project)
+
+    def get_mom_guess(self, mo_coeff0):
+        return get_mom_guess(self.mol.nelec, mo_coeff0, self.orb_swap)
 
     def get_jk(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None):
