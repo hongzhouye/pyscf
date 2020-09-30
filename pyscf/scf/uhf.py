@@ -880,7 +880,40 @@ class UHF(hf.SCF):
         return init_guess_by_chkfile(self.mol, chkfile, project=project)
 
     def get_mom_guess(self, mo_coeff0):
+        logger.info(self, "Generating MOM guess with orb_swap %s",
+            str(self.orb_swap))
         return get_mom_guess(self.mol.nelec, mo_coeff0, self.orb_swap)
+
+    def analyze_orb_trans(self, mo_coeff_ref, nocc_ref,
+        mo_coeff=None, mo_occ=None, s1e=None, thr=0.7):
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if mo_occ is None: mo_occ = self.mo_occ
+        if s1e is None: s1e = self.get_ovlp()
+
+        C_ref = mo_coeff_ref
+        if isinstance(mo_coeff_ref, numpy.ndarray):
+            if mo_coeff_ref.ndim == 2:  # RHF input
+                C_ref = [mo_coeff_ref] * 2
+
+        no_ref = nocc_ref
+        if isinstance(nocc_ref, int):
+            no_ref = [nocc_ref] * 2
+
+        no_trans = True
+        for s in [0,1]:
+            idx_h, pop_h, idx_p, pop_p, hstr, pstr = hf.get_orb_trans_(
+                C_ref[s], mo_coeff[s], s1e, no_ref[s], mo_occ[s], thr,
+                ret_trans_str=True)
+            spname = "alpha" if s == 0 else "beta "
+
+            if not (hstr is None or pstr is None):
+                hpstr = "%s --> %s" % (hstr, pstr)
+                logger.info(self, "Orbital transition spin %s :  %s",
+                    spname, hpstr)
+                no_trans = False
+
+        if no_trans:
+            logger.info(self, "No orbital transition is detected%s", "")
 
     def get_jk(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None):

@@ -184,7 +184,7 @@ def get_fermi(mf, mo_energy_kpts=None, mo_occ_kpts=None):
                         'k=%d, mo_e=%s, mo_occ=%s', k, mo_e, mo_occ)
     return fermi
 
-def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
+def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None, dmref=None, s1e=None):
     '''Label the occupancies for each orbital for sampled k-points.
 
     This is a k-point version of scf.hf.SCF.get_occ
@@ -196,9 +196,27 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
 
     mo_energy = np.sort(np.hstack(mo_energy_kpts))
     fermi = mo_energy[nocc-1]
-    mo_occ_kpts = []
-    for mo_e in mo_energy_kpts:
-        mo_occ_kpts.append((mo_e <= fermi).astype(np.double) * 2)
+    if dmref is None:
+        mo_occ_kpts = []
+        for mo_e in mo_energy_kpts:
+            mo_occ_kpts.append((mo_e <= fermi).astype(np.double) * 2)
+    else:   # MOM
+        if s1e is None: s1e = mf.get_ovlp()
+        proj_pop = [None] * nkpts
+        for ik in range(nkpts):
+            SC = s1e[ik] @ mo_coeff_kpts[ik]
+            proj_pop[ik] = np.diag(SC.T.conj() @ dmref[ik] @ SC)
+            if np.max(np.abs(np.imag(proj_pop[ik]))) > 1.E-6:
+                logger.warn(mf, "MOM projected population has large imaginary part for k-point # %d", ik)
+            proj_pop[ik] = np.real(proj_pop[ik])
+        proj_pop = np.asarray(proj_pop)
+        idx_pop = np.argsort(proj_pop.ravel())[::-1]
+        nmo = mo_energy_kpts[0].size
+        idx_pop_k = np.floor_divide(idx_pop, nmo)
+        idx_pop_mo = np.mod(idx_pop, nmo)
+        mo_occ_kpts = [np.zeros_like(mo_energy_kpts[ik]) for ik in range(nkpts)]
+        for ik,imo in zip(idx_pop_k[:nocc],idx_pop_mo[:nocc]):
+            mo_occ_kpts[ik][imo] = 2.
 
     if nocc < mo_energy.size:
         logger.info(mf, 'HOMO = %.12g  LUMO = %.12g',
@@ -347,6 +365,40 @@ def init_guess_by_chkfile(cell, chkfile_name, project=None, kpts=None):
     return dm[0] + dm[1]
 
 
+def get_mom_guess(mo_coeff0_kpts, orb_swap_kpts, nocc0_kpts):
+    '''Generate mom guess by swapping orbitals for input mo coeff
+
+    Args:
+        mo_coeff0_kpts : list of 2D ndarrays or 3D ndarrays
+            MO coeff matrices by k-point
+        orb_swap_kpts : list of ``orb_swap`` defined in ``scf.hf.get_mom_guess``
+            Same format as molecular scf ``orb_swap``'s by k-point except that orbital indices for each k-point are relative to the nocc from nocc0_kpts.
+        nocc0_kpts : list of int
+            nocc for each k-point
+
+    Returns:
+        dm_kpts : 3D ndarrays
+            1RDMs by k-point calculated from input MO coeff and orb_swap
+    '''
+    if nocc0_kpts is None:
+        raise RuntimeError('''
+For MOM guess, ``mf.nocc0_kpts`` must be set.''')
+
+    nkpts = len(mo_coeff0_kpts)
+
+    if orb_swap_kpts is None:
+        orb_swap_kpts = [None] * nkpts
+
+    dm_kpts = [None] * nkpts
+    for ik in range(nkpts):
+        nocc = nocc0_kpts[ik]
+        mo_coeff0 = mo_coeff0_kpts[ik]
+        orb_swap = orb_swap_kpts[ik]
+        dm_kpts[ik] = mol_hf.get_mom_guess(nocc, mo_coeff0, orb_swap)
+
+    return np.asarray(dm_kpts)
+
+
 def dip_moment(cell, dm_kpts, unit='Debye', verbose=logger.NOTE,
                grids=None, rho=None, kpts=np.zeros((1,3))):
     ''' Dipole moment in the unit cell (is it well defined)?
@@ -449,6 +501,8 @@ class KSCF(pbchf.SCF):
     '''
     conv_tol_grad = getattr(__config__, 'pbc_scf_KSCF_conv_tol_grad', None)
     direct_scf = getattr(__config__, 'pbc_scf_SCF_direct_scf', False)
+
+    nocc0_kpts = getattr(__config__, 'pbc_scf_SCF_nocc0_kpts', None)
 
     def __init__(self, cell, kpts=np.zeros((1,3)),
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
@@ -584,6 +638,32 @@ class KSCF(pbchf.SCF):
             logger.warn(self, 'Hcore initial guess is not recommended in '
                         'the SCF of low-dimensional systems.')
         return mol_hf.SCF.init_guess_by_1e(self, cell)
+
+    def get_mom_guess(self, mo_coeff0):
+        logger.info(self, "Generating MOM guess with orb_swap %s",
+            str(self.orb_swap))
+        return get_mom_guess(mo_coeff0, self.orb_swap, self.nocc0_kpts)
+
+    def analyze_orb_trans(self, mo_coeff_ref, nocc_ref,
+        mo_coeff=None, mo_occ=None, s1e=None, thr=0.7):
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if mo_occ is None: mo_occ = self.mo_occ
+        if s1e is None: s1e = self.get_ovlp()
+
+        nkpts = len(mo_coeff)
+        no_trans = True
+        for ik in range(nkpts):
+            idx_h, pop_h, idx_p, pop_p, hstr, pstr = mol_hf.get_orb_trans_(
+                mo_coeff_ref[ik], mo_coeff[ik], s1e[ik], nocc_ref[ik],
+                mo_occ[ik], thr, ret_trans_str=True)
+
+            if not (hstr is None or pstr is None):
+                hpstr = "%s --> %s" % (hstr, pstr)
+                logger.info(self, "Orbital transition kpt %3d :  %s", ik, hpstr)
+                no_trans = False
+
+        if no_trans:
+            logger.info(self, "No orbital transition is detected%s", "")
 
     get_hcore = get_hcore
     get_ovlp = get_ovlp

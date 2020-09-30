@@ -618,6 +618,7 @@ def get_init_guess(mol, key='minao'):
     return RHF(mol).get_init_guess(mol, key)
 
 
+# mom functions
 def get_mom_guess(nocc, mo_coeff0, orb_swap):
     if mo_coeff0 is None:
         raise RuntimeError('''
@@ -641,9 +642,37 @@ When "mom" is set "True", "mo_coeff0" must be given to "kernel".''')
 Generating mom guess failed. Please check "mf.orb_swap".''')
 
     Co = C[:,:nocc]
-    dm0 = 2. * Co @ Co.T
+    dm0 = 2. * Co @ Co.T.conj()
 
     return dm0
+
+
+def get_orb_trans_(Cref, C, S, no, mo_occ, thr, ret_trans_str=True):
+    '''
+    '''
+    idx_occ = numpy.where(mo_occ > 0.5)[0]
+    C_o = C[:,idx_occ]
+    Cref_o = Cref[:,:no]
+    Cref_v = Cref[:,no:]
+    pop_occ = numpy.sum(numpy.abs(Cref_o.T.conj() @ S @ C_o)**2., axis=1)
+    pop_vir = numpy.sum(numpy.abs(Cref_v.T.conj() @ S @ C_o)**2., axis=1)
+    idx_h0 = numpy.where(pop_occ < 1-thr)[0]
+    idx_p0 = numpy.where(pop_vir > thr)[0]
+    pop_h = 1-pop_occ[idx_h0]
+    pop_p = pop_vir[idx_p0]
+    idx_h = idx_h0
+    idx_p = idx_p0 + no
+
+    rets = (idx_h, pop_h, idx_p, pop_p)
+
+    if ret_trans_str:
+        hstr = " ".join(["%d (%.2f)"%(no-1-ih,ph)
+            for ih,ph in zip(idx_h,pop_h)]) if idx_h.size > 0 else None
+        pstr = " ".join(["%d (%.2f)"%(ip-no+1,pp)
+            for ip,pp in zip(idx_p,pop_p)]) if idx_p.size > 0 else None
+        rets += (hstr, pstr)
+
+    return rets
 
 
 # eigenvalue of d is 1
@@ -1661,7 +1690,25 @@ class SCF(lib.StreamObject):
         return dm
 
     def get_mom_guess(self, mo_coeff0):
+        logger.info(self, "Generating MOM guess with orb_swap %s",
+            str(self.orb_swap))
         return get_mom_guess(self.mol.nelectron//2, mo_coeff0, self.orb_swap)
+
+    def analyze_orb_trans(self, mo_coeff_ref, nocc_ref,
+        mo_coeff=None, mo_occ=None, s1e=None, thr=0.7):
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if mo_occ is None: mo_occ = self.mo_occ
+        if s1e is None: s1e = self.get_ovlp()
+
+        idx_h, pop_h, idx_p, pop_p, hstr, pstr = get_orb_trans_(
+            mo_coeff_ref, mo_coeff, s1e, nocc_ref, mo_occ, thr,
+            ret_trans_str=True)
+
+        if not (hstr is None or pstr is None):
+            hpstr = "%s --> %s" % (hstr, pstr)
+            logger.info(self, "Orbital transition :  %s", hpstr)
+        else:
+            logger.info(self, "No orbital transition is detected%s", "")
 
     # full density matrix for RHF
     @lib.with_doc(make_rdm1.__doc__)

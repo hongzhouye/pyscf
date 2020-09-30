@@ -121,7 +121,7 @@ def get_fermi(mf, mo_energy_kpts=None, mo_occ_kpts=None):
                         'k=%d, mo_e=%s, mo_occ=%s', k, mo_e, mo_occ)
     return (fermi_a, fermi_b)
 
-def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
+def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None, dmref=None, s1e=None):
     '''Label the occupancies for each orbital for sampled k-points.
 
     This is a k-point version of scf.hf.SCF.get_occ
@@ -133,8 +133,13 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
     mo_energy = np.sort(np.hstack(mo_energy_kpts[0]))
     fermi_a = mo_energy[nocc_a-1]
     mo_occ_kpts = [[], []]
-    for mo_e in mo_energy_kpts[0]:
-        mo_occ_kpts[0].append((mo_e <= fermi_a).astype(np.double))
+    if dmref is None:
+        for mo_e in mo_energy_kpts[0]:
+            mo_occ_kpts[0].append((mo_e <= fermi_a).astype(np.double))
+    else:   # MOM
+        if s1e is None: s1e = mf.get_ovlp()
+        mo_occ_kpts[0] = np.asarray(khf.get_occ(
+            mf, mo_energy_kpts[0], mo_coeff_kpts[0], dmref[0], s1e)) * 0.5
     if nocc_a < len(mo_energy):
         logger.info(mf, 'alpha HOMO = %.12g  LUMO = %.12g', fermi_a, mo_energy[nocc_a])
     else:
@@ -143,8 +148,13 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
     if nocc_b > 0:
         mo_energy = np.sort(np.hstack(mo_energy_kpts[1]))
         fermi_b = mo_energy[nocc_b-1]
-        for mo_e in mo_energy_kpts[1]:
-            mo_occ_kpts[1].append((mo_e <= fermi_b).astype(np.double))
+        if dmref is None:
+            for mo_e in mo_energy_kpts[1]:
+                mo_occ_kpts[1].append((mo_e <= fermi_b).astype(np.double))
+        else:   # MOM
+            if s1e is None: s1e = mf.get_ovlp()
+            mo_occ_kpts[1] = np.asarray(khf.get_occ(
+                mf, mo_energy_kpts[1], mo_coeff_kpts[1], dmref[1], s1e)) * 0.5
         if nocc_b < len(mo_energy):
             logger.info(mf, 'beta HOMO = %.12g  LUMO = %.12g', fermi_b, mo_energy[nocc_b])
         else:
@@ -345,6 +355,31 @@ def init_guess_by_chkfile(cell, chkfile_name, project=None, kpts=None):
     return dm
 
 
+def get_mom_guess(mo_coeff0_kpts, orb_swap_kpts, nocc0_kpts):
+    '''Generate mom guess by swapping orbitals for input mo coeff
+
+    Args:
+        All args are a list of two elements (spin alpha/beta), each element having the same format as that in ``pbc.scf.khf.get_mom_guess``.
+
+    Returns:
+        dm_kpts : 4D ndarrays
+            1st axis spin, 2nd axis k-point, then normal 1RDM.
+    '''
+    if nocc0_kpts is None:
+        raise RuntimeError('''
+For MOM guess, ``mf.nocc0_kpts`` must be set.''')
+
+    nkpts = len(mo_coeff0_kpts[0])
+
+    if orb_swap_kpts is None:
+        orb_swap_kpts = [[None] * nkpts for s in [0,1]]
+
+    dm_kpts = [khf.get_mom_guess(mo_coeff0_kpts[s], orb_swap_kpts[s],
+        nocc0_kpts[s]) * 0.5 for s in [0,1]]
+
+    return np.asarray(dm_kpts)
+
+
 def dip_moment(cell, dm_kpts, unit='Debye', verbose=logger.NOTE,
                grids=None, rho=None, kpts=np.zeros((1,3))):
     ''' Dipole moment in the unit cell.
@@ -447,6 +482,43 @@ class KUHF(khf.KSCF, pbcuhf.UHF):
             dm_kpts *= (nelec / ne).reshape(2,-1,1,1)
         return dm_kpts
 
+    def get_mom_guess(self, mo_coeff0):
+        logger.info(self, "Generating MOM guess with orb_swap %s",
+            str(self.orb_swap))
+        return get_mom_guess(mo_coeff0, self.orb_swap, self.nocc0_kpts)
+
+    def analyze_orb_trans(self, mo_coeff_ref, nocc_ref,
+        mo_coeff=None, mo_occ=None, s1e=None, thr=0.7):
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if mo_occ is None: mo_occ = self.mo_occ
+        if s1e is None: s1e = self.get_ovlp()
+
+        nkpts = len(mo_coeff[0])
+
+        C_ref = mo_coeff_ref
+        if len(mo_coeff_ref) == nkpts: C_ref = [mo_coeff_ref] * 2
+
+        no_ref = nocc_ref
+        if len(nocc_ref) == nkpts: no_ref = [nocc_ref] * 2
+
+        no_trans = True
+        for s in [0,1]:
+            spname = "alpha" if s == 0 else "beta "
+            for ik in range(nkpts):
+                idx_h, pop_h, idx_p, pop_p, hstr, pstr = mol_hf.get_orb_trans_(
+                    C_ref[s][ik], mo_coeff[s][ik], s1e[ik], no_ref[s][ik],
+                    mo_occ[s][ik], thr, ret_trans_str=True)
+
+                if not (hstr is None or pstr is None):
+                    hpstr = "%s --> %s" % (hstr, pstr)
+                    logger.info(self,
+                        "Orbital transition spin %s kpt %3d :  %s",
+                        spname, ik, hpstr)
+                    no_trans = False
+
+        if no_trans:
+            logger.info(self, "No orbital transition is detected%s", "")
+
     get_fock = get_fock
     get_fermi = get_fermi
     get_occ = get_occ
@@ -532,6 +604,12 @@ class KUHF(khf.KSCF, pbcuhf.UHF):
     init_guess_by_minao  = pbcuhf.UHF.init_guess_by_minao
     init_guess_by_atom   = pbcuhf.UHF.init_guess_by_atom
     init_guess_by_huckel = pbcuhf.UHF.init_guess_by_huckel
+
+    def _finalize(self):
+        if self.mom:
+            mol_uhf.UHF._finalize(self)
+        else:
+            mol_hf.SCF._finalize(self)
 
     @lib.with_doc(mulliken_meta.__doc__)
     def mulliken_meta(self, cell=None, dm=None, verbose=logger.DEBUG,
