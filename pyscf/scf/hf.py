@@ -1460,7 +1460,7 @@ class SCF(lib.StreamObject):
     conv_check = getattr(__config__, 'scf_hf_SCF_conv_check', True)
 
     # for MOM
-    mom = getattr(__config__, 'scf_hf_SCF_mom', max_cycle+9999)
+    mom = getattr(__config__, 'scf_hf_SCF_mom', False)
     orb_swap = getattr(__config__, 'scf_hf_SCF_orb_swap', None)
 
     def __init__(self, mol):
