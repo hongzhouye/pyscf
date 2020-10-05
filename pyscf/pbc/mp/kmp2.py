@@ -26,6 +26,7 @@ t2 and eris are never stored in full, only a partial
 eri of size (nkpts,nocc,nocc,nvir,nvir)
 '''
 
+import time
 import numpy as np
 from scipy.linalg import block_diag
 
@@ -40,18 +41,16 @@ WITH_T2 = getattr(__config__, 'mp_mp2_with_t2', True)
 
 
 def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
+
+    cput0 = (time.clock(), time.time())
+
     nmo = mp.nmo
     nocc = mp.nocc
     nvir = nmo - nocc
     nkpts = mp.nkpts
 
-    eia = np.zeros((nocc,nvir))
-    eijab = np.zeros((nocc,nocc,nvir,nvir))
-
     fao2mo = mp._scf.with_df.ao2mo
     kconserv = mp.khelper.kconserv
-    emp2 = 0.
-    oovv_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=mo_coeff[0].dtype)
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -59,42 +58,108 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     # Get location of non-zero/padded elements in occupied and virtual space
     nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
 
+    def get_oovv_ij(ki, kj, ka, kb):
+        orbo_i = mo_coeff[ki][:,:nocc]
+        orbo_j = mo_coeff[kj][:,:nocc]
+        orbv_a = mo_coeff[ka][:,nocc:]
+        orbv_b = mo_coeff[kb][:,nocc:]
+        return fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
+            (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
+            compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
+
+    def get_eijab(ki, kj, ka, kb):
+        # Remove zero/padded elements from denominator
+        eia = LARGE_DENOM * np.ones((nocc, nvir),
+            dtype=mo_energy[0].dtype)
+        n0_ovp_ia = np.ix_(nonzero_opadding[ki],
+            nonzero_vpadding[ka])
+        eia[n0_ovp_ia] = (mo_e_o[ki][:,None] -
+            mo_e_v[ka])[n0_ovp_ia]
+
+        ejb = LARGE_DENOM * np.ones((nocc, nvir),
+            dtype=mo_energy[0].dtype)
+        n0_ovp_jb = np.ix_(nonzero_opadding[kj],
+            nonzero_vpadding[kb])
+        ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] -
+            mo_e_v[kb])[n0_ovp_jb]
+
+        return lib.direct_sum('ia,jb->ijab',eia,ejb)
+
+    def contract_(oovv_ij, eijab, with_t2):
+        if isinstance(oovv_ij,list):
+            t2_ijab_ = np.conj(oovv_ij[0]/eijab)
+            ed = np.einsum('ijab,ijab', t2_ijab_, oovv_ij[0]).real
+            ex = np.einsum('ijab,ijba', t2_ijab_, oovv_ij[1]).real
+            t2_ijba_ = np.conj(oovv_ij[1]/eijab.transpose(0,1,3,2))
+            ed += np.einsum('ijab,ijab', t2_ijba_, oovv_ij[1]).real
+            ex += np.einsum('ijab,ijba', t2_ijba_, oovv_ij[0]).real
+            if not with_t2:
+                t2_ijab = None
+            else:
+                t2_ijab = [t2_ijab_,t2_ijba_]
+        else:
+            t2_ijab = np.conj(oovv_ij/eijab)
+            ed = np.einsum('ijab,ijab', t2_ijab, oovv_ij).real
+            ex = np.einsum('ijab,ijba', t2_ijab, oovv_ij).real
+            if not with_t2:
+                t2_ijab = None
+
+        return ed, ex, t2_ijab
+
+    edx = np.zeros([2])   # direct, exchange
+    essos = np.zeros([2])   # same-spin, opposite-spin
+
     if with_t2:
         t2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
     else:
         t2 = None
 
+    cput1 = logger.timer(mp, 'initialize mp', *cput0)
+
     for ki in range(nkpts):
-      for kj in range(nkpts):
-        for ka in range(nkpts):
-            kb = kconserv[ki,ka,kj]
-            orbo_i = mo_coeff[ki][:,:nocc]
-            orbo_j = mo_coeff[kj][:,:nocc]
-            orbv_a = mo_coeff[ka][:,nocc:]
-            orbv_b = mo_coeff[kb][:,nocc:]
-            oovv_ij[ka] = fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
-                            (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
-                            compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
-        for ka in range(nkpts):
-            kb = kconserv[ki,ka,kj]
+        for kj in range(nkpts):
+            punch_card = np.zeros([nkpts], dtype=bool)
+            for ka in range(nkpts):
+                if punch_card[ka]:
+                    continue
 
-            # Remove zero/padded elements from denominator
-            eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-            n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
-            eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+                kb = kconserv[ki,ka,kj]
 
-            ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-            n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
-            ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+                if kb != ka:
+                    oovv_ij = [get_oovv_ij(ki, kj, ka, kb),
+                        get_oovv_ij(ki, kj, kb, ka)]
+                else:
+                    oovv_ij = get_oovv_ij(ki, kj, ka, kb)
 
-            eijab = lib.direct_sum('ia,jb->ijab',eia,ejb)
-            t2_ijab = np.conj(oovv_ij[ka]/eijab)
-            if with_t2:
-                t2[ki, kj, ka] = t2_ijab
-            woovv = 2*oovv_ij[ka] - oovv_ij[kb].transpose(0,1,3,2)
-            emp2 += np.einsum('ijab,ijab', t2_ijab, woovv).real
+                eijab = get_eijab(ki,kj,ka,kb)
+                ed, ex, t2_ijab = contract_(oovv_ij, eijab, with_t2)
 
-    emp2 /= nkpts
+                if with_t2:
+                    if kb != ka:
+                        t2[ki,kj,ka] = t2_ijab[0]
+                        t2[ki,kj,kb] = t2_ijab[1]
+                    else:
+                        t2[ki,kj,ka] = t2_ijab
+
+                edx[0] += 2*ed
+                edx[1] -= ex
+                essos[0] += ed - ex
+                essos[1] += ed
+
+                punch_card[ka] = punch_card[kb] = True
+
+            cput1 = logger.timer(mp, 'ki,kj= (%d,%d)'%(ki,kj), *cput1)
+
+    logger.timer(mp, 'mp calc', *cput0)
+
+    edx /= nkpts
+    essos /= nkpts
+    lib.logger.info(mp, "E(MP2-D)  : % .10f", edx[0])
+    lib.logger.info(mp, "E(MP2-X)  : % .10f", edx[1])
+    lib.logger.info(mp, "E(MP2-SS) : % .10f", essos[0])
+    lib.logger.info(mp, "E(MP2-OS) : % .10f", essos[1])
+    emp2 = lib.tag_array(np.sum(edx), ed=edx[0], ex=edx[1], ess=essos[0],
+        eos=essos[1])
 
     return emp2, t2
 
@@ -509,8 +574,10 @@ class KMP2(mp2.MP2):
 
         self.mol = mf.mol
         self._scf = mf
-        self.verbose = self.mol.verbose
-        self.stdout = self.mol.stdout
+        # self.verbose = self.mol.verbose
+        # self.stdout = self.mol.stdout
+        self.verbose = mf.verbose
+        self.stdout = mf.stdout
         self.max_memory = mf.max_memory
 
         self.frozen = frozen
@@ -589,4 +656,3 @@ if __name__ == '__main__':
     mymp = mp.KMP2(kmf)
     emp2, t2 = mymp.kernel()
     print(emp2 - -0.204721432828996)
-

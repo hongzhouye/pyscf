@@ -34,6 +34,171 @@ from pyscf.pbc.mp import kmp2
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.mp.kmp2 import _frozen_sanity_check
 from pyscf.lib.parameters import LARGE_DENOM
+from pyscf import __config__
+
+WITH_T2 = getattr(__config__, 'mp_ump2_with_t2', True)
+
+
+def kernel(mp, mo_energy, mo_coeff, mo_occ, verbose=logger.NOTE,
+    with_t2=WITH_T2):
+
+    cput0 = (time.clock(), time.time())
+
+    nmo = mp.nmo
+    nocc = mp.nocc
+    nvir = [nmo[s]-nocc[s] for s in [0,1]]
+    nkpts = mp.nkpts
+
+    mo_e_o = [[mo_energy[s][k][:nocc[s]] for k in range(nkpts)] for s in [0,1]]
+    mo_e_v = [[mo_energy[s][k][nocc[s]:] for k in range(nkpts)] for s in [0,1]]
+
+    dtype = mo_coeff[0][0].dtype
+
+    fao2mo = mp._scf.with_df.ao2mo
+    kconserv = mp.khelper.kconserv
+
+    # Get location of non-zero/padded elements in occupied and virtual space
+    nonzero_ovpadding = padding_k_idx(mp, kind="split")
+    nonzero_opadding = [nonzero_ovpadding[s][0] for s in [0,1]]
+    nonzero_vpadding = [nonzero_ovpadding[s][1] for s in [0,1]]
+
+    if with_t2:
+        t2 = [None,None,None]
+    else:
+        t2 = None
+
+    def get_oovv_ij(s1, s2, ki, kj, ka, kb):
+        orbo_i = mo_coeff[s1][ki][:,:nocc[s1]]
+        orbo_j = mo_coeff[s2][kj][:,:nocc[s2]]
+        orbv_a = mo_coeff[s1][ka][:,nocc[s1]:]
+        orbv_b = mo_coeff[s2][kb][:,nocc[s2]:]
+        return fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
+            (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
+            compact=False).reshape(nocc[s1],nvir[s1],nocc[s2],nvir[s2]).transpose(0,2,1,3) / nkpts
+
+    def get_eijab(s1, s2, ki, kj, ka, kb):
+        # Remove zero/padded elements from denominator
+        eia = LARGE_DENOM * np.ones((nocc[s1], nvir[s1]),
+            dtype=mo_energy[s1][0].dtype)
+        n0_ovp_ia = np.ix_(nonzero_opadding[s1][ki],
+            nonzero_vpadding[s1][ka])
+        eia[n0_ovp_ia] = (mo_e_o[s1][ki][:,None] -
+            mo_e_v[s1][ka])[n0_ovp_ia]
+
+        ejb = LARGE_DENOM * np.ones((nocc[s2], nvir[s2]),
+            dtype=mo_energy[s2][0].dtype)
+        n0_ovp_jb = np.ix_(nonzero_opadding[s2][kj],
+            nonzero_vpadding[s2][kb])
+        ejb[n0_ovp_jb] = (mo_e_o[s2][kj][:,None] -
+            mo_e_v[s2][kb])[n0_ovp_jb]
+
+        return lib.direct_sum('ia,jb->ijab',eia,ejb)
+
+    def contract_(oovv_ij, eijab, with_t2, same_spin):
+        if isinstance(oovv_ij, list):
+            t2_ijab_ = np.conj(oovv_ij[0]/eijab)
+            ed = np.einsum('ijab,ijab', t2_ijab_, oovv_ij[0]).real
+            ex = np.einsum('ijab,ijba', t2_ijab_, oovv_ij[1]).real
+            t2_ijba_ = np.conj(oovv_ij[1]/eijab.transpose(0,1,3,2))
+            ed += np.einsum('ijab,ijab', t2_ijba_, oovv_ij[1]).real
+            ex += np.einsum('ijab,ijba', t2_ijba_, oovv_ij[0]).real
+            if not with_t2:
+                t2_ijab = None
+            else:
+                t2_ijab = [t2_ijab_,t2_ijba_]
+        else:
+            t2_ijab = np.conj(oovv_ij/eijab)
+            ed = np.einsum('ijab,ijab', t2_ijab, oovv_ij).real
+            if same_spin:
+                ex = np.einsum('ijab,ijba', t2_ijab, oovv_ij).real
+            else:
+                ex = 0.
+            if not with_t2:
+                t2_ijab = None
+
+        return ed, ex, t2_ijab
+
+    edx = np.zeros([2])   # direct, exchange
+    essos = np.zeros([2])   # same-spin, opposite-spin
+
+    cput1 = logger.timer(mp, 'initialize mp', *cput0)
+
+    for is12,s12 in enumerate([(0,0),(0,1),(1,1)]):
+        s1,s2 = s12
+        spname = "ab"[s1] + "ab"[s2]
+
+        if with_t2:
+            t2[is12] = np.zeros((nkpts, nkpts, nkpts,
+                nocc[s1], nocc[s2], nvir[s1], nvir[s2]), dtype=complex)
+
+        if s1 == s2:    # same-spin
+            oovv_ij = np.zeros((nkpts,nocc[s1],nocc[s2],nvir[s1],nvir[s2]),
+                dtype=dtype)
+            for ki in range(nkpts):
+                for kj in range(nkpts):
+                    punch_card = np.zeros([nkpts], dtype=bool)
+                    for ka in range(nkpts):
+                        if punch_card[ka]:
+                            continue
+
+                        kb = kconserv[ki,ka,kj]
+
+                        if ka != kb:
+                            oovv_ij = [get_oovv_ij(s1,s2,ki,kj,ka,kb),
+                                get_oovv_ij(s1,s2,ki,kj,kb,ka)]
+                        else:
+                            oovv_ij = get_oovv_ij(s1,s2,ki,kj,ka,kb)
+
+                        eijab = get_eijab(s1,s2,ki,kj,ka,kb)
+                        ed, ex, t2_ijab = contract_(
+                            oovv_ij,eijab,with_t2,True)
+
+                        if with_t2:
+                            if ka != kb:
+                                t2[is12][ki, kj, ka] = t2_ijab[0]
+                                t2[is12][ki, kj, kb] = t2_ijab[1]
+                            else:
+                                t2[is12][ki, kj, ka] = t2_ijab
+
+                        edx[0] += ed
+                        edx[1] -= ex
+                        essos[0] += ed - ex
+
+                        punch_card[ka] = punch_card[kb] = True
+
+                    cput1 = logger.timer(mp,
+                        'spin= %s ki,kj= (%d,%d)'%(spname,ki,kj), *cput1)
+        else:       # opposite-spin
+            for ki in range(nkpts):
+                for kj in range(nkpts):
+                    for ka in range(nkpts):
+                        kb = kconserv[ki,ka,kj]
+                        oovv_ij = get_oovv_ij(s1,s2,ki,kj,ka,kb)
+                        eijab = get_eijab(s1,s2,ki,kj,ka,kb)
+                        ed, ex, t2_ijab = contract_(oovv_ij,eijab,with_t2,False)
+                        ed *= 2.    # Eab = Eba
+                        if with_t2:
+                            t2[is12][ki, kj, ka] = t2_ijab
+                        edx[0] += ed
+                        essos[1] += ed
+
+                        cput1 = logger.timer(mp,
+                            'spin= %s ki,kj= (%d,%d)'%(spname,ki,kj),
+                            *cput1)
+
+    logger.timer(mp, 'mp calc', *cput0)
+
+    edx *= 0.5 / nkpts
+    essos *= 0.5 / nkpts
+    lib.logger.info(mp, "E(MP2-D)  : % .10f", edx[0])
+    lib.logger.info(mp, "E(MP2-X)  : % .10f", edx[1])
+    lib.logger.info(mp, "E(MP2-SS) : % .10f", essos[0])
+    lib.logger.info(mp, "E(MP2-OS) : % .10f", essos[1])
+    emp2 = lib.tag_array(np.sum(edx), ed=edx[0], ex=edx[1], ess=essos[0],
+        eos=essos[1])
+
+    return emp2, t2
+
 
 def padding_k_idx(mp, kind="split"):
     """For a description, see `padding_k_idx` in kmp2.py.
@@ -375,15 +540,16 @@ def get_frozen_mask(mp):
 
 
 def _add_padding(mp, mo_coeff, mo_energy):
-    raise NotImplementedError("Implementation needs to be checked first")
+    # raise NotImplementedError("Implementation needs to be checked first")
     nmo = mp.nmo
     nocc = mp.nocc
+    nkpts = len(mo_coeff[0])
 
     # Check if these are padded mo coefficients and energies
-    if not np.all([x.shape[0] == nmo for x in mo_coeff]):
+    if not np.all([x.shape[1] == nmo[s] for s in [0,1] for x in mo_coeff[s]]):
         mo_coeff = padded_mo_coeff(mp, mo_coeff)
 
-    if not np.all([x.shape[0] == nmo for x in mo_energy]):
+    if not np.all([x.shape[0] == nmo[s] for s in [0,1] for x in mo_energy[s]]):
         mo_energy = padded_mo_energy(mp, mo_energy)
     return mo_coeff, mo_energy
 
@@ -393,22 +559,26 @@ class KUMP2(kmp2.KMP2):
     get_nmo = get_nmo
     get_frozen_mask = get_frozen_mask
 
-    def kernel(self, mo_energy=None, mo_coeff=None):
-        raise NotImplementedError
+    def kernel(self, mo_energy=None, mo_coeff=None, mo_occ=None,
+        with_t2=WITH_T2):
+        # raise NotImplementedError
         if mo_energy is None:
             mo_energy = self.mo_energy
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
-        if mo_energy is None or mo_coeff is None:
+        if mo_occ is None:
+            mo_occ = self.mo_occ
+        if mo_energy is None or mo_coeff is None or mo_occ is None:
             log = logger.Logger(self.stdout, self.verbose)
-            log.warn('mo_coeff, mo_energy are not given.\n'
+            log.warn('mo_coeff, mo_energy, or mo_occ is not given.\n'
                      'You may need to call mf.kernel() to generate them.')
             raise RuntimeError
 
         mo_coeff, mo_energy = _add_padding(self, mo_coeff, mo_energy)
 
         self.e_corr, self.t2 = \
-                kernel(self, mo_energy, mo_coeff, verbose=self.verbose)
+                kernel(self, mo_energy, mo_coeff, mo_occ, with_t2=with_t2,
+                verbose=self.verbose)
         logger.log(self, 'KMP2 energy = %.15g', self.e_corr)
         return self.e_corr, self.t2
 
