@@ -625,24 +625,24 @@ def get_mom_guess(nocc, mo_coeff0, orb_swap):
 When "mom" is set "True", "mo_coeff0" must be given to "kernel".''')
 
     nmo = mo_coeff0.shape[1]
+    mo_occ0 = numpy.asarray([2. if i < nocc else 0. for i in range(nmo)])
     if orb_swap is None:
-        C = mo_coeff0
+        mo_occ = mo_occ0
     else:
         try:
-            C = mo_coeff0.copy()
+            mo_occ = mo_occ0.copy()
             for swap_pair in orb_swap:
                 ii,aa = swap_pair
                 i = nocc - 1 - ii
                 a = nocc - 1 + aa
                 assert((i>=0 and i<nocc) and (a>=nocc and a<nmo))
-                C[:,i] = mo_coeff0[:,a].copy()
-                C[:,a] = mo_coeff0[:,i].copy()
+                mo_occ[i] = mo_occ0[a]
+                mo_occ[a] = mo_occ0[i]
         except:
             raise RuntimeError('''
 Generating mom guess failed. Please check "mf.orb_swap".''')
 
-    Co = C[:,:nocc]
-    dm0 = 2. * Co @ Co.T.conj()
+    dm0 = make_rdm1(mo_coeff0, mo_occ)
 
     return dm0
 
@@ -975,6 +975,21 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
         f = level_shift(s1e, dm*.5, f, level_shift_factor)
     return f
 
+def rearrange_mo_mom(no, proj_pop, mo_energy, mo_coeff):
+    nmo = len(proj_pop)
+    pop_idx = numpy.argsort(proj_pop)[::-1]
+    pop_idx_o = pop_idx[:no]
+    if not numpy.allclose(numpy.sort(pop_idx_o), numpy.arange(no)):
+        pop_idx_v = pop_idx[no:]
+        pop_idx_o = pop_idx_o[numpy.argsort(mo_energy[pop_idx_o])]
+        pop_idx_v = pop_idx_v[numpy.argsort(mo_energy[pop_idx_v])]
+        mo_energy_ = mo_energy.copy()
+        mo_energy[:no] = mo_energy_[pop_idx_o]
+        mo_energy[no:] = mo_energy_[pop_idx_v]
+        mo_coeff_ = mo_coeff.copy()
+        mo_coeff[:,:no] = mo_coeff_[:,pop_idx_o]
+        mo_coeff[:,no:] = mo_coeff_[:,pop_idx_v]
+
 def get_occ(mf, mo_energy=None, mo_coeff=None, dmref=None, s1e=None):
     '''Label the occupancies for each orbital
 
@@ -1007,14 +1022,14 @@ def get_occ(mf, mo_energy=None, mo_coeff=None, dmref=None, s1e=None):
         mo_occ[e_idx[:nocc]] = 2
     else:   # mom
         if s1e is None: s1e = mf.get_ovlp()
+        nmo = mo_energy.size
+        no = mf.mol.nelectron // 2
+        mo_occ = numpy.zeros(nmo)
+        mo_occ[:no] = 2.
         SC = s1e @ mo_coeff
         proj_pop = numpy.diag(SC.T @ dmref @ SC)
-        pop_idx = numpy.argsort(proj_pop)[::-1]
-        e_sort = mo_energy[pop_idx]
-        nmo = mo_energy.size
-        mo_occ = numpy.zeros(nmo)
-        nocc = mf.mol.nelectron // 2
-        mo_occ[pop_idx[:nocc]] = 2
+        rearrange_mo_mom(no, proj_pop, mo_energy, mo_coeff)
+        e_sort = mo_energy
     if mf.verbose >= logger.INFO and nocc < nmo:
         if e_sort[nocc-1]+1e-3 > e_sort[nocc]:
             logger.warn(mf, 'HOMO %.15g == LUMO %.15g',

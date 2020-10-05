@@ -270,12 +270,13 @@ def get_occ(mf, mo_energy=None, mo_coeff=None, dmref=None, s1e=None):
         nmo = mo_energy[0].size
         mo_occ = numpy.zeros_like(mo_energy)
         for s in [0,1]:
+            no = mf.nelec[s]
+            mo_occ[s][:no] = 1.
+
             SC = s1e @ mo_coeff[s]
             proj_pop = numpy.diag(SC.T @ dmref[s] @ SC)
-            pop_idx = numpy.argsort(proj_pop)[::-1]
-            e_sort[s] = mo_energy[s][pop_idx]
-            mo_occ[s][pop_idx[:mf.nelec[s]]] = 1
-        e_sort_a, e_sort_b = e_sort
+            hf.rearrange_mo_mom(no, proj_pop, mo_energy[s], mo_coeff[s])
+        e_sort_a, e_sort_b = mo_energy
         n_a, n_b = mf.nelec
     if mf.verbose >= logger.INFO and n_a < nmo and n_b > 0 and n_b < nmo:
         if e_sort_a[n_a-1]+1e-3 > e_sort_a[n_a]:
