@@ -148,7 +148,11 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
 
                 punch_card[ka] = punch_card[kb] = True
 
-            cput1 = logger.timer(mp, 'ki,kj= (%d,%d)'%(ki,kj), *cput1)
+            if nkpts < 6:
+                cput1 = logger.timer(mp, 'ki,kj= (%d,%d)'%(ki,kj), *cput1)
+
+        if nkpts >= 6:
+            cput1 = logger.timer(mp, 'ki= %d'%(ki), *cput1)
 
     logger.timer(mp, 'mp calc', *cput0)
 

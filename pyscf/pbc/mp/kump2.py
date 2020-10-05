@@ -166,8 +166,12 @@ def kernel(mp, mo_energy, mo_coeff, mo_occ, verbose=logger.NOTE,
 
                         punch_card[ka] = punch_card[kb] = True
 
+                    if nkpts < 6:
+                        cput1 = logger.timer(mp,
+                            'spin= %s ki,kj= (%d,%d)'%(spname,ki,kj), *cput1)
+                if nkpts >= 6:
                     cput1 = logger.timer(mp,
-                        'spin= %s ki,kj= (%d,%d)'%(spname,ki,kj), *cput1)
+                        'spin= %s ki= %d'%(spname,ki), *cput1)
         else:       # opposite-spin
             for ki in range(nkpts):
                 for kj in range(nkpts):
@@ -182,9 +186,12 @@ def kernel(mp, mo_energy, mo_coeff, mo_occ, verbose=logger.NOTE,
                         edx[0] += ed
                         essos[1] += ed
 
+                    if nkpts < 6:
                         cput1 = logger.timer(mp,
-                            'spin= %s ki,kj= (%d,%d)'%(spname,ki,kj),
-                            *cput1)
+                            'spin= %s ki,kj= (%d,%d)'%(spname,ki,kj), *cput1)
+                if nkpts >= 6:
+                    cput1 = logger.timer(mp,
+                        'spin= %s ki= %d'%(spname,ki), *cput1)
 
     logger.timer(mp, 'mp calc', *cput0)
 
