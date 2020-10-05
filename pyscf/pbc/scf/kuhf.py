@@ -126,35 +126,59 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None, dmref=None, s1e=None):
 
     This is a k-point version of scf.hf.SCF.get_occ
     '''
-
     if mo_energy_kpts is None: mo_energy_kpts = mf.mo_energy
 
     nocc_a, nocc_b = mf.nelec
-    mo_energy = np.sort(np.hstack(mo_energy_kpts[0]))
-    fermi_a = mo_energy[nocc_a-1]
+    nkpts = len(mo_energy_kpts[0])
     mo_occ_kpts = [[], []]
     if dmref is None:
+        mo_energy = np.sort(np.hstack(mo_energy_kpts[0]))
+        fermi_a = mo_energy[nocc_a-1]
         for mo_e in mo_energy_kpts[0]:
             mo_occ_kpts[0].append((mo_e <= fermi_a).astype(np.double))
     else:   # MOM
         if s1e is None: s1e = mf.get_ovlp()
-        mo_occ_kpts[0] = np.asarray(khf.get_occ(
-            mf, mo_energy_kpts[0], mo_coeff_kpts[0], dmref[0], s1e)) * 0.5
+        verbose0 = mf.verbose
+        mf.verbose = 0
+        mo_occ_kpts[0] = 0.5 * np.asarray(khf.get_occ(
+            mf, mo_energy_kpts[0], mo_coeff_kpts[0], dmref[0]*2., s1e))
+        mf.verbose = verbose0
+        no_kpts = np.sum(mo_occ_kpts[0], axis=1).astype(int)
+        mo_energy = np.concatenate([
+            np.sort(np.concatenate(
+                [mo_energy_kpts[0][ik][:no_kpts[ik]] for ik in range(nkpts)])),
+            np.sort(np.concatenate(
+                [mo_energy_kpts[0][ik][no_kpts[ik]:] for ik in range(nkpts)]))
+        ])
+        fermi_a = mo_energy[nocc_a-1]
     if nocc_a < len(mo_energy):
         logger.info(mf, 'alpha HOMO = %.12g  LUMO = %.12g', fermi_a, mo_energy[nocc_a])
     else:
         logger.info(mf, 'alpha HOMO = %.12g  (no LUMO because of small basis) ', fermi_a)
 
     if nocc_b > 0:
-        mo_energy = np.sort(np.hstack(mo_energy_kpts[1]))
-        fermi_b = mo_energy[nocc_b-1]
         if dmref is None:
+            mo_energy = np.sort(np.hstack(mo_energy_kpts[1]))
+            fermi_b = mo_energy[nocc_b-1]
             for mo_e in mo_energy_kpts[1]:
                 mo_occ_kpts[1].append((mo_e <= fermi_b).astype(np.double))
         else:   # MOM
             if s1e is None: s1e = mf.get_ovlp()
-            mo_occ_kpts[1] = np.asarray(khf.get_occ(
-                mf, mo_energy_kpts[1], mo_coeff_kpts[1], dmref[1], s1e)) * 0.5
+            verbose0 = mf.verbose
+            mf.verbose = 0
+            mo_occ_kpts[1] = 0.5 * np.asarray(khf.get_occ(
+                mf, mo_energy_kpts[1], mo_coeff_kpts[1], dmref[1]*2., s1e))
+            mf.verbose = verbose0
+            no_kpts = np.sum(mo_occ_kpts[1], axis=1).astype(int)
+            mo_energy = np.concatenate([
+                np.sort(np.concatenate(
+                    [mo_energy_kpts[1][ik][:no_kpts[ik]]
+                        for ik in range(nkpts)])),
+                np.sort(np.concatenate(
+                    [mo_energy_kpts[1][ik][no_kpts[ik]:]
+                        for ik in range(nkpts)]))
+            ])
+            fermi_b = mo_energy[nocc_b-1]
         if nocc_b < len(mo_energy):
             logger.info(mf, 'beta HOMO = %.12g  LUMO = %.12g', fermi_b, mo_energy[nocc_b])
         else:
@@ -496,10 +520,10 @@ class KUHF(khf.KSCF, pbcuhf.UHF):
         nkpts = len(mo_coeff[0])
 
         C_ref = mo_coeff_ref
-        if len(mo_coeff_ref) == nkpts: C_ref = [mo_coeff_ref] * 2
+        if C_ref[0][0].ndim == 1:   C_ref = [mo_coeff_ref] * 2
 
         no_ref = nocc_ref
-        if len(nocc_ref) == nkpts: no_ref = [nocc_ref] * 2
+        if isinstance(no_ref[0][0], int):   no_ref = [nocc_ref] * 2
 
         no_trans = True
         for s in [0,1]:

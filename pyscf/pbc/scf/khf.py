@@ -200,23 +200,31 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None, dmref=None, s1e=None):
         mo_occ_kpts = []
         for mo_e in mo_energy_kpts:
             mo_occ_kpts.append((mo_e <= fermi).astype(np.double) * 2)
-    else:   # MOM
+    else:
+        # MOM. Note that we only consider redistributing electrons w/i a k-channel, i.e., for each k-channel, nocc(k) is preserved.
         if s1e is None: s1e = mf.get_ovlp()
-        proj_pop = [None] * nkpts
+        mo_occ_kpts = [np.zeros_like(mo_energy_kpts[ik]) for ik in range(nkpts)]
+        no_kpts = np.zeros([nkpts], dtype=int)
         for ik in range(nkpts):
             SC = s1e[ik] @ mo_coeff_kpts[ik]
-            proj_pop[ik] = np.diag(SC.T.conj() @ dmref[ik] @ SC)
-            if np.max(np.abs(np.imag(proj_pop[ik]))) > 1.E-6:
+            no_ = np.trace(dmref[ik] @ s1e[ik]) * 0.5
+            no = int(np.round(no_))
+            if np.abs(float(no)-no_) > 1.E-5:
+                logger.warn(mf, "dmref for k-point # %d has a fractional electron number %.6f", ik, no_)
+            no_kpts[ik] = no
+            mo_occ_kpts[ik][:no] = 2.
+            proj_pop = np.diag(SC.T.conj() @ dmref[ik] @ SC)
+            if np.max(np.abs(np.imag(proj_pop))) > 1.E-6:
                 logger.warn(mf, "MOM projected population has large imaginary part for k-point # %d", ik)
-            proj_pop[ik] = np.real(proj_pop[ik])
-        proj_pop = np.asarray(proj_pop)
-        idx_pop = np.argsort(proj_pop.ravel())[::-1]
-        nmo = mo_energy_kpts[0].size
-        idx_pop_k = np.floor_divide(idx_pop, nmo)
-        idx_pop_mo = np.mod(idx_pop, nmo)
-        mo_occ_kpts = [np.zeros_like(mo_energy_kpts[ik]) for ik in range(nkpts)]
-        for ik,imo in zip(idx_pop_k[:nocc],idx_pop_mo[:nocc]):
-            mo_occ_kpts[ik][imo] = 2.
+            proj_pop = np.real(proj_pop)
+            mol_hf.rearrange_mo_mom(no, proj_pop, mo_energy_kpts[ik],
+                mo_coeff_kpts[ik])
+        mo_energy = np.concatenate([
+            np.sort(np.concatenate(
+                [mo_energy_kpts[ik][:no_kpts[ik]] for ik in range(nkpts)])),
+            np.sort(np.concatenate(
+                [mo_energy_kpts[ik][no_kpts[ik]:] for ik in range(nkpts)]))
+        ])
 
     if nocc < mo_energy.size:
         logger.info(mf, 'HOMO = %.12g  LUMO = %.12g',
