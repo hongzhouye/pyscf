@@ -29,8 +29,9 @@ import time
 import numpy as np
 
 from pyscf import lib
-from pyscf.lib import logger
+from pyscf.lib import logger, einsum
 from pyscf.pbc.mp import kmp2
+from pyscf.pbc import df
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.mp.kmp2 import _frozen_sanity_check
 from pyscf.lib.parameters import LARGE_DENOM
@@ -67,14 +68,19 @@ def kernel(mp, mo_energy, mo_coeff, mo_occ, verbose=logger.NOTE,
     else:
         t2 = None
 
-    def get_oovv_ij(s1, s2, ki, kj, ka, kb):
-        orbo_i = mo_coeff[s1][ki][:,:nocc[s1]]
-        orbo_j = mo_coeff[s2][kj][:,:nocc[s2]]
-        orbv_a = mo_coeff[s1][ka][:,nocc[s1]:]
-        orbv_b = mo_coeff[s2][kb][:,nocc[s2]:]
-        return fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
-            (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
-            compact=False).reshape(nocc[s1],nvir[s1],nocc[s2],nvir[s2]).transpose(0,2,1,3) / nkpts
+    def get_oovv_ij(s1, s2, ki, kj, ka, kb, Lov=None):
+        if Lov is None:
+            orbo_i = mo_coeff[s1][ki][:,:nocc[s1]]
+            orbo_j = mo_coeff[s2][kj][:,:nocc[s2]]
+            orbv_a = mo_coeff[s1][ka][:,nocc[s1]:]
+            orbv_b = mo_coeff[s2][kb][:,nocc[s2]:]
+            return fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
+                (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
+                compact=False).reshape(
+                nocc[s1],nvir[s1],nocc[s2],nvir[s2]).transpose(0,2,1,3) / nkpts
+        else:
+            return (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[s1][ki, ka],
+                Lov[s2][kj, kb]).transpose(0,2,1,3)
 
     def get_eijab(s1, s2, ki, kj, ka, kb):
         # Remove zero/padded elements from denominator
@@ -121,6 +127,11 @@ def kernel(mp, mo_energy, mo_coeff, mo_occ, verbose=logger.NOTE,
     edx = np.zeros([2])   # direct, exchange
     essos = np.zeros([2])   # same-spin, opposite-spin
 
+    if not mp.with_df or type(mp._scf.with_df) is not df.GDF:
+        Lov = None
+    else:
+        Lov = _init_mp_df_eris(mp, mo_coeff=mo_coeff, nocc=nocc)
+
     cput1 = logger.timer(mp, 'initialize mp', *cput0)
 
     for is12,s12 in enumerate([(0,0),(0,1),(1,1)]):
@@ -144,10 +155,10 @@ def kernel(mp, mo_energy, mo_coeff, mo_occ, verbose=logger.NOTE,
                         kb = kconserv[ki,ka,kj]
 
                         if ka != kb:
-                            oovv_ij = [get_oovv_ij(s1,s2,ki,kj,ka,kb),
-                                get_oovv_ij(s1,s2,ki,kj,kb,ka)]
+                            oovv_ij = [get_oovv_ij(s1,s2,ki,kj,ka,kb,Lov),
+                                get_oovv_ij(s1,s2,ki,kj,kb,ka,Lov)]
                         else:
-                            oovv_ij = get_oovv_ij(s1,s2,ki,kj,ka,kb)
+                            oovv_ij = get_oovv_ij(s1,s2,ki,kj,ka,kb,Lov)
 
                         eijab = get_eijab(s1,s2,ki,kj,ka,kb)
                         ed, ex, t2_ijab = contract_(
@@ -177,7 +188,7 @@ def kernel(mp, mo_energy, mo_coeff, mo_occ, verbose=logger.NOTE,
                 for kj in range(nkpts):
                     for ka in range(nkpts):
                         kb = kconserv[ki,ka,kj]
-                        oovv_ij = get_oovv_ij(s1,s2,ki,kj,ka,kb)
+                        oovv_ij = get_oovv_ij(s1,s2,ki,kj,ka,kb,Lov)
                         eijab = get_eijab(s1,s2,ki,kj,ka,kb)
                         ed, ex, t2_ijab = contract_(oovv_ij,eijab,with_t2,False)
                         ed *= 2.    # Eab = Eba
@@ -205,6 +216,17 @@ def kernel(mp, mo_energy, mo_coeff, mo_occ, verbose=logger.NOTE,
         eos=essos[1])
 
     return emp2, t2
+
+
+def _init_mp_df_eris(mp, mo_coeff=None, nocc=None):
+    """ Get Lia_P for both spin, where i for occ MO, a for vir MO, and P for aux basis.
+    """
+    if mo_coeff is None: mo_coeff = mp._scf.mo_coeff
+    if nocc is None: nocc = mp.nocc
+    Lov = [kmp2._init_mp_df_eris(mp, mo_coeff=mo_coeff[s], nocc=nocc[s])
+        for s in [0,1]]
+
+    return Lov
 
 
 def padding_k_idx(mp, kind="split"):

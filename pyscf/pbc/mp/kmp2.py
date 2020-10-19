@@ -43,7 +43,7 @@ from pyscf import __config__
 WITH_T2 = getattr(__config__, 'mp_mp2_with_t2', True)
 
 def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
-    cpu0 = (time.clock(), time.time())
+    cput0 = (time.clock(), time.time())
     log = logger.Logger(mp.stdout, mp.verbose)
 
     mp.dump_flags()
@@ -61,14 +61,19 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     # Get location of non-zero/padded elements in occupied and virtual space
     nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
 
-    def get_oovv_ij(ki, kj, ka, kb):
-        orbo_i = mo_coeff[ki][:,:nocc]
-        orbo_j = mo_coeff[kj][:,:nocc]
-        orbv_a = mo_coeff[ka][:,nocc:]
-        orbv_b = mo_coeff[kb][:,nocc:]
-        return fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
-            (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
-            compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
+    def get_oovv_ij(ki, kj, ka, kb, Lov=None):
+        if Lov is None:
+            orbo_i = mo_coeff[ki][:,:nocc]
+            orbo_j = mo_coeff[kj][:,:nocc]
+            orbv_a = mo_coeff[ka][:,nocc:]
+            orbv_b = mo_coeff[kb][:,nocc:]
+            return fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
+                (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
+                compact=False).reshape(
+                nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
+        else:
+            return (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki, ka], Lov[kj,
+                kb]).transpose(0,2,1,3)
 
     def get_eijab(ki, kj, ka, kb):
         # Remove zero/padded elements from denominator
@@ -118,81 +123,64 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
         t2 = None
 
     if not mp.with_df or type(mp._scf.with_df) is not df.GDF:
-        for ki in range(nkpts):
-          for kj in range(nkpts):
-            for ka in range(nkpts):
-                kb = kconserv[ki,ka,kj]
-                orbo_i = mo_coeff[ki][:,:nocc]
-                orbo_j = mo_coeff[kj][:,:nocc]
-                orbv_a = mo_coeff[ka][:,nocc:]
-                orbv_b = mo_coeff[kb][:,nocc:]
-                oovv_ij[ka] = fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
-                                (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
-                                compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
-            for ka in range(nkpts):
-                kb = kconserv[ki,ka,kj]
-
-                # Remove zero/padded elements from denominator
-                eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
-                eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
-
-                ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
-                ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
-
-                eijab = lib.direct_sum('ia,jb->ijab',eia,ejb)
-
-                if mp.regularized:
-                    regulator = (1 - np.exp(1.45 * eijab))**2
-                    eijab /= regulator
-
-                t2_ijab = np.conj(oovv_ij[ka]/eijab)
-                if with_t2:
-                    t2[ki, kj, ka] = t2_ijab
-                woovv = 2*oovv_ij[ka] - oovv_ij[kb].transpose(0,1,3,2)
-                emp2 += einsum('ijab,ijab', t2_ijab, woovv).real
+        Lov = None
     else:
-        Lov = _init_mp_df_eris(mp)
+        Lov = _init_mp_df_eris(mp, mo_coeff=mo_coeff, nocc=nocc)
 
-        for ki in range(nkpts):
-          for kj in range(nkpts):
+    cput1 = logger.timer(mp, 'initialize mp', *cput0)
+
+    for ki in range(nkpts):
+        for kj in range(nkpts):
+            punch_card = np.zeros([nkpts], dtype=bool)
             for ka in range(nkpts):
-                kb = kconserv[ki, ka, kj]
-                # (ia|jb)
-                oovv_ij[ka] = (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki, ka], Lov[kj, kb]).transpose(0,2,1,3)
-            for ka in range(nkpts):
+                if punch_card[ka]:
+                    continue
+
                 kb = kconserv[ki,ka,kj]
 
-                # Remove zero/padded elements from denominator
-                eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
-                eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+                if ka != kb:
+                    oovv_ij = [get_oovv_ij(ki,kj,ka,kb,Lov),
+                        get_oovv_ij(ki,kj,kb,ka,Lov)]
+                else:
+                    oovv_ij = get_oovv_ij(ki,kj,ka,kb,Lov)
 
-                ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
-                ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+                eijab = get_eijab(ki,kj,ka,kb)
+                ed, ex, t2_ijab = contract_(oovv_ij,eijab,with_t2)
 
-                eijab = lib.direct_sum('ia,jb->ijab',eia,ejb)
-
-                if mp.regularized:
-                    regulator = (1 - np.exp(1.45 * eijab))**2
-                    eijab /= regulator
-
-                t2_ijab = np.conj(oovv_ij[ka]/eijab)
                 if with_t2:
-                    t2[ki, kj, ka] = t2_ijab
-                woovv = 2*oovv_ij[ka] - oovv_ij[kb].transpose(0,1,3,2)
-                emp2 += einsum('ijab,ijab', t2_ijab, woovv).real
+                    if ka != kb:
+                        t2[ki, kj, ka] = t2_ijab[0]
+                        t2[ki, kj, kb] = t2_ijab[1]
+                    else:
+                        t2[ki, kj, ka] = t2_ijab
 
-    log.timer("KMP2", *cpu0)
+                edx[0] += 2*ed
+                edx[1] -= ex
+                essos[0] += ed - ex
 
-    emp2 /= nkpts
+                punch_card[ka] = punch_card[kb] = True
+
+            if nkpts < 6:
+                cput1 = logger.timer(mp, 'ki,kj= (%d,%d)'%(ki,kj), *cput1)
+        if nkpts >= 6:
+            cput1 = logger.timer(mp, 'ki= %d'%(ki), *cput1)
+
+    log.timer("KMP2", *cput0)
+
+    edx /= nkpts
+    essos /= nkpts
+    lib.logger.info(mp, "E(MP2-D)  : % .10f", edx[0])
+    lib.logger.info(mp, "E(MP2-X)  : % .10f", edx[1])
+    lib.logger.info(mp, "E(MP2-SS) : % .10f", essos[0])
+    lib.logger.info(mp, "E(MP2-OS) : % .10f", essos[1])
+    emp2 = lib.tag_array(np.sum(edx), ed=edx[0], ex=edx[1], ess=essos[0],
+        eos=essos[1])
 
     return emp2, t2
 
 
-def _init_mp_df_eris(mp):
+def _init_mp_df_eris(mp, mo_coeff=None, nocc=None):
+    # @@HY: FIXME: make it compatible with frozen-core
     """Add 3-center electron repulsion integrals, i.e. (L|pq), in `eris`,
     where `L` denotes DF auxiliary basis functions and `p` and `q` canonical
     crystalline orbitals. Note that `p` and `q` contain kpt indices `kp` and `kq`,
@@ -222,12 +210,20 @@ def _init_mp_df_eris(mp):
         # DF-driven CCSD implementation.
         raise NotImplementedError
 
-    nocc = mp.nocc
-    nmo = mp.nmo
-    nvir = nmo - nocc
-    nao = cell.nao_nr()
+    if mo_coeff is None and nocc is None:
+        nocc = mp.nocc
+        nmo = mp.nmo
+        nvir = nmo - nocc
+        nao = cell.nao_nr()
 
-    mo_coeff = mp._scf.mo_coeff
+        mo_coeff = mp._scf.mo_coeff
+    elif not (mo_coeff is None or nocc is None):
+        nao, nmo = mo_coeff[0].shape
+        nvir = nmo - nocc
+    else:
+        log.WARN("mo_coeff and mo_occ must be both given or both None.%s", "")
+        raise RuntimeError
+
     kpts = mp.kpts
     nkpts = len(kpts)
     if gamma_point(kpts):
