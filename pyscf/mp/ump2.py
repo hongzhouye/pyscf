@@ -87,7 +87,8 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbos
         # @@HY: special treatment for QP-MP2
         eajb_ab = lib.direct_sum('a+jb->jab', eia_a[i], eia_b)
         if i == nocca-1:
-            eajb_ab[nocca-1,0,0] = 1.E14
+            if eajb_ab[nocca-1,0,0] < 1.E-10:
+                eajb_ab[nocca-1,0,0] = 1.E14
         t2i = eris_ovov.conj()/eajb_ab
         emp2 += numpy.einsum('JaB,JaB', t2i, eris_ovov)
         if with_t2:
