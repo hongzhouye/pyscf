@@ -31,17 +31,26 @@ class PBCOpt(object):
                                  cell._bas.ctypes.data_as(ctypes.c_void_p), nbas,
                                  cell._env.ctypes.data_as(ctypes.c_void_p))
 
-    def init_rcut_cond(self, cell, precision=None):
+    def init_rcut_cond(self, cell, precision=None, rcut_sp=None):
         if precision is None: precision = cell.precision
         rcut = numpy.array([cell.bas_rcut(ib, precision)
                             for ib in range(cell.nbas)])
         natm = ctypes.c_int(cell._atm.shape[0])
         nbas = ctypes.c_int(cell._bas.shape[0])
-        libpbc.PBCset_rcut_cond(self._this,
+        if rcut_sp is None:
+            libpbc.PBCset_rcut_cond(self._this,
                                 rcut.ctypes.data_as(ctypes.c_void_p),
                                 cell._atm.ctypes.data_as(ctypes.c_void_p), natm,
                                 cell._bas.ctypes.data_as(ctypes.c_void_p), nbas,
                                 cell._env.ctypes.data_as(ctypes.c_void_p))
+        else:
+            libpbc.PBCset_rcut_cond_sp(self._this,
+                                rcut.ctypes.data_as(ctypes.c_void_p),
+                                rcut_sp.ctypes.data_as(ctypes.c_void_p),
+                                cell._atm.ctypes.data_as(ctypes.c_void_p), natm,
+                                cell._bas.ctypes.data_as(ctypes.c_void_p), nbas,
+                                cell._env.ctypes.data_as(ctypes.c_void_p))
+
         return self
 
     def del_rcut_cond(self):
@@ -57,4 +66,3 @@ class PBCOpt(object):
 class _CPBCOpt(ctypes.Structure):
     _fields_ = [('rrcut', ctypes.c_void_p),
                 ('fprescreen', ctypes.c_void_p)]
-

@@ -182,7 +182,14 @@ def wrap_int3c(cell, auxcell, intor='int3c2e', aosym='s1', comp=1,
         if intor[:3] != 'ECP':
             libpbc.CINTdel_pairdata_optimizer(cintopt)
     if pbcopt is None:
-        pbcopt = _pbcintor.PBCOpt(pcell).init_rcut_cond(pcell)
+        # pbcopt = _pbcintor.PBCOpt(pcell).init_rcut_cond(pcell)
+        # @@HY: added shellpair screening
+        rcut_sp = getattr(cell, "rcut_sp", None)
+        if not rcut_sp is None:
+            lib.logger.debug(cell,
+                         "\n*** Enabling shellpair-specific prescreening ***%s",
+                         "\n")
+        pbcopt = _pbcintor.PBCOpt(pcell).init_rcut_cond(pcell, rcut_sp=rcut_sp)
     if isinstance(pbcopt, _pbcintor.PBCOpt):
         cpbcopt = pbcopt._this
     else:
@@ -192,6 +199,7 @@ def wrap_int3c(cell, auxcell, intor='int3c2e', aosym='s1', comp=1,
         shls_slice = (shls_slice[0], shls_slice[1],
                       nbas+shls_slice[2], nbas+shls_slice[3],
                       nbas*2+shls_slice[4], nbas*2+shls_slice[5])
+        _ = pbcopt._this == lib.c_null_ptr()
         drv(getattr(libpbc, intor), getattr(libpbc, fill),
             out.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nkptij), ctypes.c_int(nkpts),
@@ -217,4 +225,3 @@ def fill_2c2e(cell, auxcell, intor='int2c2e', hermi=0, kpt=numpy.zeros(3)):
 # pbcopt use the value of AO-pair to prescreening PBC integrals in the lattice
 # summation.  Pass NULL pointer to pbcopt to prevent the prescreening
     return auxcell.pbc_intor(intor, 1, hermi, kpt, pbcopt=lib.c_null_ptr())
-
