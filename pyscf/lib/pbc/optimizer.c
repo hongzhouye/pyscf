@@ -28,6 +28,7 @@ void PBCinit_optimizer(PBCOpt **opt, int *atm, int natm,
         PBCOpt *opt0 = malloc(sizeof(PBCOpt));
         opt0->rrcut = NULL;
         opt0->rrcut_sp = NULL;
+        opt0->ri_bas = NULL;
         opt0->fprescreen = &PBCnoscreen;
         *opt = opt0;
 }
@@ -44,6 +45,9 @@ void PBCdel_optimizer(PBCOpt **opt)
         }
         if (!opt0->rrcut_sp) {
                 free(opt0->rrcut_sp);
+        }
+        if (!opt0->ri_bas) {
+                free(opt0->ri_bas);
         }
         free(opt0);
         *opt = NULL;
@@ -98,11 +102,26 @@ int PBCrcut_screen_sp(int *shls, PBCOpt *opt, int *atm, int *bas, double *env)
         const double *ri = env + atm[bas[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
         const double *rj = env + atm[bas[ATOM_OF+jsh*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
 
-        // screen sp first: skip this shlpr if either shl lies outside a sphere
-        double rri = SQUARE(ri);
-        double rrj = SQUARE(rj);
-        double rrcutij = (opt->rrcut_sp[ish] + opt->rrcut_sp[jsh]) * 0.5;
-        if (rri > rrcutij || rrj > rrcutij)
+        /* Screen sp first: skip this shlpr if either shl lies outside a sphere.
+
+        The distances being computed here (rri & rrj) are really just the lattice shift for the two shells. Ideally one should do this screening directly in e.g., pyscf/lib/pbc/fill_ints.c. However, the code there is of general-purpose, while this screening only applies to GDF/MDF.
+        */
+        const double *ri0 = opt->ri_bas + ish*3;
+        double riri[3];
+        riri[0] = ri[0] - ri0[0];
+        riri[1] = ri[1] - ri0[1];
+        riri[2] = ri[2] - ri0[2];
+        double rri = SQUARE(riri);
+        double rrcutij = opt->rrcut_sp[ish*opt->nbas+jsh];
+        if (rri > rrcutij)
+            return 0;
+        const double *rj0 = opt->ri_bas + ish*3;
+        double rjrj[3];
+        rjrj[0] = rj[0] - rj0[0];
+        rjrj[1] = rj[1] - rj0[1];
+        rjrj[2] = rj[2] - rj0[2];
+        double rrj = SQUARE(rjrj);
+        if (rrj > rrcutij)
             return 0;
 
         double rirj[3];
@@ -114,18 +133,36 @@ int PBCrcut_screen_sp(int *shls, PBCOpt *opt, int *atm, int *bas, double *env)
 }
 
 void PBCset_rcut_cond_sp(PBCOpt *opt, double *rcut, double *rcut_sp,
-                      int *atm, int natm, int *bas, int nbas, double *env)
+                         int *atm, int natm, int *bas, int nbas, double *env)
 {
+        opt->nbas = nbas;
         if (opt->rrcut) {
                 free(opt->rrcut);
         }
+        if (opt->rrcut_sp) {
+                free(opt->rrcut_sp);
+        }
+        if (opt->ri_bas) {
+                free(opt->ri_bas);
+        }
         opt->rrcut = (double *)malloc(sizeof(double) * nbas);
-        opt->rrcut_sp = (double *)malloc(sizeof(double) * nbas);
+        opt->rrcut_sp = (double *)malloc(sizeof(double) * nbas*nbas);
+        opt->ri_bas = (double *)malloc(sizeof(double) * nbas*3);
         opt->fprescreen = &PBCrcut_screen_sp;
 
-        int i;
+        int i,j;
         for (i = 0; i < nbas; i++) {
                 opt->rrcut[i] = rcut[i] * rcut[i];
-                opt->rrcut_sp[i] = rcut_sp[i] * rcut_sp[i];
+                double ri = opt->rrcut_sp[i*nbas+i] = rcut_sp[i] * rcut_sp[i];
+                for (j = 0; j < i; j++) {
+                        double rj = opt->rrcut_sp[j*nbas+j];
+                        opt->rrcut_sp[i*nbas+j] = opt->rrcut_sp[j*nbas+i] =
+                            (ri + rj) * 0.5;
+                }
+                const double *ri0 = env +
+                    atm[bas[ATOM_OF+i*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
+                opt->ri_bas[i*3] = ri0[0];
+                opt->ri_bas[i*3+1] = ri0[1];
+                opt->ri_bas[i*3+2] = ri0[2];
         }
 }

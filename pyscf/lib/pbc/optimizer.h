@@ -19,8 +19,10 @@
 #if !defined(HAVE_DEFINED_CVHFOPT_H)
 #define HAVE_DEFINED_CVHFOPT_H
 typedef struct PBCOpt_struct {
+    int nbas;
     double *rrcut;
     double *rrcut_sp;
+    double *ri_bas;
     int (*fprescreen)(int *shls, struct PBCOpt_struct *opt,
                       int *atm, int *bas, double *env);
 } PBCOpt;
