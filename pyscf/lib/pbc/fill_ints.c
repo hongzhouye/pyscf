@@ -758,6 +758,99 @@ static void _nr3c_fill_g(int (*intor)(), void (*fsort)(), double *out, int nkpts
                 (*fsort)(out, bufL, shls_slice, ao_loc, comp, ish, jsh, msh0, msh1);
         }
 }
+/* @@HY: shellpair screening */
+#define SQUARE_VEC3(r)       (r[0]*r[0]+r[1]*r[1]+r[2]*r[2])
+static void _nr3c_fill_g_sps(int (*intor)(), void (*fsort)(), double *out, int nkpts_ij,
+                         int nkpts, int comp, int nimgs, int ish, int jsh,
+                         double *buf, double *env_loc, double *Ls,
+                         double *expkL_r, double *expkL_i, int *kptij_idx,
+                         int *shls_slice, int *ao_loc,
+                         CINTOpt *cintopt, PBCOpt *pbcopt,
+                         int *atm, int natm, int *bas, int nbas, double *env)
+{
+        const int ish0 = shls_slice[0];
+        const int jsh0 = shls_slice[2];
+        const int ksh0 = shls_slice[4];
+        const int ksh1 = shls_slice[5];
+
+        jsh += jsh0;
+        ish += ish0;
+        int iptrxyz = atm[PTR_COORD+bas[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS];
+        int jptrxyz = atm[PTR_COORD+bas[ATOM_OF+jsh*BAS_SLOTS]*ATM_SLOTS];
+        const int di = ao_loc[ish+1] - ao_loc[ish];
+        const int dj = ao_loc[jsh+1] - ao_loc[jsh];
+        const int dij = di * dj;
+        int dkmax = INTBUFMAX10 / dij / 2 * MIN(IMGBLK,nimgs);
+        int kshloc[ksh1-ksh0+1];
+        int nkshloc = shloc_partition(kshloc, ao_loc, ksh0, ksh1, dkmax);
+
+        int i, m, msh0, msh1, dijm;
+        int ksh, dk, iL, jL, dijkc;
+        int shls[3];
+
+        int dijmc = dij * dkmax * comp;
+        double *bufL = buf + dijmc;
+        double *cache = bufL + dijmc;
+        double *pbuf;
+        int (*fprescreen)();
+        double rrcut_sp = pbcopt->rrcut_sp[ish*nbas+jsh];
+        if (pbcopt != NULL) {
+                fprescreen = pbcopt->fprescreen;
+        } else {
+                fprescreen = PBCnoscreen;
+        }
+
+        shls[0] = ish;
+        shls[1] = jsh;
+        for (m = 0; m < nkshloc; m++) {
+                msh0 = kshloc[m];
+                msh1 = kshloc[m+1];
+                dkmax = ao_loc[msh1] - ao_loc[msh0];
+                dijm = dij * dkmax;
+                dijmc = dijm * comp;
+                for (i = 0; i < dijmc; i++) {
+                        bufL[i] = 0;
+                }
+
+                for (iL = 0; iL < nimgs; iL++) {
+                        double Li[3];
+                        Li[0] = Ls[iL*3];
+                        Li[1] = Ls[iL*3+1];
+                        Li[2] = Ls[iL*3+2];
+                        double LLi = SQUARE_VEC3(Li);
+                        if (LLi > rrcut_sp)
+                            continue;
+                        shift_bas(env_loc, env, Ls, iptrxyz, iL);
+                        for (jL = 0; jL < nimgs; jL++) {
+                                double Lj[3];
+                                Lj[0] = Ls[jL*3];
+                                Lj[1] = Ls[jL*3+1];
+                                Lj[2] = Ls[jL*3+2];
+                                double LLj = SQUARE_VEC3(Lj);
+                                if (LLj > rrcut_sp)
+                                    continue;
+                                shift_bas(env_loc, env, Ls, jptrxyz, jL);
+
+        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc)) {
+                pbuf = bufL;
+                for (ksh = msh0; ksh < msh1; ksh++) {
+                        shls[2] = ksh;
+                        dk = ao_loc[ksh+1] - ao_loc[ksh];
+                        dijkc = dij*dk * comp;
+                        if ((*intor)(buf, NULL, shls, atm, natm, bas, nbas,
+                                     env_loc, cintopt, cache)) {
+                                for (i = 0; i < dijkc; i++) {
+                                        pbuf[i] += buf[i];
+                                }
+                        }
+                        pbuf += dijkc;
+                }
+        }
+                        }
+                } // iL in range(0, nimgs)
+                (*fsort)(out, bufL, shls_slice, ao_loc, comp, ish, jsh, msh0, msh1);
+        }
+}
 /* ('...LM->...', int3c) */
 void PBCnr3c_fill_gs1(int (*intor)(), double *out, int nkpts_ij,
                       int nkpts, int comp, int nimgs, int ish, int jsh,
@@ -872,6 +965,29 @@ void PBCnr3c_fill_gs2(int (*intor)(), double *out, int nkpts_ij,
                           shls_slice, ao_loc, cintopt, pbcopt, atm, natm, bas, nbas, env);
         } else if (ip == jp) {
              _nr3c_fill_g(intor, &sort3c_gs2_ieqj, out,
+                          nkpts_ij, nkpts, comp, nimgs, ish, jsh,
+                          buf, env_loc, Ls, expkL_r, expkL_i, kptij_idx,
+                          shls_slice, ao_loc, cintopt, pbcopt, atm, natm, bas, nbas, env);
+        }
+}
+/* @@HY:  */
+void PBCnr3c_fill_gs2_sps(int (*intor)(), double *out, int nkpts_ij,
+                      int nkpts, int comp, int nimgs, int ish, int jsh,
+                      double *buf, double *env_loc, double *Ls,
+                      double *expkL_r, double *expkL_i, int *kptij_idx,
+                      int *shls_slice, int *ao_loc,
+                      CINTOpt *cintopt, PBCOpt *pbcopt,
+                      int *atm, int natm, int *bas, int nbas, double *env)
+{
+        int ip = ish + shls_slice[0];
+        int jp = jsh + shls_slice[2] - nbas;
+        if (ip > jp) {
+             _nr3c_fill_g_sps(intor, &sort3c_gs2_igtj, out,
+                          nkpts_ij, nkpts, comp, nimgs, ish, jsh,
+                          buf, env_loc, Ls, expkL_r, expkL_i, kptij_idx,
+                          shls_slice, ao_loc, cintopt, pbcopt, atm, natm, bas, nbas, env);
+        } else if (ip == jp) {
+             _nr3c_fill_g_sps(intor, &sort3c_gs2_ieqj, out,
                           nkpts_ij, nkpts, comp, nimgs, ish, jsh,
                           buf, env_loc, Ls, expkL_r, expkL_i, kptij_idx,
                           shls_slice, ao_loc, cintopt, pbcopt, atm, natm, bas, nbas, env);
@@ -1124,4 +1240,3 @@ void PBCnr2c_drv(int (*intor)(), void (*fill)(), double complex *out,
 }
         free(expkL_r);
 }
-

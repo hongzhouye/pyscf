@@ -186,6 +186,7 @@ def wrap_int3c(cell, auxcell, intor='int3c2e', aosym='s1', comp=1,
         # @@HY: added shellpair screening
         rcut_sp = getattr(cell, "rcut_sp", None)
         if not rcut_sp is None:
+            fill += "_sps"
             lib.logger.debug(cell,
                          "\n*** Enabling shellpair-specific prescreening ***%s",
                          "\n")

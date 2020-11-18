@@ -148,16 +148,17 @@ void PBCset_rcut_cond_sp(PBCOpt *opt, double *rcut, double *rcut_sp,
         opt->rrcut = (double *)malloc(sizeof(double) * nbas);
         opt->rrcut_sp = (double *)malloc(sizeof(double) * nbas*nbas);
         opt->ri_bas = (double *)malloc(sizeof(double) * nbas*3);
-        opt->fprescreen = &PBCrcut_screen_sp;
+        // opt->fprescreen = &PBCrcut_screen_sp;
+        opt->fprescreen = &PBCrcut_screen;
 
         int i,j;
+        int nbas_hlf = nbas / 2;
         for (i = 0; i < nbas; i++) {
                 opt->rrcut[i] = rcut[i] * rcut[i];
-                double ri = opt->rrcut_sp[i*nbas+i] = rcut_sp[i] * rcut_sp[i];
-                for (j = 0; j < i; j++) {
-                        double rj = opt->rrcut_sp[j*nbas+j];
-                        opt->rrcut_sp[i*nbas+j] = opt->rrcut_sp[j*nbas+i] =
-                            (ri + rj) * 0.5;
+                for (j = 0; j < nbas; j++)
+                {
+                    double rij = rcut_sp[(i%nbas_hlf)*nbas_hlf+j%nbas_hlf];
+                    opt->rrcut_sp[i*nbas+j] = rij * rij;
                 }
                 const double *ri0 = env +
                     atm[bas[ATOM_OF+i*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
