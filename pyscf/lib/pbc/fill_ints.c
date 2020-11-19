@@ -793,7 +793,9 @@ static void _nr3c_fill_g_sps(int (*intor)(), void (*fsort)(), double *out, int n
         double *cache = bufL + dijmc;
         double *pbuf;
         int (*fprescreen)();
-        double rrcut_sp = pbcopt->rrcut_sp[ish*nbas+jsh];
+        double rrcut_sp = pbcopt->rrcut_sp[ish*nbas+jsh-nbas];
+        printf("%d %d %.2f\n", ish, jsh-nbas, rrcut_sp);
+        const double *LLcut_sp = pbcopt->LLcut_sp;
         if (pbcopt != NULL) {
                 fprescreen = pbcopt->fprescreen;
         } else {
@@ -813,21 +815,11 @@ static void _nr3c_fill_g_sps(int (*intor)(), void (*fsort)(), double *out, int n
                 }
 
                 for (iL = 0; iL < nimgs; iL++) {
-                        double Li[3];
-                        Li[0] = Ls[iL*3];
-                        Li[1] = Ls[iL*3+1];
-                        Li[2] = Ls[iL*3+2];
-                        double LLi = SQUARE_VEC3(Li);
-                        if (LLi > rrcut_sp)
+                        if (LLcut_sp[iL] > rrcut_sp)
                             continue;
                         shift_bas(env_loc, env, Ls, iptrxyz, iL);
                         for (jL = 0; jL < nimgs; jL++) {
-                                double Lj[3];
-                                Lj[0] = Ls[jL*3];
-                                Lj[1] = Ls[jL*3+1];
-                                Lj[2] = Ls[jL*3+2];
-                                double LLj = SQUARE_VEC3(Lj);
-                                if (LLj > rrcut_sp)
+                                if (LLcut_sp[jL] > rrcut_sp)
                                     continue;
                                 shift_bas(env_loc, env, Ls, jptrxyz, jL);
 

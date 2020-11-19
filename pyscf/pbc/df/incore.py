@@ -185,12 +185,16 @@ def wrap_int3c(cell, auxcell, intor='int3c2e', aosym='s1', comp=1,
         # pbcopt = _pbcintor.PBCOpt(pcell).init_rcut_cond(pcell)
         # @@HY: added shellpair screening
         rcut_sp = getattr(cell, "rcut_sp", None)
-        if not rcut_sp is None:
+        Lcut_sp = getattr(cell, "Lcut_sp", None)
+        if not (rcut_sp is None or Lcut_sp is None):
+            assert(Lcut_sp.size == nimgs)
             fill += "_sps"
             lib.logger.debug(cell,
                          "\n*** Enabling shellpair-specific prescreening ***%s",
                          "\n")
-        pbcopt = _pbcintor.PBCOpt(pcell).init_rcut_cond(pcell, rcut_sp=rcut_sp)
+        pbcopt = _pbcintor.PBCOpt(pcell).init_rcut_cond(pcell,
+                                                        rcut_sp=rcut_sp,
+                                                        Lcut_sp=Lcut_sp)
     if isinstance(pbcopt, _pbcintor.PBCOpt):
         cpbcopt = pbcopt._this
     else:

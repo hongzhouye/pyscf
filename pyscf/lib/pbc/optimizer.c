@@ -28,6 +28,7 @@ void PBCinit_optimizer(PBCOpt **opt, int *atm, int natm,
         PBCOpt *opt0 = malloc(sizeof(PBCOpt));
         opt0->rrcut = NULL;
         opt0->rrcut_sp = NULL;
+        opt0->LLcut_sp = NULL;
         opt0->ri_bas = NULL;
         opt0->fprescreen = &PBCnoscreen;
         *opt = opt0;
@@ -45,6 +46,9 @@ void PBCdel_optimizer(PBCOpt **opt)
         }
         if (!opt0->rrcut_sp) {
                 free(opt0->rrcut_sp);
+        }
+        if (!opt0->LLcut_sp) {
+                free(opt0->LLcut_sp);
         }
         if (!opt0->ri_bas) {
                 free(opt0->ri_bas);
@@ -132,38 +136,46 @@ int PBCrcut_screen_sp(int *shls, PBCOpt *opt, int *atm, int *bas, double *env)
         return (rr < opt->rrcut[ish] || rr < opt->rrcut[jsh]);
 }
 
-void PBCset_rcut_cond_sp(PBCOpt *opt, double *rcut, double *rcut_sp,
+void PBCset_rcut_cond_sp(PBCOpt *opt, double *rcut,
+                         double *rcut_sp, double *Lcut_sp, int nL,
                          int *atm, int natm, int *bas, int nbas, double *env)
 {
         opt->nbas = nbas;
+        int nbas_hlf = nbas / 2;
         if (opt->rrcut) {
                 free(opt->rrcut);
         }
         if (opt->rrcut_sp) {
                 free(opt->rrcut_sp);
         }
+        if (opt->LLcut_sp) {
+                free(opt->LLcut_sp);
+        }
         if (opt->ri_bas) {
                 free(opt->ri_bas);
         }
         opt->rrcut = (double *)malloc(sizeof(double) * nbas);
-        opt->rrcut_sp = (double *)malloc(sizeof(double) * nbas*nbas);
+        opt->rrcut_sp = (double *)malloc(sizeof(double) * nbas_hlf*nbas_hlf);
+        opt->LLcut_sp = (double *)malloc(sizeof(double) * nL);
         opt->ri_bas = (double *)malloc(sizeof(double) * nbas*3);
         // opt->fprescreen = &PBCrcut_screen_sp;
         opt->fprescreen = &PBCrcut_screen;
 
         int i,j;
-        int nbas_hlf = nbas / 2;
         for (i = 0; i < nbas; i++) {
                 opt->rrcut[i] = rcut[i] * rcut[i];
-                for (j = 0; j < nbas; j++)
-                {
-                    double rij = rcut_sp[(i%nbas_hlf)*nbas_hlf+j%nbas_hlf];
-                    opt->rrcut_sp[i*nbas+j] = rij * rij;
-                }
                 const double *ri0 = env +
                     atm[bas[ATOM_OF+i*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
                 opt->ri_bas[i*3] = ri0[0];
                 opt->ri_bas[i*3+1] = ri0[1];
                 opt->ri_bas[i*3+2] = ri0[2];
+        }
+        for (i = 0; i < nbas_hlf; i++)
+                for (j = 0; j < nbas_hlf; j++) {
+                        double rij = rcut_sp[i*nbas_hlf+j];
+                        opt->rrcut_sp[i*nbas_hlf+j] = rij * rij;
+                }
+        for (i = 0; i < nL; i++) {
+                opt->LLcut_sp[i] = Lcut_sp[i] * Lcut_sp[i];
         }
 }
