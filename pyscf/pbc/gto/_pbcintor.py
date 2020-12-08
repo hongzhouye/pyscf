@@ -56,5 +56,69 @@ class PBCOpt(object):
 
 class _CPBCOpt(ctypes.Structure):
     _fields_ = [('rrcut', ctypes.c_void_p),
+                ('rc_cut', ctypes.c_void_p),
+                ('r12_cut', ctypes.c_void_p),
+                ('bas_exp', ctypes.c_void_p),
                 ('fprescreen', ctypes.c_void_p)]
 
+# Hongzhou: testing a few prescreening conditions
+class PBCOpt1(PBCOpt):  # R12Rc_max
+    def __init__(self, cell):
+        self._this = ctypes.POINTER(_CPBCOpt)()
+        natm = ctypes.c_int(cell._atm.shape[0])
+        nbas = ctypes.c_int(cell._bas.shape[0])
+        libpbc.PBCinit_optimizer1(ctypes.byref(self._this),
+                                  cell._atm.ctypes.data_as(ctypes.c_void_p), natm,
+                                  cell._bas.ctypes.data_as(ctypes.c_void_p), nbas,
+                                  cell._env.ctypes.data_as(ctypes.c_void_p))
+
+    def init_rcut_cond(self, cell, prescreening_data, precision=None):
+        if precision is None: precision = cell.precision
+        rcut = numpy.array([cell.bas_rcut(ib, precision)
+                            for ib in range(cell.nbas)])
+        natm = ctypes.c_int(cell._atm.shape[0])
+        nbas = ctypes.c_int(cell._bas.shape[0])
+        Rc_cut, R12_cut_lst = prescreening_data
+        bas_exp = numpy.asarray([numpy.min(cell.bas_exp(ib))
+                                for ib in range(cell.nbas)])
+        libpbc.PBCset_rcut_cond1(self._this,
+                                 ctypes.c_double(Rc_cut),
+                                 R12_cut_lst.ctypes.data_as(ctypes.c_void_p),
+                                 bas_exp.ctypes.data_as(ctypes.c_void_p),
+                                 cell._atm.ctypes.data_as(ctypes.c_void_p), natm,
+                                 cell._bas.ctypes.data_as(ctypes.c_void_p), nbas,
+                                 cell._env.ctypes.data_as(ctypes.c_void_p))
+        return self
+
+    def __del__(self):
+        try:
+            libpbc.PBCdel_optimizer1(ctypes.byref(self._this))
+        except AttributeError:
+            pass
+
+class PBCOpt2(PBCOpt1):  # R12Rc_max
+    def __init__(self, cell):
+        PBCOpt1.__init__(self, cell)
+
+    def init_rcut_cond(self, cell, prescreening_data, precision=None):
+        if precision is None: precision = cell.precision
+        rcut = numpy.array([cell.bas_rcut(ib, precision)
+                            for ib in range(cell.nbas)])
+        natm = ctypes.c_int(cell._atm.shape[0])
+        nbas = ctypes.c_int(cell._bas.shape[0])
+        Rc_cut_mat, R12_cut_mat = prescreening_data
+        Rc_cut_mat = numpy.asarray(Rc_cut_mat, order="C")
+        R12_cut_mat = numpy.asarray(R12_cut_mat, order="C")
+        nbas_auxchg = ctypes.c_int(Rc_cut_mat.shape[0])
+        nc_max = ctypes.c_int(R12_cut_mat.shape[-1])
+        bas_exp = numpy.asarray([numpy.min(cell.bas_exp(ib))
+                                for ib in range(cell.nbas)])
+        libpbc.PBCset_rcut_cond2(self._this,
+                                 nbas_auxchg, nc_max,
+                                 Rc_cut_mat.ctypes.data_as(ctypes.c_void_p),
+                                 R12_cut_mat.ctypes.data_as(ctypes.c_void_p),
+                                 bas_exp.ctypes.data_as(ctypes.c_void_p),
+                                 cell._atm.ctypes.data_as(ctypes.c_void_p), natm,
+                                 cell._bas.ctypes.data_as(ctypes.c_void_p), nbas,
+                                 cell._env.ctypes.data_as(ctypes.c_void_p))
+        return self

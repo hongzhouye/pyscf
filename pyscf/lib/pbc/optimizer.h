@@ -1,11 +1,11 @@
 /* Copyright 2014-2018 The PySCF Developers. All Rights Reserved.
-  
+
    Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
     You may obtain a copy of the License at
- 
+
         http://www.apache.org/licenses/LICENSE-2.0
- 
+
     Unless required by applicable law or agreed to in writing, software
     distributed under the License is distributed on an "AS IS" BASIS,
     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,6 +20,8 @@
 #define HAVE_DEFINED_CVHFOPT_H
 typedef struct PBCOpt_struct {
     double *rrcut;
+    double *rc_cut, *r12_cut, *bas_exp;
+    int nbas, nc_shift0, nc_shift1, n12_shift0, n12_shift1, n12_shift2;
     int (*fprescreen)(int *shls, struct PBCOpt_struct *opt,
                       int *atm, int *bas, double *env);
 } PBCOpt;
@@ -27,4 +29,3 @@ typedef struct PBCOpt_struct {
 
 int PBCnoscreen(int *shls, PBCOpt *opt, int *atm, int *bas, double *env);
 int PBCrcut_screen(int *shls, PBCOpt *opt, int *atm, int *bas, double *env);
-
