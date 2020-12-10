@@ -170,21 +170,20 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         return j2c, j2c_negative, j2ctag
 
     # compute j3c
-    # k_gamma = None
-    # for k, kpt in enumerate(uniq_kpts):
-    #     if is_zero(kpt):
-    #         k_gamma = k
-    #         break
-    # if k_gamma is None: k_gamma = 0
-    # j2c, j2c_negative, j2ctag = cholesky_decomposed_metric(k_gamma)
-    # if j2ctag == "CD":
-    #     j2c_inv = np.eye(j2c.shape[0])
-    #     j2c_inv = scipy.linalg.solve_triangular(j2c, j2c_inv, lower=True,
-    #                                             overwrite_b=True)
-    # else:
-    #     j2c_inv = j2c
-    # extra_precision = 1./(np.max(np.abs(j2c_inv), axis=1)+1.)
-    extra_precision = np.ones(naux)
+    k_gamma = None
+    for k, kpt in enumerate(uniq_kpts):
+        if is_zero(kpt):
+            k_gamma = k
+            break
+    if k_gamma is None: k_gamma = 0
+    j2c, j2c_negative, j2ctag = cholesky_decomposed_metric(k_gamma)
+    if j2ctag == "CD":
+        j2c_inv = np.eye(j2c.shape[0])
+        j2c_inv = scipy.linalg.solve_triangular(j2c, j2c_inv, lower=True,
+                                                overwrite_b=True)
+    else:
+        j2c_inv = j2c
+    extra_precision = 1./(np.max(np.abs(j2c_inv), axis=1)+1.)
 
     prescreening_data = get_prescreening_data(mydf, cell_fat, extra_precision)
 
@@ -483,8 +482,9 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
         self.check_sanity()
         self.dump_flags()
 
-        from pyscf.df.addons import make_auxmol
-        self.auxcell = make_auxmol(self.cell, self.auxbasis)
+        if self.auxcell is None:
+            from pyscf.df.addons import make_auxmol
+            self.auxcell = make_auxmol(self.cell, self.auxbasis)
 
         # Remove duplicated k-points. Duplicated kpts may lead to a buffer
         # located in incore.wrap_int3c larger than necessary. Integral code
@@ -526,10 +526,8 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
             self._make_j3c(self.cell, self.auxcell, self.cell_fat, kptij_lst,
                            cderi)
             t1 = logger.timer_debug1(self, 'j3c', *t1)
-        return self
 
-    def build(self, j_only=None, with_j3c=True, kpts_band=None):
-
+    def rs_build(self):
         # For each shell, using eta as a cutoff to split it into the diffuse (d) and the compact (c) parts.
         if self.split_basis:
             self.cell_fat = _reorder_cell(self.cell, self.eta)
@@ -556,12 +554,20 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
                                                              self.omega)
         self.mesh_sr = pbctools.cutoff_to_mesh(self.cell.lattice_vectors(),
                                                self.ke_cutoff)
+        self.mesh_sr = df.df._round_off_to_odd_mesh(self.mesh_sr)
 
-        # do normal gdf build
+    def build(self, j_only=None, with_j3c=True, kpts_band=None):
+
+        # build for range-separation
+        self.rs_build()
+
+        # do normal gdf build with short-range coulomb
         abs_omega = abs(self.omega)
         with self.with_range_coulomb(-abs_omega):
-            return self.gdf_build(j_only=j_only, with_j3c=with_j3c,
-                                  kpts_band=kpts_band)
+            self.gdf_build(j_only=j_only, with_j3c=with_j3c,
+                           kpts_band=kpts_band)
+
+        return self
 
     def set_range_coulomb(self, omega):
         if omega is None: omega = 0
@@ -596,12 +602,25 @@ RSHDF = RangeSeparatedHybridDensityFitting
 HDF = RangeSeparatedHybridDensityFitting
 
 def estimate_omega_for_npw(cell, npw_max):
-    bnorm = np.linalg.norm(cell.reciprocal_vectors(), axis=0)
-    d = cell.dimension
-    nm_max = np.floor((npw_max**(1./d)-1) * 0.5)
-    prec = cell.precision
-    omega = (nm_max*bnorm*0.5) / np.log(4*np.pi/((nm_max*bnorm)**2.*prec))**0.5
-    omega = np.min(omega)
+    # bnorm = np.linalg.norm(cell.reciprocal_vectors(), axis=0)
+    # d = cell.dimension
+    # nm_max = np.floor((npw_max**(1./d)-1) * 0.5)
+    # prec = cell.precision
+    # omega = (nm_max*bnorm*0.5) / np.log(4*np.pi/((nm_max*bnorm)**2.*prec))**0.5
+    # omega = np.min(omega)
+
+    latvecs = cell.lattice_vectors()
+    def invomega2meshsize(invomega):
+        omega = 1./invomega
+        ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(cell, omega)
+        mesh = pbctools.cutoff_to_mesh(latvecs, ke_cutoff)
+        mesh = df.df._round_off_to_odd_mesh(mesh)
+        return np.prod(mesh)
+
+    invomega_rg = 1. / np.asarray([2,0.05])
+    invomega, npw = _binary_search(invomega2meshsize, *invomega_rg, npw_max,
+                                   0.1, verbose=6)
+    omega = 1. / invomega
 
     return omega
 
@@ -968,9 +987,8 @@ def estimate_Rc_R12_cut_SPLIT(cell, auxcell, omega, extra_precision):
 
     # condense extra_prec from auxcell AO to auxcell shell
     aux_ao_loc = auxcell.ao_loc_nr()
-    # extra_prec = [np.min(extra_precision[range(*aux_ao_loc[i:i+2])])
-    #               for i in range(aux_nbas)]
-    extra_prec = np.ones(aux_nbas)
+    extra_prec = [np.min(extra_precision[range(*aux_ao_loc[i:i+2])])
+                  for i in range(aux_nbas)]
 
     cell_coords = cell.atom_coords()
     auxcell_coords = auxcell.atom_coords()
