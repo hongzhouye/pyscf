@@ -2392,7 +2392,6 @@ void PBCnr3c_drv(int (*intor)(), void (*fill)(), double complex *eri,
         free(expkL_r);
 }
 
-#include <time.h>
 void PBCnr3c_bvk_drv(int (*intor)(), void (*fill)(), double complex *eri,
                      int nkpts_ij, int nkpts, int comp, int nimgs,
                      int bvk_nimgs,
@@ -2445,20 +2444,13 @@ void PBCnr3c_bvk_drv(int (*intor)(), void (*fill)(), double complex *eri,
         for (ij = 0; ij < nish*njsh; ij++) {
                 ish = ij / njsh;
                 jsh = ij % njsh;
-                clock_t start = clock(), diff;
                 if (!shlpr_mask[ij]) {
-                        diff = clock() - start;
-                        int msec = diff * 1000 / CLOCKS_PER_SEC;
-                        printf("shlpr %d %d: skipped (%d sec %d msec)\n", ish, jsh, msec/1000, msec%1000);
                         continue;
                 }
                 (*fill)(intor, eri, nkpts_ij, nkpts, comp, nimgs, bvk_nimgs,
                         ish, jsh, cell_loc_bvk,
                         buf, env_loc, Ls, expkL_r, expkL_i, kptij_idx,
                         shls_slice, ao_loc, cintopt, pbcopt, atm, natm, bas, nbas, env);
-                diff = clock() - start;
-                int msec = diff * 1000 / CLOCKS_PER_SEC;
-                printf("shlpr %d %d: run (%d sec %d msec)\n", ish, jsh, msec/1000, msec%1000);
         }
         free(buf);
         free(env_loc);
@@ -2523,11 +2515,7 @@ void PBCnr3c_bvk_splitbasis_drv(
                 jsh = ij % njsh;
                 origin_ish = origin_bas_idx[ish];
                 origin_jsh = origin_bas_idx[jsh];
-                clock_t start = clock(), diff;
                 if (!shlpr_mask[ij]) {
-                        diff = clock() - start;
-                        int msec = diff * 1000 / CLOCKS_PER_SEC;
-                        printf("shlpr %d %d %d %d: skipped (%d sec %d msec)\n", ish, jsh, origin_ish, origin_jsh, msec/1000, msec%1000);
                         continue;
                 }
                 (*fill)(intor, eri, nkpts_ij, nkpts, comp, nimgs, bvk_nimgs,
@@ -2536,9 +2524,6 @@ void PBCnr3c_bvk_splitbasis_drv(
                         buf, env_loc, Ls, expkL_r, expkL_i, kptij_idx,
                         shls_slice, ao_loc, origin_shls_slice, origin_ao_loc,
                         cintopt, pbcopt, atm, natm, bas, nbas, env);
-                diff = clock() - start;
-                int msec = diff * 1000 / CLOCKS_PER_SEC;
-                printf("shlpr %d %d %d %d: run (%d sec %d msec)\n", ish, jsh, origin_ish, origin_jsh, msec/1000, msec%1000);
         }
         free(buf);
         free(env_loc);
