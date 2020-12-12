@@ -281,22 +281,6 @@ def _aux_e2_hy(cell, auxcell_or_auxbasis, erifile, intor='int3c2e',
                               prescreening_data=prescreening_data,
                               verbose=verbose)
     else:
-        # _aux_e2_hy_nosplitbas(cell_fat, auxcell_or_auxbasis, erifile,
-        #                       intor=intor, aosym=aosym, comp=comp, kptij_lst=kptij_lst,
-        #                       dataname=dataname, shls_slice=shls_slice,
-        #                       max_memory=max_memory,
-        #                       bvk_kmesh=bvk_kmesh,
-        #                       prescreening_type=prescreening_type,
-        #                       prescreening_data=prescreening_data,
-        #                       verbose=verbose)
-        # _aux_e2_hy_splitbas(cell, cell_fat, auxcell_or_auxbasis, erifile,
-        #                     intor=intor, aosym=aosym, comp=comp,
-        #                     kptij_lst=kptij_lst, dataname=dataname,
-        #                     shls_slice=shls_slice, max_memory=max_memory,
-        #                     bvk_kmesh=bvk_kmesh,
-        #                     prescreening_type=prescreening_type,
-        #                     prescreening_data=prescreening_data,
-        #                     verbose=verbose)
         _aux_e2_hy_splitbas2(cell, cell_fat, auxcell_or_auxbasis, erifile,
                             intor=intor, aosym=aosym, comp=comp,
                             kptij_lst=kptij_lst, dataname=dataname,
@@ -635,17 +619,10 @@ def _aux_e2_hy_splitbas2(cell, cell_fat, auxcell_or_auxbasis, erifile,
                bvk_kmesh=None,
                prescreening_type=0, prescreening_data=None,
                verbose=0):
-    r'''3-center AO integrals (ij|L) with double lattice sum:
-    \sum_{lm} (i[l]j[m]|L[0]), where L is the auxiliary basis.
-    Three-index integral tensor (kptij_idx, nao_pair, naux) or four-index
-    integral tensor (kptij_idx, comp, nao_pair, naux) are stored on disk.
-
-    **This function should be only used by df and mdf initialization function
-    _make_j3c**
-
-    Args:
-        kptij_lst : (*,2,3) array
-            A list of (kpti, kptj)
+    r'''Basic utility is same as other _aux_e2's. This one specifically supports cell_fat, which splits the AOs into two groups: compact (c) and diffuse (d). This function only computes integrals (L|cc) and (L|cd), while leaving (L|dd) zeros. The splitted AOs have a typically larger number than the original AOs defined by cell. So in general there are two steps:
+    1. compute the integrals using cell_fat
+    2. sum cell_fat shell pairs that contribute to the same original shell pair
+    This function specifically does "1" in the C code by calling the regular driver function, while having the Python layer take care of the condensation.
     '''
     if isinstance(auxcell_or_auxbasis, gto.Mole):
         auxcell = auxcell_or_auxbasis
