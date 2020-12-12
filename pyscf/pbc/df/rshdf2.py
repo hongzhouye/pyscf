@@ -255,6 +255,8 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         qaux = qaux[:aux_nao_c]
 
     # Add (1) short-range G=0 (i.e., charge) part and (2) long-range part
+    tspans = np.zeros((5,2))    # ft_aop, pw_cntr, j2c_cntr, write, read
+    tspannames = ["ft_aop", "pw_cntr", "j2c_cntr", "write", "read"]
     feri = h5py.File(cderi_file, 'w')
     feri['j3c-kptij'] = kptij_lst
     nsegs = len(fswap['j3c-junk/0'])
@@ -318,10 +320,13 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                 shls_slice = (bstart, bend, 0, cell.nbas)
 
             for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                tick_ = np.asarray([time.clock(), time.time()])
                 dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice, aosym,
                                            b, gxyz[p0:p1], Gvbase, kpt,
                                            adapted_kptjs, out=buf,
                                            bvk_kmesh=bvk_kmesh)
+                tock_ = np.asarray([time.clock(), time.time()])
+                tspans[0] += tock_ - tick_
                 nG = p1 - p0
                 for k, ji in enumerate(adapted_ji_idx):
                     aoao = dat[k].reshape(nG,ncol)
@@ -335,17 +340,24 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                     if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
                         lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3cI[k][:], 1)
                         lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3cI[k][:], 1)
+                tick_ = np.asarray([time.clock(), time.time()])
+                tspans[1] += tick_ - tock_
 
             for k, ji in enumerate(adapted_ji_idx):
+                tick_ = np.asarray([time.clock(), time.time()])
                 if is_zero(kpt) and gamma_point(adapted_kptjs[k]):
                     v = j3cR[k]
                 else:
                     v = j3cR[k] + j3cI[k] * 1j
                 if j2ctag == 'CD':
                     v = scipy.linalg.solve_triangular(j2c, v, lower=True, overwrite_b=True)
-                    feri['j3c/%d/%d'%(ji,istep)] = v
                 else:
-                    feri['j3c/%d/%d'%(ji,istep)] = lib.dot(j2c, v)
+                    v = lib.dot(j2c, v)
+                tock_ = np.asarray([time.clock(), time.time()])
+                tspans[2] += tock_ - tick_
+                feri['j3c/%d/%d'%(ji,istep)] = v
+                tick_ = np.asarray([time.clock(), time.time()])
+                tspans[3] += tick_ - tock_
 
                 # low-dimension systems
                 if j2c_negative is not None:
@@ -360,6 +372,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                 col0, col1 = col1, col1+ncol
                 j3cR = []
                 j3cI = []
+                tick_ = np.asarray([time.clock(), time.time()])
                 for k, idx in enumerate(adapted_ji_idx):
                     v = np.vstack([fswap['j3c-junk/%d/%d'%(idx,i)][0,col0:col1].T
                                       for i in range(nsegs)])
@@ -377,6 +390,8 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                     else:
                         j3cI.append(np.asarray(v.imag, order='C'))
                 v = None
+                tock_ = np.asarray([time.clock(), time.time()])
+                tspans[4] += tock_ - tick_
                 compute(istep, sh_range, j3cR, j3cI)
         for ji in adapted_ji_idx:
             del(fswap['j3c-junk/%d'%ji])
@@ -434,6 +449,12 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         done[uniq_kptji_ids] = True
 
     feri.close()
+
+    # report time for aft part
+    for tspan, tspanname in zip(tspans, tspannames):
+        log.debug1("    CPU time for %s %9.2f sec, wall time %9.2f sec",
+                   "%10s"%tspanname, *tspan)
+    log.debug1("%s", "")
 
 
 class RangeSeparatedHybridDensityFitting2(df.rshdf.RSHDF):

@@ -429,8 +429,8 @@ def _aux_e2_hy_nosplitbas(cell, auxcell_or_auxbasis, erifile,
             feri['%s/%d/%d' % (dataname,k,istep)] = v
             t2[:] = [time.clock(), time.time()]
             tspan += t2 - t1
-        t1 = log.debug1("    CPU time for %s %9.2f sec, wall time %9.2f sec",
-                        "     save %d"%istep, *tspan)
+        log.debug1("    CPU time for %s %9.2f sec, wall time %9.2f sec",
+                   "     save %d"%istep, *tspan)
 
     with lib.call_in_background(save) as bsave:
         for istep, auxrange in enumerate(auxranges):
