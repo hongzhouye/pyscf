@@ -445,7 +445,7 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
                                cell_fat.bas_exp(idx[0]),
                                cell_fat.bas_exp(idx[1]))
                 else:
-                    btype = "c" if idx[0] > nbas_c else "d"
+                    btype = "c" if idx[0] < nbas_c else "d"
                     log.debug("orig bas %d (l = %d) -> %s %d", ib, l, btype,
                               idx[0])
                     log.debug1("  %s exp: %s", btype, cell_fat.bas_exp(idx[0]))
@@ -454,6 +454,15 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
             log.info('auxbasis = %s', self.auxbasis)
         else:
             log.info('auxbasis = %s', self.auxcell.basis)
+
+        auxcell = self.auxcell
+        if hasattr(auxcell, "_bas_idx"):
+            log.info('auxcell num shells = %d, num cGTOs = %d, num pGTOs = %d',
+                     auxcell.nbas, auxcell.nao_nr(),
+                     auxcell.npgto_nr())
+            log.info('        num compact shells = %d, num diffuse shells = %d',
+                     *auxcell._nbas_each_set)
+
         log.info('exp_to_discard = %s', self.exp_to_discard)
         if isinstance(self._cderi, str):
             log.info('_cderi = %s  where DF integrals are loaded (readonly).',
@@ -532,7 +541,8 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
         if self.split_basis:
             self.cell_fat = _reorder_cell(self.cell, self.eta)
             if self.cell_fat._nbas_each_set[1] > 0: # has diffuse shells
-                self.mesh_lr = _estimate_mesh_lr(self.cell_fat)
+                self.mesh_lr = _estimate_mesh_lr(self.cell_fat,
+                                                 self.cell.precision)
             else:
                 self.cell_fat = None    # no split basis happens
 
@@ -641,8 +651,8 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, verbose=None):
 
     if not npw_max is None:
         from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
-        kecuts = _primitive_gto_cutoff(cell, cell.precision)[1]
-        latvecs = cell.lattice_vectors()
+        # kecuts = _primitive_gto_cutoff(cell, cell.precision)[1]
+        meshs = _estimate_mesh_primitive(cell, cell.precision, round2odd=True)
 
     _env = cell._env.copy()
     compact_bas = []
@@ -664,9 +674,8 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, verbose=None):
             compact_mask = es >= eta_smooth
             diffuse_mask = ~compact_mask
         else:
-            npw = np.asarray([np.prod(pbctools.cutoff_to_mesh(latvecs, kecut))
-                              for kecut in kecuts[ib]])
-            compact_mask = npw > npw_max
+            npws = np.prod(meshs[ib], axis=1)
+            compact_mask = npws > npw_max
             diffuse_mask = ~compact_mask
 
         c_compact = cs[compact_mask]
@@ -706,7 +715,34 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, verbose=None):
 
     return cell_fat
 
-def _estimate_mesh_lr(cell_fat):
+def _estimate_mesh_primitive(cell, precision, round2odd=True):
+    ''' Estimate the minimum mesh for the diffuse shells.
+    '''
+    # from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
+    # kecuts = _primitive_gto_cutoff(cell, cell.precision)[1]
+    # kecut = np.max([np.max(kecuts[ib]) for ib in range(nc, cell.nbas)])
+    from pyscf.pbc.gto.cell import _estimate_ke_cutoff
+
+    if round2odd:
+        fround = lambda x: df.df._round_off_to_odd_mesh(x)
+    else:
+        fround = lambda x: x
+
+    latvecs = cell.lattice_vectors()
+    meshs = [None] * cell.nbas
+    for ib in range(cell.nbas):
+        nprim = cell.bas_nprim(ib)
+        nctr = cell.bas_nctr(ib)
+        es = cell.bas_exp(ib)
+        cs = np.max(np.abs(cell.bas_ctr_coeff(ib).reshape(nctr,nprim)), axis=0)
+        l = cell.bas_angular(ib)
+        kes = _estimate_ke_cutoff(es, l, cs, precision=precision)
+        meshs[ib] = np.asarray([fround(pbctools.cutoff_to_mesh(latvecs, ke))
+                               for ke in kes])
+
+    return meshs
+
+def _estimate_mesh_lr(cell_fat, precision):
     ''' Estimate the minimum mesh for the diffuse shells.
     '''
     nc, nd = cell_fat._nbas_each_set
@@ -722,7 +758,8 @@ def _estimate_mesh_lr(cell_fat):
         cs = np.max(np.abs(cell_fat.bas_ctr_coeff(ib).reshape(nctr,nprim)),
                     axis=0)
         l = cell_fat.bas_angular(ib)
-        kecut = max(kecut, np.max(_estimate_ke_cutoff(es, l, cs)))
+        kecut = max(kecut, np.max(_estimate_ke_cutoff(es, l, cs,
+                    precision=precision)))
     mesh_lr = pbctools.cutoff_to_mesh(cell_fat.lattice_vectors(), kecut)
 
     return mesh_lr

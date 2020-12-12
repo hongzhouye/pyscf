@@ -96,12 +96,22 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     log = logger.Logger(mydf.stdout, mydf.verbose)
     max_memory = max(2000, mydf.max_memory-lib.current_memory()[0])
 
+    omega = abs(mydf.omega)
+
     if mydf.use_bvkcell:
         bvk_kmesh = k2gamma.kpts_to_kmesh(cell, mydf.kpts)
     else:
         bvk_kmesh = None
 
-    omega = abs(mydf.omega)
+    if hasattr(auxcell, "_nbas_c"):
+        split_auxbasis = True
+        aux_nbas_c, aux_nbas_d = auxcell._nbas_each_set
+        aux_ao_loc = auxcell.ao_loc_nr()
+        aux_nao_c = aux_ao_loc[aux_nbas_c]
+        aux_nao = aux_ao_loc[-1]
+        aux_nao_d = aux_nao - aux_nao_c
+    else:
+        split_auxbasis = False
 
     # The ideal way to hold the temporary integrals is to store them in the
     # cderi_file and overwrite them inplace in the second pass.  The current
@@ -120,7 +130,6 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     qaux = df.rshdf.get_aux_chg(auxcell)
     g0 = np.pi/mydf.omega**2./cell.vol
 
-# compute j2c first as it informs the integral screening in computing j3c
     nao = cell.nao_nr()
     naux = auxcell.nao_nr()
     mesh = mydf.mesh
@@ -136,6 +145,8 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     log.debug('Num uniq kpts %d', len(uniq_kpts))
     log.debug2('uniq_kpts %s', uniq_kpts)
+
+# compute j2c first as it informs the integral screening in computing j3c
     # short-range part of j2c ~ (-kpt_ji | kpt_ji)
     with auxcell.with_range_coulomb(-omega):
         j2c = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
@@ -202,6 +213,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         return j2c, j2c_negative, j2ctag
 
 # compute j3c
+    # inverting gamma point j2c, and use it's row max to determine extra precision for 3c2e prescreening
     k_gamma = None
     for k, kpt in enumerate(uniq_kpts):
         if is_zero(kpt):
@@ -216,7 +228,6 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     else:
         j2c_inv = j2c
     extra_precision = 1./(np.max(np.abs(j2c_inv), axis=1)+1.)
-    # extra_precision = np.ones(naux)
 
     from pyscf.pbc.df.rshdf import get_prescreening_data
     prescreening_data = get_prescreening_data(mydf, cell_fat, extra_precision)
@@ -224,6 +235,10 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     t1 = log.timer_debug1('prescrn warmup', *t1)
 
     # short-range part
+    if split_auxbasis:
+        shls_slice = (0,cell.nbas,0,cell.nbas,0,aux_nbas_c)
+    else:
+        shls_slice = None
     with cell.with_range_coulomb(-omega), auxcell.with_range_coulomb(-omega):
         outcore._aux_e2_hy(cell, auxcell, fswap, 'int3c2e', aosym='s2',
                            kptij_lst=kptij_lst, dataname='j3c-junk',
@@ -231,8 +246,13 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                            bvk_kmesh=bvk_kmesh,
                            prescreening_type=mydf.prescreening_type,
                            prescreening_data=prescreening_data,
-                           cell_fat=cell_fat)
+                           cell_fat=cell_fat,
+                           shls_slice=shls_slice)
     t1 = log.timer_debug1('3c2e', *t1)
+
+    # mute charges for diffuse auxiliary shells
+    if split_auxbasis:
+        qaux = qaux[:aux_nao_c]
 
     # Add (1) short-range G=0 (i.e., charge) part and (2) long-range part
     feri = h5py.File(cderi_file, 'w')
@@ -251,7 +271,12 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         shls_slice = (0, auxcell.nbas)
         Gaux = ft_ao.ft_ao(auxcell, Gv, shls_slice, b, gxyz, Gvbase, kpt)
         wcoulG_lr = weighted_coulG(cell, omega, kpt, False, mesh)
-        Gaux *= wcoulG_lr.reshape(-1,1)
+        if split_auxbasis:
+            wcoulG = weighted_coulG(cell, 0, kpt, False, mesh)
+            Gaux[:,:aux_nao_c] *= wcoulG_lr.reshape(-1,1)
+            Gaux[:,aux_nao_c:] *= wcoulG.reshape(-1,1)
+        else:
+            Gaux *= wcoulG_lr.reshape(-1,1)
         kLR = Gaux.real.copy('C')
         kLI = Gaux.imag.copy('C')
         Gaux = None
@@ -338,6 +363,9 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                 for k, idx in enumerate(adapted_ji_idx):
                     v = np.vstack([fswap['j3c-junk/%d/%d'%(idx,i)][0,col0:col1].T
                                       for i in range(nsegs)])
+                    if split_auxbasis:
+                        v = np.vstack([v, np.zeros((aux_nao_d,col1-col0),
+                                      dtype=v.dtype)])
                     # vbar is the interaction between the background charge
                     # and the auxiliary basis.  0D, 1D, 2D do not have vbar.
                     if is_zero(kpt) and cell.dimension == 3:
@@ -427,18 +455,22 @@ class RangeSeparatedHybridDensityFitting2(df.rshdf.RSHDF):
         self.npw_max = 350
 
     def rs2_build(self):
-        """ make auxcell and auxcell_fat
+        """ make auxcell
         """
         from pyscf.df.addons import make_auxmol
-        self.auxcell = make_auxmol(self.cell, self.auxbasis)
+        auxcell = make_auxmol(self.cell, self.auxbasis)
 
+        # Reorder auxiliary basis such that compact shells come first.
+        # Note that unlike AOs, auxiliary basis is all primitive, so _reorder_cell won't split any shells -- just reorder them. So there's no need to differentiate auxcell and auxcell_fat.
         if self.split_basis:
             from pyscf.pbc.df.rshdf import _reorder_cell, _estimate_mesh_lr
-            self.auxcell_fat = _reorder_cell(self.auxcell, self.eta)
-            if self.auxcell_fat._nbas_each_set[1] > 0: # has diffuse shells
-                self.auxmesh_lr = _estimate_mesh_lr(self.auxcell_fat)
-            else:
-                self.auxcell_fat = None    # no split basis happens
+            auxcell_fat = _reorder_cell(auxcell, self.eta, self.npw_max)
+            if auxcell_fat._nbas_each_set[1] > 0: # has diffuse shells
+                auxcell = auxcell_fat
+
+        self.auxcell = auxcell
+
+        self.cell_fat = None    # for now
 
     def build(self, j_only=None, with_j3c=True, kpts_band=None):
         # build for range-separation
