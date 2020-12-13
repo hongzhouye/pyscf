@@ -356,10 +356,7 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
     # ao2mo_7d = rshdf_ao2mo.ao2mo_7d
 
     def __init__(self, cell, kpts=np.zeros((1,3))):
-        self.cell = cell
-        self.stdout = cell.stdout
-        self.verbose = cell.verbose
-        self.max_memory = cell.max_memory
+        df.df.GDF.__init__(self, cell, kpts=kpts)
 
         self.use_bvkcell = False    # for testing
         self.prescreening_type = 0
@@ -378,41 +375,15 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
 
         # If split_basis is True, each ao shell will be split into a diffuse (d)
         # part and a compact (c) part based on the pGTO exponents.
-        # If eta is given, eta will be used.
-        # If eta is not given but npw_lr_max is given, eta will be estimated by
+        # If eta_lr is given, eta_lr will be used.
+        # If eta_lr is not given but npw_lr_max is given, eta_lr will be estimated by
         # npw_lr_max (maximium number of PWs allowed).
-        # If neither eta nor mesh_lr is given, eta = omega**2 will be used.
+        # If neither eta_lr nor mesh_lr is given, eta_lr = omega**2 will be used.
         # ERIs of type (cc|dd), (cd|dd), and (dd|dd) will be computed using
         # AFDFT with mesh_lr.
-        self.eta = 0.2
+        self.eta_lr = 0.2
         self.cell_fat = None
         self.mesh_lr = None
-
-        # exp_to_discard to remove diffused fitting functions. The diffused
-        # fitting functions may cause linear dependency in DF metric. Removing
-        # the fitting functions whose exponents are smaller than exp_to_discard
-        # can improve the linear dependency issue. However, this parameter
-        # affects the quality of the auxiliary basis. The default value of
-        # this parameter was set to 0.2 in v1.5.1 or older and was changed to
-        # 0 since v1.5.2.
-        self.exp_to_discard = cell.exp_to_discard
-
-        # The following attributes are not input options.
-        self.exxdiv = None  # to mimic KRHF/KUHF object in function get_coulG
-        self.auxcell = None
-        self.blockdim = getattr(__config__, 'pbc_df_df_DF_blockdim', 240)
-        self.linear_dep_threshold = LINEAR_DEP_THR
-        self._j_only = False
-# If _cderi_to_save is specified, the 3C-integral tensor will be saved in this file.
-        self._cderi_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
-# If _cderi is specified, the 3C-integral tensor will be read from this file
-        self._cderi = None
-        self._rsh_df = {}  # Range separated Coulomb DF objects
-        self._keys = set(self.__dict__.keys())
-
-    @property
-    def mesh(self):
-        return self.mesh_sr
 
     def dump_flags(self, verbose=None):
         cell = self.cell
@@ -424,9 +395,10 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
                  cell.nbas, cell.nao_nr(), cell.npgto_nr())
         log.info('omega = %s', self.omega)
         log.info('ke_cutoff = %s', self.ke_cutoff)
+        log.info('mesh = %s (%d PWs)', self.mesh, np.prod(self.mesh))
         log.info('mesh_sr = %s (%d PWs)', self.mesh_sr, np.prod(self.mesh_sr))
         if not cell_fat is None:
-            log.info('smooth eta = %s', self.eta)
+            log.info('smooth eta_lr = %s', self.eta_lr)
             log.info('mesh_lr = %s (%d PWs)', self.mesh_lr,
                      np.prod(self.mesh_lr))
             log.info('cell_fat num shells = %d, num cGTOs = %d, num pGTOs = %d',
@@ -537,9 +509,9 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
             t1 = logger.timer_debug1(self, 'j3c', *t1)
 
     def rs_build(self):
-        # For each shell, using eta as a cutoff to split it into the diffuse (d) and the compact (c) parts.
+        # For each shell, using eta_lr as a cutoff to split it into the diffuse (d) and the compact (c) parts.
         if self.split_basis:
-            self.cell_fat = _reorder_cell(self.cell, self.eta)
+            self.cell_fat = _reorder_cell(self.cell, self.eta_lr)
             if self.cell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 self.mesh_lr = _estimate_mesh_lr(self.cell_fat,
                                                  self.cell.precision)

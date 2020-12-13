@@ -72,8 +72,6 @@ LONGRANGE_AFT_TURNOVER_THRESHOLD = 2.5
 
 
 def weighted_coulG(cell, omega, kpt=np.zeros(3), exx=False, mesh=None):
-    if mesh is None:
-        mesh = self.mesh
     if cell.omega != 0:
         raise RuntimeError('RangeSeparatedHybridDensityFitting2 cannot be used '
                            'to evaluate the long-range HF exchange in RSH '
@@ -132,7 +130,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     nao = cell.nao_nr()
     naux = auxcell.nao_nr()
-    mesh = mydf.mesh
+    mesh = mydf.mesh_sr
     Gv, Gvbase, kws = cell.get_Gv_weights(mesh)
     b = cell.reciprocal_vectors()
     gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
