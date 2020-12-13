@@ -702,27 +702,30 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, verbose=None):
 def _estimate_mesh_primitive(cell, precision, round2odd=True):
     ''' Estimate the minimum mesh for the diffuse shells.
     '''
-    # from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
-    # kecuts = _primitive_gto_cutoff(cell, cell.precision)[1]
-    # kecut = np.max([np.max(kecuts[ib]) for ib in range(nc, cell.nbas)])
-    from pyscf.pbc.gto.cell import _estimate_ke_cutoff
 
     if round2odd:
         fround = lambda x: df.df._round_off_to_odd_mesh(x)
     else:
         fround = lambda x: x
 
-    latvecs = cell.lattice_vectors()
-    meshs = [None] * cell.nbas
+    # from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
+    # kecuts = _primitive_gto_cutoff(cell, cell.precision)[1]
+
+    from pyscf.pbc.gto.cell import _estimate_ke_cutoff
+    kecuts = [None] * cell.nbas
     for ib in range(cell.nbas):
         nprim = cell.bas_nprim(ib)
         nctr = cell.bas_nctr(ib)
         es = cell.bas_exp(ib)
         cs = np.max(np.abs(cell.bas_ctr_coeff(ib).reshape(nctr,nprim)), axis=0)
         l = cell.bas_angular(ib)
-        kes = _estimate_ke_cutoff(es, l, cs, precision=precision)
+        kecuts[ib] = _estimate_ke_cutoff(es, l, cs, precision=precision)
+
+    latvecs = cell.lattice_vectors()
+    meshs = [None] * cell.nbas
+    for ib in range(cell.nbas):
         meshs[ib] = np.asarray([fround(pbctools.cutoff_to_mesh(latvecs, ke))
-                               for ke in kes])
+                               for ke in kecuts[ib]])
 
     return meshs
 
