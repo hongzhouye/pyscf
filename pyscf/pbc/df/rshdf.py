@@ -183,7 +183,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                                                 overwrite_b=True)
     else:
         j2c_inv = j2c
-    extra_precision = 1./(np.max(np.abs(j2c_inv), axis=1)+1.)
+    extra_precision = 1./(np.max(np.abs(j2c_inv), axis=0)+1.)
 
     prescreening_data = get_prescreening_data(mydf, cell_fat, extra_precision)
 
