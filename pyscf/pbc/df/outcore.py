@@ -391,7 +391,7 @@ def _aux_e2_hy_nosplitbas(cell, auxcell_or_auxbasis, erifile,
         if prescreening_type == 1:
             pbcopt = _pbcintor.PBCOpt1(pcell).init_rcut_cond(pcell,
                                                              prescreening_data)
-        elif prescreening_type == 2:
+        elif prescreening_type >= 2:
             pbcopt = _pbcintor.PBCOpt2(pcell).init_rcut_cond(pcell,
                                                              prescreening_data)
     from pyscf.pbc.df.incore import wrap_int3c_hy_nosplitbasis
@@ -564,7 +564,7 @@ def _aux_e2_hy_splitbas(cell, cell_fat, auxcell_or_auxbasis, erifile,
         if prescreening_type == 1:
             pbcopt = _pbcintor.PBCOpt1(pcell).init_rcut_cond(pcell,
                                                              prescreening_data)
-        elif prescreening_type == 2:
+        elif prescreening_type >= 2:
             pbcopt = _pbcintor.PBCOpt2(pcell).init_rcut_cond(pcell,
                                                              prescreening_data)
     from pyscf.pbc.df.incore import wrap_int3c_hy_splitbasis
@@ -718,7 +718,7 @@ def _aux_e2_hy_splitbas2(cell, cell_fat, auxcell_or_auxbasis, erifile,
         if prescreening_type == 1:
             pbcopt = _pbcintor.PBCOpt1(pcell).init_rcut_cond(pcell,
                                                              prescreening_data)
-        elif prescreening_type == 2:
+        elif prescreening_type >= 2:
             pbcopt = _pbcintor.PBCOpt2(pcell).init_rcut_cond(pcell,
                                                              prescreening_data)
     from pyscf.pbc.df.incore import wrap_int3c_hy_nosplitbasis

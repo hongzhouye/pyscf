@@ -550,6 +550,18 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
         if self.omega is None:
             # Otherwise, estimate it from the maximum allowed PW size (npw_max)
             omega = estimate_omega_for_npw(self.cell, self.npw_max)
+            # The short-range coulomb roughly corresponds to a 1s orb with exponent omega**2. So if omega**2 gets too small, rcut needs to be adjusted.
+            # [TODO] adjust rcut based on cell_fat when split basis
+            # eomega = omega**2.
+            # emin = np.min([np.min(self.cell.bas_exp(ib))
+            #               for ib in range(self.cell.nbas)])
+            # if eomega < emin:
+            #     from pyscf.pbc.gto.cell import _estimate_rcut
+            #     rcut = _estimate_rcut(eomega, 0, 1.,
+            #                           precision=self.cell.precision)
+            #     logger.warn(self, """The squared omega (%.2f) determined from the required PW size (%d PWs) is smaller than the minimum GTO exponents (%.2f). The recommended value for cell.rcut is %s (current value %s)""",
+            #                 eomega, self.npw_max, emin, rcut, self.cell.rcut)
+            #     raise RuntimeError
             # If basis is split, see if the most diffuse AOs in the compact AO group give a smaller one (hence fewer PWs needed)
             if not self.cell_fat is None:
                 nbas_c,nbas_d = self.cell_fat._nbas_each_set
@@ -776,9 +788,21 @@ def get_prescreening_data(mydf, cell_fat, extra_precision):
         cell_ = mydf.cell if cell_fat is None else cell_fat
         auxcell = mydf.auxcell
         omega = mydf.omega
+        from pyscf.pbc.df.rshdf_helper import _estimate_Rc_R12_cut as festimate
         Rc_cut_mat, R12_cut_mat = estimate_Rc_R12_cut_SPLIT(cell_, auxcell,
                                                             omega,
-                                                            extra_precision)
+                                                            extra_precision,
+                                                            festimate)
+        return Rc_cut_mat, R12_cut_mat
+    elif mydf.prescreening_type == 3:
+        cell_ = mydf.cell if cell_fat is None else cell_fat
+        auxcell = mydf.auxcell
+        omega = mydf.omega
+        from pyscf.pbc.df.rshdf_helper import _estimate_Rc_R12_cut2 as festimate
+        Rc_cut_mat, R12_cut_mat = estimate_Rc_R12_cut_SPLIT(cell_, auxcell,
+                                                            omega,
+                                                            extra_precision,
+                                                            festimate)
         return Rc_cut_mat, R12_cut_mat
     else:
         return None
@@ -826,9 +850,8 @@ def estimate_Rc_R12_cut_split(cell, auxcell, smooth_eta, extra_precision):
     print(ibaux_smooth, np.min(auxbas_exp[ibaux_smooth]))
 
 
-def estimate_Rc_R12_cut_SPLIT(cell, auxcell, omega, extra_precision):
-
-    from pyscf.pbc.df.rshdf_helper import _estimate_Rc_R12_cut
+def estimate_Rc_R12_cut_SPLIT(cell, auxcell, omega, extra_precision,
+                              festimate_Rc_R12_cut):
 
     nbas = cell.nbas
     aux_nbas = auxcell.nbas
@@ -856,7 +879,7 @@ def estimate_Rc_R12_cut_SPLIT(cell, auxcell, omega, extra_precision):
                 Rj = cell_coords[cell.bas_atom(jb)]
                 R0s = np.vstack([Ri-Raux,Rj-Raux])
                 precision = cell.precision * extra_prec[ibaux]
-                Rc_loc, R12_cut_lst_ = _estimate_Rc_R12_cut(eaux, ei, ej, omega,
+                Rc_loc, R12_cut_lst_ = festimate_Rc_R12_cut(eaux, ei, ej, omega,
                                                             Ls, cell_vol,
                                                             precision, R0s)
                 Rc_cut_mat[ibaux,ib,jb] = Rc_cut_mat[ibaux,jb,ib] = Rc_loc[-1]
