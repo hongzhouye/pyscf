@@ -774,10 +774,12 @@ def get_prescreening_data(mydf, cell_fat, extra_precision):
         auxcell = mydf.auxcell
         omega = mydf.omega
         from pyscf.pbc.df.rshdf_helper import _estimate_Rc_R12_cut2 as festimate
-        Rc_cut_mat, R12_cut_mat = estimate_Rc_R12_cut_SPLIT(cell_, auxcell,
-                                                            omega,
-                                                            extra_precision,
-                                                            festimate)
+        # Rc_cut_mat, R12_cut_mat = estimate_Rc_R12_cut_SPLIT(cell_, auxcell,
+        #                                                     omega,
+        #                                                     extra_precision,
+        #                                                     festimate)
+        Rc_cut_mat, R12_cut_mat = estimate_Rc_R12_cut_SPLIT_batch(
+                                        cell_, auxcell, omega, extra_precision)
         return Rc_cut_mat, R12_cut_mat
     else:
         return None
@@ -875,3 +877,14 @@ def estimate_Rc_R12_cut_SPLIT(cell, auxcell, omega, extra_precision,
                 ind += 1
 
     return Rc_cut_mat, R12_cut_mat
+
+
+def estimate_Rc_R12_cut_SPLIT_batch(cell, auxcell, omega, extra_precision):
+
+    from pyscf.pbc.df.rshdf_helper import _estimate_Rc_R12_cut2_batch
+    aux_ao_loc = auxcell.ao_loc_nr()
+    aux_nbas = auxcell.nbas
+    extra_prec = [np.min(extra_precision[range(*aux_ao_loc[i:i+2])])
+                  for i in range(aux_nbas)]
+    auxprecs = np.asarray(extra_prec) * cell.precision
+    return _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs)
