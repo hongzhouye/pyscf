@@ -378,7 +378,7 @@ def wrap_int3c_hy_nosplitbasis(cell, auxcell, shlpr_mask,
 def wrap_int3c_hy_spltbas(cell, cell0, auxcell, shlpr_mask,
                   intor='int3c2e', aosym='s1', comp=1,
                   kptij_lst=numpy.zeros((1,2,3)),
-                  cintopt=None, pbcopt=None,
+                  cintopt=None, pbcopt=None, rcut=None,
                   bvk_kmesh=None, prescreening_type=0):
     intor = cell._add_suffix(intor)
     pcell = copy.copy(cell)
@@ -391,7 +391,7 @@ def wrap_int3c_hy_spltbas(cell, cell0, auxcell, shlpr_mask,
                            dtype=numpy.int32)
     atm, bas, env = gto.conc_env(atm, bas, env,
                                  auxcell._atm, auxcell._bas, auxcell._env)
-    Ls = cell.get_lattice_Ls()
+    Ls = cell.get_lattice_Ls(rcut=rcut)
     nimgs = len(Ls)
     nbas = cell.nbas
 

@@ -430,10 +430,11 @@ def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
                                                   (Ls_sr[idx2]+Rj), axis=-1)**2.
                         rho0 = np.sum(np.exp(-etaij2 * R12s2_sr))
 
-                        Rcs_sr = np.sort(np.unique(Rcs_sr_raw[
-                                         Rcs_sr_raw < Rc_sr].round(1)))
-                        if Rcs_sr[0] < 1.e-10:  # effectively removing zero
-                            Rcs_sr[0] = dLs_sort[-1]
+                        Rcs_sr, nRcs_sr = np.unique(
+                                        Rcs_sr_raw[Rcs_sr_raw<Rc_sr].round(1),
+                                        return_counts=True)
+                        # effectively removing zero
+                        Rcs_sr[Rcs_sr<1.e-3] = dLs_sort[-1]
 
                         eta1s = 1./eauxs + 1./sumeij
                         eta2s = (eta1s + 1./omega**2.) ** -0.5
@@ -455,7 +456,7 @@ def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
                             f0 = lambda R: np.abs(scipy.special.erfc(eta1*R) -
                                                   scipy.special.erfc(eta2*R)) / R
 
-                            fsrmax = max(np.max(f0(Rcs_sr)), v0)
+                            fsrmax = max(np.max(f0(Rcs_sr)*nRcs_sr), v0)
 
                             # estimate Rc_cut using its long-range behavior
                             #     ~ fac * rho0 * dosc * Rc**2. * f0(Rc) < precision

@@ -196,8 +196,14 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
 # compute j2c first as it informs the integral screening in computing j3c
     # short-range part of j2c ~ (-kpt_ji | kpt_ji)
+    """
     with auxcell.with_range_coulomb(-omega):
         j2c = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
+    """
+    j2c_full = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
+    with auxcell.with_range_coulomb(omega):
+        j2c_lr = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
+    j2c = [j2c_full[k] - j2c_lr[k] for k in range(len(uniq_kpts))]
 
     # Add (1) short-range G=0 (i.e., charge) part and (2) long-range part
     qaux2 = None

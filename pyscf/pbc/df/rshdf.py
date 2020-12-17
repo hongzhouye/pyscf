@@ -722,6 +722,7 @@ def _estimate_mesh_lr(cell_fat, precision, round2odd=True):
     # from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
     # kecuts = _primitive_gto_cutoff(cell_fat, cell_fat.precision)[1]
     # kecut = np.max([np.max(kecuts[ib]) for ib in range(nc, cell_fat.nbas)])
+
     from pyscf.pbc.gto.cell import _estimate_ke_cutoff
     kecut = 0.
     for ib in range(nc,nc+nd):
