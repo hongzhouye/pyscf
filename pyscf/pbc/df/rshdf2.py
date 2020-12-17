@@ -284,8 +284,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     # short-range part
     if split_auxbasis:
-        cell_ = cell_fat if split_basis else cell
-        shls_slice = (0,cell_.nbas,0,cell_.nbas,0,aux_nbas_c)
+        shls_slice = (0,cell.nbas,0,cell.nbas,0,aux_nbas_c)
     else:
         shls_slice = None
 
