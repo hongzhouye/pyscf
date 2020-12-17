@@ -58,6 +58,7 @@ from pyscf.pbc import df
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.df import outcore
 from pyscf.pbc.df import rshdf_ao2mo
+from pyscf.pbc.df.rshdf_helper import ft_aopair_kpts_spltbas, fat_orig_loop
 from pyscf.pbc.tools import k2gamma
 from pyscf.df.outcore import _guess_shell_ranges
 from pyscf.pbc import tools as pbctools
@@ -87,6 +88,48 @@ def weighted_coulG(cell, omega, kpt=np.zeros(3), exx=False, mesh=None):
     return coulG
 
 
+def get_shlpr_aopr_mask(cell, cell_fat):
+    n_compact, n_diffuse = cell_fat._nbas_each_set
+    bas_idx = cell_fat._bas_idx
+    nbas_fat = cell_fat.nbas
+    shlpr_mask_fat_c = np.ones((nbas_fat, nbas_fat), dtype=np.int8,
+                               order="C")
+    shlpr_mask_fat_c[n_compact:,n_compact:] = 0
+    shlpr_mask_fat_d = 1 - shlpr_mask_fat_c
+
+    return shlpr_mask_fat_c, shlpr_mask_fat_d
+
+
+def get_aopr_mask(cell, cell_fat, shlpr_mask_fat_c, shlpr_mask_fat_d):
+    nbas = cell.nbas
+    nao = cell.nao
+    ao_loc = cell.ao_loc_nr()
+    bas_idx = cell_fat._bas_idx
+    mask_mat_c = np.ones((nao,nao), dtype=bool)
+    mask_mat_d = np.ones((nao,nao), dtype=bool)
+    fatbas_by_orig = [np.where(bas_idx==ib)[0] for ib in range(nbas)]
+    for ib in range(nbas):
+        ibs_fat = fatbas_by_orig[ib]
+        i0,i1 = ao_loc[ib:ib+2]
+        for jb in range(nbas):
+            jbs_fat = fatbas_by_orig[jb]
+            j0,j1 = ao_loc[jb:jb+2]
+            mask_mat_c[i0:i1,j0:j1] = (shlpr_mask_fat_c[
+                                       np.ix_(ibs_fat,jbs_fat)]).any()
+            mask_mat_d[i0:i1,j0:j1] = (shlpr_mask_fat_d[
+                                       np.ix_(ibs_fat,jbs_fat)]).any()
+
+    tril_idx = np.tril_indices_from(mask_mat_c)
+    # aosym = 's2' and 's1', respectively
+    aopr_mask_c = {"s2": mask_mat_c[tril_idx], "s1": np.ravel(mask_mat_c)}
+    aopr_mask_d = {"s2": mask_mat_d[tril_idx], "s1": np.ravel(mask_mat_d)}
+
+    ao_loc = cell.ao_loc_nr()
+    aopr_loc = {"s2": ao_loc*(ao_loc+1)//2, "s1": ao_loc*cell.nao_nr()}
+
+    return aopr_mask_c, aopr_mask_d, aopr_loc
+
+
 # kpti == kptj: s2 symmetry
 # kpti == kptj == 0 (gamma point): real
 def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
@@ -110,6 +153,13 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         aux_nao_d = aux_nao - aux_nao_c
     else:
         split_auxbasis = False
+
+    split_basis = not cell_fat is None
+    if split_basis:
+        shlpr_mask_fat_c, shlpr_mask_fat_d = get_shlpr_aopr_mask(cell, cell_fat)
+        aopr_mask_c, aopr_mask_d, aopr_loc = get_aopr_mask(cell, cell_fat,
+                                                           shlpr_mask_fat_c,
+                                                           shlpr_mask_fat_d)
 
     # The ideal way to hold the temporary integrals is to store them in the
     # cderi_file and overwrite them inplace in the second pass.  The current
@@ -234,19 +284,37 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     # short-range part
     if split_auxbasis:
-        shls_slice = (0,cell.nbas,0,cell.nbas,0,aux_nbas_c)
+        cell_ = cell_fat if split_basis else cell
+        shls_slice = (0,cell_.nbas,0,cell_.nbas,0,aux_nbas_c)
     else:
         shls_slice = None
-    with cell.with_range_coulomb(-omega), auxcell.with_range_coulomb(-omega):
-        outcore._aux_e2_hy(cell, auxcell, fswap, 'int3c2e', aosym='s2',
-                           kptij_lst=kptij_lst, dataname='j3c-junk',
-                           max_memory=max_memory,
-                           bvk_kmesh=bvk_kmesh,
-                           prescreening_type=mydf.prescreening_type,
-                           prescreening_data=prescreening_data,
-                           cell_fat=cell_fat,
-                           shls_slice=shls_slice)
+
+    if split_basis:
+        with cell.with_range_coulomb(-omega), \
+             auxcell.with_range_coulomb(-omega), \
+             cell_fat.with_range_coulomb(-omega):
+            outcore._aux_e2_hy_spltbas(
+                               cell, cell_fat, auxcell, fswap, 'int3c2e', aosym='s2',
+                               kptij_lst=kptij_lst, dataname='j3c-junk',
+                               max_memory=max_memory,
+                               bvk_kmesh=bvk_kmesh,
+                               prescreening_type=mydf.prescreening_type,
+                               prescreening_data=prescreening_data,
+                               shlpr_mask_fat=shlpr_mask_fat_c,
+                               shls_slice=shls_slice)
+    else:
+        with cell.with_range_coulomb(-omega), \
+             auxcell.with_range_coulomb(-omega):
+            outcore._aux_e2_hy(cell, auxcell, fswap, 'int3c2e', aosym='s2',
+                               kptij_lst=kptij_lst, dataname='j3c-junk',
+                               max_memory=max_memory,
+                               bvk_kmesh=bvk_kmesh,
+                               prescreening_type=mydf.prescreening_type,
+                               prescreening_data=prescreening_data,
+                               shls_slice=shls_slice)
     t1 = log.timer_debug1('3c2e', *t1)
+
+    prescreening_data = None
 
     # mute charges for diffuse auxiliary shells
     if split_auxbasis:
@@ -271,8 +339,14 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         shls_slice = (0, auxcell.nbas)
         Gaux = ft_ao.ft_ao(auxcell, Gv, shls_slice, b, gxyz, Gvbase, kpt)
         wcoulG_lr = weighted_coulG(cell, omega, kpt, False, mesh)
-        if split_auxbasis:
+        if split_basis or split_auxbasis:
             wcoulG = weighted_coulG(cell, 0, kpt, False, mesh)
+        if split_basis:
+            Gaux_d = Gaux * wcoulG.reshape(-1,1)
+            kLR_d = Gaux_d.real.copy('C')
+            kLI_d = Gaux_d.imag.copy('C')
+            Gaux_d = None
+        if split_auxbasis:
             Gaux[:,:aux_nao_c] *= wcoulG_lr.reshape(-1,1)
             Gaux[:,aux_nao_c:] *= wcoulG.reshape(-1,1)
         else:
@@ -287,8 +361,23 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
             if cell.dimension == 3:
                 vbar = qaux * g0
-                ovlp = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=adapted_kptjs)
-                ovlp = [lib.pack_tril(s) for s in ovlp]
+                if split_basis: # only compute ovlp for cc and cd
+                    nao_fat = cell_fat.nao_nr()
+                    ovlp_fat = np.asarray(cell_fat.pbc_intor('int1e_ovlp',
+                                          hermi=1,
+                                          kpts=adapted_kptjs)).real.reshape(
+                                          -1,nao_fat*nao_fat)
+                    ovlp = np.zeros((ovlp_fat.shape[0],nao*nao),
+                                    dtype=ovlp_fat.dtype)
+                    for iap_fat, iap in fat_orig_loop(cell_fat, cell,
+                                                      aosym='s1',
+                                                      shlpr_mask=shlpr_mask_fat_c):
+                        ovlp[:,iap] += ovlp_fat[:,iap_fat]
+                    ovlp = [lib.pack_tril(s.reshape(nao,nao)) for s in ovlp]
+                else:
+                    ovlp = cell.pbc_intor('int1e_ovlp', hermi=1,
+                                          kpts=adapted_kptjs)
+                    ovlp = [lib.pack_tril(s) for s in ovlp]
         else:
             aosym = 's1'
             nao_pair = nao**2
@@ -297,7 +386,9 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         log.debug2('memory = %s', mem_now)
         max_memory = max(2000, mydf.max_memory-mem_now)
         # nkptj for 3c-coulomb arrays plus 1 Lpq array
-        buflen = min(max(int(max_memory*.38e6/16/naux/(nkptj+1)), 1), nao_pair)
+        nbuf_extra = 1 if split_basis and mydf.split_basis_pwcntr == 1 else 0
+        buflen = min(max(int(max_memory*.38e6/16/naux/(nkptj+1+nbuf_extra)), 1),
+                     nao_pair)
         shranges = _guess_shell_ranges(cell, buflen, aosym)
         buflen = max([x[2] for x in shranges])
         # +1 for a pqkbuf
@@ -310,6 +401,9 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         pqkIbuf = np.empty(buflen*Gblksize)
         # buf for ft_aopair
         buf = np.empty(nkptj*buflen*Gblksize, dtype=np.complex128)
+        if split_basis and mydf.split_basis_pwcntr == 1:
+            ncol_max = np.max([shrg[-1] for shrg in shranges])
+            jbuf = np.empty(ncol_max*naux, dtype=np.float64)
         def pw_contract(istep, sh_range, j3cR, j3cI):
             bstart, bend, ncol = sh_range
             if aosym == 's2':
@@ -317,29 +411,166 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
             else:
                 shls_slice = (bstart, bend, 0, cell.nbas)
 
-            for p0, p1 in lib.prange(0, ngrids, Gblksize):
-                tick_ = np.asarray([time.clock(), time.time()])
-                dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice, aosym,
-                                           b, gxyz[p0:p1], Gvbase, kpt,
-                                           adapted_kptjs, out=buf,
-                                           bvk_kmesh=bvk_kmesh)
-                tock_ = np.asarray([time.clock(), time.time()])
-                tspans[0] += tock_ - tick_
-                nG = p1 - p0
-                for k, ji in enumerate(adapted_ji_idx):
-                    aoao = dat[k].reshape(nG,ncol)
-                    pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
-                    pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
-                    pqkR[:] = aoao.real.T
-                    pqkI[:] = aoao.imag.T
+            if split_basis and mydf.split_basis_pwcntr == 1:
+                astart = aopr_loc[aosym][bstart]
+                aend = aopr_loc[aosym][bend]
+                mask_c = aopr_mask_c[aosym][astart:aend]
+                mask_d = aopr_mask_d[aosym][astart:aend]
+                ncol_c = np.sum(mask_c)
+                ncol_d = np.sum(mask_d)
+                has_c = mask_c.any()
+                has_d = mask_d.any()
 
-                    lib.dot(kLR[p0:p1].T, pqkR.T, 1, j3cR[k][:], 1)
-                    lib.dot(kLI[p0:p1].T, pqkI.T, 1, j3cR[k][:], 1)
-                    if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
-                        lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3cI[k][:], 1)
-                        lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3cI[k][:], 1)
-                tick_ = np.asarray([time.clock(), time.time()])
-                tspans[1] += tick_ - tock_
+                for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                    if has_c:
+                        tick_ = np.asarray([time.clock(), time.time()])
+                        # long-range coulomb for cc and cd
+                        dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
+                                                     shls_slice, aosym,
+                                                     b, gxyz[p0:p1], Gvbase,
+                                                     kpt, adapted_kptjs,
+                                                     out=buf,
+                                                     bvk_kmesh=bvk_kmesh,
+                                                     shlpr_mask=shlpr_mask_fat_c)
+                        tock_ = np.asarray([time.clock(), time.time()])
+                        tspans[0] += tock_ - tick_
+                        nG = p1 - p0
+                        for k, ji in enumerate(adapted_ji_idx):
+                            aoao = dat[k].reshape(nG,ncol)[:,mask_c]
+                            pqkR = np.ndarray((ncol_c,nG), buffer=pqkRbuf)
+                            pqkI = np.ndarray((ncol_c,nG), buffer=pqkIbuf)
+                            pqkR[:] = aoao.real.T
+                            pqkI[:] = aoao.imag.T
+
+                            j3c_ = np.ndarray((naux,ncol_c), buffer=jbuf)
+                            lib.dot(kLR[p0:p1].T, pqkR.T, 1, j3c_, 0)
+                            lib.dot(kLI[p0:p1].T, pqkI.T, 1, j3c_, 1)
+                            j3cR[k][:,mask_c] += j3c_
+                            if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                                lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3c_, 0)
+                                lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3c_, 1)
+                                j3cI[k][:,mask_c] += j3c_
+                        tick_ = np.asarray([time.clock(), time.time()])
+                        tspans[1] += tick_ - tock_
+
+                    # add full coulomb for dd
+                    if has_d:
+                        tick_ = np.asarray([time.clock(), time.time()])
+                        dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
+                                                     shls_slice, aosym,
+                                                     b, gxyz[p0:p1], Gvbase,
+                                                     kpt, adapted_kptjs,
+                                                     out=buf,
+                                                     bvk_kmesh=bvk_kmesh,
+                                                     shlpr_mask=shlpr_mask_fat_d)
+                        tock_ = np.asarray([time.clock(), time.time()])
+                        tspans[0] += tock_ - tick_
+
+                        for k, ji in enumerate(adapted_ji_idx):
+                            aoao = dat[k].reshape(nG,ncol)[:,mask_d]
+                            pqkR = np.ndarray((ncol_d,nG), buffer=pqkRbuf)
+                            pqkI = np.ndarray((ncol_d,nG), buffer=pqkIbuf)
+                            pqkR[:] = aoao.real.T
+                            pqkI[:] = aoao.imag.T
+
+                            j3c_ = np.ndarray((naux,ncol_d), buffer=jbuf)
+                            lib.dot(kLR_d[p0:p1].T, pqkR.T, 1, j3c_, 0)
+                            lib.dot(kLI_d[p0:p1].T, pqkI.T, 1, j3c_, 1)
+                            j3cR[k][:,mask_d] += j3c_
+                            if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                                lib.dot(kLR_d[p0:p1].T, pqkI.T, 1, j3c_, 0)
+                                lib.dot(kLI_d[p0:p1].T, pqkR.T, -1, j3c_, 1)
+                                j3cI[k][:,mask_d] += j3c_
+                        tick_ = np.asarray([time.clock(), time.time()])
+                        tspans[1] += tick_ - tock_
+            elif split_basis and mydf.split_basis_pwcntr == 2:
+                astart = aopr_loc[aosym][bstart]
+                aend = aopr_loc[aosym][bend]
+                mask_c = aopr_mask_c[aosym][astart:aend]
+                mask_d = aopr_mask_d[aosym][astart:aend]
+                has_c = mask_c.any()
+                has_d = mask_d.any()
+
+                for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                    if has_c:
+                        tick_ = np.asarray([time.clock(), time.time()])
+                        # long-range coulomb for cc and cd
+                        dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
+                                                     shls_slice, aosym,
+                                                     b, gxyz[p0:p1], Gvbase,
+                                                     kpt, adapted_kptjs,
+                                                     out=buf,
+                                                     bvk_kmesh=bvk_kmesh,
+                                                     shlpr_mask=shlpr_mask_fat_c)
+                        tock_ = np.asarray([time.clock(), time.time()])
+                        tspans[0] += tock_ - tick_
+                        nG = p1 - p0
+                        for k, ji in enumerate(adapted_ji_idx):
+                            aoao = dat[k].reshape(nG,ncol)
+                            pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
+                            pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
+                            pqkR[:] = aoao.real.T
+                            pqkI[:] = aoao.imag.T
+
+                            lib.dot(kLR[p0:p1].T, pqkR.T, 1, j3cR[k], 1)
+                            lib.dot(kLI[p0:p1].T, pqkI.T, 1, j3cR[k], 1)
+                            if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                                lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3cI[k], 1)
+                                lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3cI[k], 1)
+                        tick_ = np.asarray([time.clock(), time.time()])
+                        tspans[1] += tick_ - tock_
+
+                    # add full coulomb for dd
+                    if has_d:
+                        tick_ = np.asarray([time.clock(), time.time()])
+                        dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
+                                                     shls_slice, aosym,
+                                                     b, gxyz[p0:p1], Gvbase,
+                                                     kpt, adapted_kptjs,
+                                                     out=buf,
+                                                     bvk_kmesh=bvk_kmesh,
+                                                     shlpr_mask=shlpr_mask_fat_d)
+                        tock_ = np.asarray([time.clock(), time.time()])
+                        tspans[0] += tock_ - tick_
+
+                        for k, ji in enumerate(adapted_ji_idx):
+                            aoao = dat[k].reshape(nG,ncol)
+                            pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
+                            pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
+                            pqkR[:] = aoao.real.T
+                            pqkI[:] = aoao.imag.T
+
+                            lib.dot(kLR_d[p0:p1].T, pqkR.T, 1, j3cR[k], 1)
+                            lib.dot(kLI_d[p0:p1].T, pqkI.T, 1, j3cR[k], 1)
+                            if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                                lib.dot(kLR_d[p0:p1].T, pqkI.T, 1, j3cI[k], 1)
+                                lib.dot(kLI_d[p0:p1].T, pqkR.T, -1, j3cI[k], 1)
+                        tick_ = np.asarray([time.clock(), time.time()])
+                        tspans[1] += tick_ - tock_
+            else:
+                for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                    tick_ = np.asarray([time.clock(), time.time()])
+                    dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice,
+                                               aosym, b, gxyz[p0:p1], Gvbase,
+                                               kpt, adapted_kptjs, out=buf,
+                                               bvk_kmesh=bvk_kmesh)
+                    tock_ = np.asarray([time.clock(), time.time()])
+                    tspans[0] += tock_ - tick_
+                    nG = p1 - p0
+                    for k, ji in enumerate(adapted_ji_idx):
+                        aoao = dat[k].reshape(nG,ncol)
+                        pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
+                        pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
+                        pqkR[:] = aoao.real.T
+                        pqkI[:] = aoao.imag.T
+
+                        lib.dot(kLR[p0:p1].T, pqkR.T, 1, j3cR[k][:], 1)
+                        lib.dot(kLI[p0:p1].T, pqkI.T, 1, j3cR[k][:], 1)
+                        if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                            lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3cI[k][:], 1)
+                            lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3cI[k][:], 1)
+                    tick_ = np.asarray([time.clock(), time.time()])
+                    tspans[1] += tick_ - tock_
 
             for k, ji in enumerate(adapted_ji_idx):
                 tick_ = np.asarray([time.clock(), time.time()])
@@ -470,8 +701,8 @@ class RangeSeparatedHybridDensityFitting2(df.rshdf.RSHDF):
     def __init__(self, cell, kpts=np.zeros((1,3))):
         df.rshdf.RSHDF.__init__(self, cell, kpts=kpts)
 
-        self.auxcell_fat = None
         self.npw_max = 350
+        self.split_basis_pwcntr = 1 # 1 or 2
 
     def rs2_build(self):
         """ make auxcell
@@ -481,7 +712,7 @@ class RangeSeparatedHybridDensityFitting2(df.rshdf.RSHDF):
 
         # Reorder auxiliary basis such that compact shells come first.
         # Note that unlike AOs, auxiliary basis is all primitive, so _reorder_cell won't split any shells -- just reorder them. So there's no need to differentiate auxcell and auxcell_fat.
-        if self.split_basis:
+        if self.split_auxbasis:
             from pyscf.pbc.df.rshdf import _reorder_cell, _estimate_mesh_lr
             auxcell_fat = _reorder_cell(auxcell, self.eta, self.npw_max)
             if auxcell_fat._nbas_each_set[1] > 0: # has diffuse shells
@@ -489,7 +720,7 @@ class RangeSeparatedHybridDensityFitting2(df.rshdf.RSHDF):
 
         self.auxcell = auxcell
 
-        self.cell_fat = None    # for now
+        # self.cell_fat = None    # for now
 
     def build(self, j_only=None, with_j3c=True, kpts_band=None):
         # build for range-separation

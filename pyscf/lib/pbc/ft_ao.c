@@ -243,6 +243,85 @@ static void _ft_bvk_k(int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
         }
 }
 
+static void _ft_bvk_k_spltbas(
+                      int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
+                      void (*fsort)(), double complex *out,
+                      int nkpts, int comp, int nimgs, int bvk_nimgs, int blksize,
+                      int ish, int jsh, int ish_orig, int jsh_orig,
+                      int *cell_loc_bvk, char *ovlp_mask,
+                      double complex *buf, double *env_loc, double *Ls,
+                      double complex *expkL, int *shls_slice, int *ao_loc,
+                      int *shls_slice_orig, int *ao_loc_orig,
+                      double *sGv, double *b, int *sgxyz, int *gs, int nGv,
+                      int *atm, int natm, int *bas, int nbas, double *env)
+{
+        const int ish0 = shls_slice[0];
+        const int jsh0 = shls_slice[2];
+        const int jsh1 = shls_slice[3];
+        const int njsh = jsh1 - jsh0;
+        ovlp_mask += (ish * njsh + jsh) * nimgs;
+        ish += ish0;
+        jsh += jsh0;
+
+        const int ish0_orig = shls_slice_orig[0];
+        const int jsh0_orig = shls_slice_orig[2];
+        ish_orig += ish0_orig;
+        jsh_orig += jsh0_orig;
+
+        const int di = ao_loc[ish+1] - ao_loc[ish];
+        const int dj = ao_loc[jsh+1] - ao_loc[jsh];
+        const int dij = di * dj;
+        const char TRANS_N = 'N';
+        const double complex Z1 = 1;
+        const double complex Z0 = 0;
+
+        int jptrxyz = atm[PTR_COORD+bas[ATOM_OF+jsh*BAS_SLOTS]*ATM_SLOTS];
+        int shls[2] = {ish, jsh};
+        int dims[2] = {di, dj};
+        double complex *buf_rs = buf;
+        double complex *bufL = buf + dij * blksize * comp * nkpts;
+        double complex *pbuf;
+        int gs0, gs1, dg, dijg;
+        int jL, i;
+
+        for (gs0 = 0; gs0 < nGv; gs0 += blksize) {
+                gs1 = MIN(gs0+blksize, nGv);
+                dg = gs1 - gs0;
+                dijg = dij * dg * comp;
+                for (i = 0; i < dijg*bvk_nimgs; i++) {
+                        bufL[i] = 0;
+                }
+
+                for (jL = 0; jL < nimgs; jL++) {
+                        if (!ovlp_mask[jL]) {
+                                continue;
+                        }
+
+                        shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                        if ((*intor)(buf_rs, shls, dims, eval_aopair, eval_gz,
+                                     Z1, sGv, b, sgxyz, gs, dg,
+                                     atm, natm, bas, nbas, env_loc)) {
+                                pbuf = bufL + dijg * cell_loc_bvk[jL];
+                                for (i = 0; i < dijg; i++) {
+                                        pbuf[i] += buf_rs[i];
+                                }
+
+                        }
+                }
+
+                zgemm_(&TRANS_N, &TRANS_N, &dijg, &nkpts, &bvk_nimgs,
+                       &Z1, bufL, &dijg, expkL, &bvk_nimgs, &Z0, buf, &dijg);
+
+                (*fsort)(out, buf, shls_slice_orig, ao_loc_orig,
+                         nkpts, comp, nGv, ish_orig, jsh_orig, gs0, gs1);
+
+                sGv += dg * 3;
+                if (sgxyz != NULL) {
+                        sgxyz += dg * 3;
+                }
+        }
+}
+
 /*
  * Single k-point for BvK cell
  */
@@ -302,6 +381,78 @@ static void _ft_bvk_nk1(int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
 
                 (*fsort)(out, buf, shls_slice, ao_loc,
                          nkpts, comp, nGv, ish, jsh, gs0, gs1);
+
+                sGv += dg * 3;
+                if (sgxyz != NULL) {
+                        sgxyz += dg * 3;
+                }
+        }
+}
+
+static void _ft_bvk_nk1_spltbas(
+                        int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
+                        void (*fsort)(), double complex *out,
+                        int nkpts, int comp, int nimgs, int bvk_nimgs, int blksize,
+                        int ish, int jsh, int ish_orig, int jsh_orig,
+                        int *cell_loc_bvk, char *ovlp_mask,
+                        double complex *buf, double *env_loc, double *Ls,
+                        double complex *expkL, int *shls_slice, int *ao_loc,
+                        int *shls_slice_orig, int *ao_loc_orig,
+                        double *sGv, double *b, int *sgxyz, int *gs, int nGv,
+                        int *atm, int natm, int *bas, int nbas, double *env)
+{
+        const int ish0 = shls_slice[0];
+        const int jsh0 = shls_slice[2];
+        const int jsh1 = shls_slice[3];
+        const int njsh = jsh1 - jsh0;
+        ovlp_mask += (ish * njsh + jsh) * nimgs;
+        ish += ish0;
+        jsh += jsh0;
+
+        const int ish0_orig = shls_slice_orig[0];
+        const int jsh0_orig = shls_slice_orig[2];
+        ish_orig += ish0_orig;
+        jsh_orig += jsh0_orig;
+
+        const int di = ao_loc[ish+1] - ao_loc[ish];
+        const int dj = ao_loc[jsh+1] - ao_loc[jsh];
+        const int dij = di * dj;
+
+        int jptrxyz = atm[PTR_COORD+bas[ATOM_OF+jsh*BAS_SLOTS]*ATM_SLOTS];
+        int shls[2] = {ish, jsh};
+        int dims[2] = {di, dj};
+        double complex fac;
+        double complex *buf_rs = buf + dij * blksize * comp;
+        int gs0, gs1, dg, jL, i;
+        size_t dijg;
+
+        for (gs0 = 0; gs0 < nGv; gs0 += blksize) {
+                gs1 = MIN(gs0+blksize, nGv);
+                dg = gs1 - gs0;
+                dijg = dij * dg * comp;
+                for (i = 0; i < dijg; i++) {
+                        buf[i] = 0;
+                }
+
+                for (jL = 0; jL < nimgs; jL++) {
+                        if (!ovlp_mask[jL]) {
+                                continue;
+                        }
+
+                        shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                        fac = expkL[cell_loc_bvk[jL]];
+                        if ((*intor)(buf_rs, shls, dims, eval_aopair, eval_gz,
+                                     fac, sGv, b, sgxyz, gs, dg,
+                                     atm, natm, bas, nbas, env_loc)) {
+                                for (i = 0; i < dijg; i++) {
+                                        buf[i] += buf_rs[i];
+                                }
+
+                        }
+                }
+
+                (*fsort)(out, buf, shls_slice_orig, ao_loc_orig,
+                         nkpts, comp, nGv, ish_orig, jsh_orig, gs0, gs1);
 
                 sGv += dg * 3;
                 if (sgxyz != NULL) {
@@ -431,6 +582,127 @@ static void sort_s2_ieqj(double complex *out, double complex *in,
         } }
 }
 
+static void sort_s1_spltbas(double complex *out, double complex *in,
+                    int *shls_slice, int *ao_loc, int nkpts, int comp,
+                    int nGv, int ish, int jsh, int gs0, int gs1)
+{
+        const size_t NGv = nGv;
+        const int ish0 = shls_slice[0];
+        const int ish1 = shls_slice[1];
+        const int jsh0 = shls_slice[2];
+        const int jsh1 = shls_slice[3];
+        const size_t naoi = ao_loc[ish1] - ao_loc[ish0];
+        const size_t naoj = ao_loc[jsh1] - ao_loc[jsh0];
+        const size_t nijg = naoi * naoj * NGv;
+
+        const int di = ao_loc[ish+1] - ao_loc[ish];
+        const int dj = ao_loc[jsh+1] - ao_loc[jsh];
+        const int ip = ao_loc[ish] - ao_loc[ish0];
+        const int jp = ao_loc[jsh] - ao_loc[jsh0];
+        const int dg = gs1 - gs0;
+        const size_t dijg = di * dj * dg;
+        out += (ip * naoj + jp) * NGv + gs0;
+
+        int i, j, n, ic, kk;
+        double complex *pin, *pout;
+
+        for (kk = 0; kk < nkpts; kk++) {
+        for (ic = 0; ic < comp; ic++) {
+                for (j = 0; j < dj; j++) {
+                for (i = 0; i < di; i++) {
+                        pout = out + (i*naoj+j) * NGv;
+                        pin  = in + (j*di+i) * dg;
+                        for (n = 0; n < dg; n++) {
+                                pout[n] += pin[n];
+                        }
+                } }
+                out += nijg;
+                in  += dijg;
+        } }
+}
+
+static void sort_s2_igtj_spltbas(double complex *out, double complex *in,
+                         int *shls_slice, int *ao_loc, int nkpts, int comp,
+                         int nGv, int ish, int jsh, int gs0, int gs1)
+{
+        const size_t NGv = nGv;
+        const int ish0 = shls_slice[0];
+        const int ish1 = shls_slice[1];
+        const int jsh0 = shls_slice[2];
+        const size_t off0 = ao_loc[ish0] * (ao_loc[ish0] + 1) / 2;
+        const size_t nij = ao_loc[ish1] * (ao_loc[ish1] + 1) / 2 - off0;
+        const size_t nijg = nij * NGv;
+
+        const int di = ao_loc[ish+1] - ao_loc[ish];
+        const int dj = ao_loc[jsh+1] - ao_loc[jsh];
+        const int dij = di * dj;
+        const int dg = gs1 - gs0;
+        const size_t dijg = dij * dg;
+        const int jp = ao_loc[jsh] - ao_loc[jsh0];
+        out += (ao_loc[ish]*(ao_loc[ish]+1)/2-off0 + jp) * NGv + gs0;
+
+        const int ip1 = ao_loc[ish] + 1;
+        int i, j, n, ic, kk;
+        double complex *pin, *pout;
+
+        for (kk = 0; kk < nkpts; kk++) {
+        for (ic = 0; ic < comp; ic++) {
+                pout = out;
+                for (i = 0; i < di; i++) {
+                        for (j = 0; j < dj; j++) {
+                                pin = in + (j*di+i) * dg;
+                                for (n = 0; n < dg; n++) {
+                                        pout[j*NGv+n] += pin[n];
+                                }
+                        }
+                        pout += (ip1 + i) * NGv;
+                }
+                out += nijg;
+                in  += dijg;
+        } }
+}
+
+static void sort_s2_ieqj_spltbas(double complex *out, double complex *in,
+                         int *shls_slice, int *ao_loc, int nkpts, int comp,
+                         int nGv, int ish, int jsh, int gs0, int gs1)
+{
+        const size_t NGv = nGv;
+        const int ish0 = shls_slice[0];
+        const int ish1 = shls_slice[1];
+        const int jsh0 = shls_slice[2];
+        const size_t off0 = ao_loc[ish0] * (ao_loc[ish0] + 1) / 2;
+        const size_t nij = ao_loc[ish1] * (ao_loc[ish1] + 1) / 2 - off0;
+        const size_t nijg = nij * NGv;
+
+        const int di = ao_loc[ish+1] - ao_loc[ish];
+        const int dj = ao_loc[jsh+1] - ao_loc[jsh];
+        const int dij = di * dj;
+        const int dg = gs1 - gs0;
+        const size_t dijg = dij * dg;
+        const int jp = ao_loc[jsh] - ao_loc[jsh0];
+        out += (ao_loc[ish]*(ao_loc[ish]+1)/2-off0 + jp) * NGv + gs0;
+
+        const int ip1 = ao_loc[ish] + 1;
+        int i, j, n, ic, kk;
+        double complex *pin, *pout;
+
+        for (kk = 0; kk < nkpts; kk++) {
+        for (ic = 0; ic < comp; ic++) {
+                pout = out;
+                for (i = 0; i < di; i++) {
+                        for (j = 0; j <= i; j++) {
+                                pin = in + (j*di+i) * dg;
+                                for (n = 0; n < dg; n++) {
+                                        pout[j*NGv+n] += pin[n];
+                                }
+                        }
+                        pout += (ip1 + i) * NGv;
+                }
+                out += nijg;
+                in  += dijg;
+        } }
+}
+
 void PBC_ft_fill_ks1(int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
                      double complex *out, int nkpts, int comp, int nimgs,
                      int blksize, int ish, int jsh,
@@ -539,6 +811,28 @@ void PBC_ft_bvk_ks1(int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
                   sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
 }
 
+void PBC_ft_bvk_ks1_spltbas(
+                    int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
+                    double complex *out, int nkpts, int comp, int nimgs,
+                    int bvk_nimgs, int blksize,
+                    int ish, int jsh, int ish_orig, int jsh_orig,
+                    int *cell_loc_bvk, char *ovlp_mask,
+                    double complex *buf, double *env_loc, double *Ls,
+                    double complex *expkL, int *shls_slice, int *ao_loc,
+                    int *shls_slice_orig, int *ao_loc_orig,
+                    double *sGv, double *b, int *sgxyz, int *gs, int nGv,
+                    int *atm, int natm, int *bas, int nbas, double *env,
+                    int nbas_orig)
+{
+        _ft_bvk_k_spltbas(intor, eval_aopair, eval_gz, &sort_s1_spltbas,
+                  out, nkpts, comp, nimgs, bvk_nimgs, blksize,
+                  ish, jsh, ish_orig, jsh_orig,
+                  cell_loc_bvk, ovlp_mask,
+                  buf, env_loc, Ls, expkL, shls_slice, ao_loc,
+                  shls_slice_orig, ao_loc_orig,
+                  sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
+}
+
 void PBC_ft_bvk_ks2(int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
                     double complex *out, int nkpts, int comp, int nimgs,
                     int bvk_nimgs, int blksize, int ish, int jsh,
@@ -561,6 +855,42 @@ void PBC_ft_bvk_ks2(int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
                           out, nkpts, comp, nimgs, bvk_nimgs, blksize,
                           ish, jsh, cell_loc_bvk, ovlp_mask,
                           buf, env_loc, Ls, expkL, shls_slice, ao_loc,
+                          sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
+        }
+}
+
+void PBC_ft_bvk_ks2_spltbas(
+                    int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
+                    double complex *out, int nkpts, int comp, int nimgs,
+                    int bvk_nimgs, int blksize,
+                    int ish, int jsh, int ish_orig, int jsh_orig,
+                    int *cell_loc_bvk, char *ovlp_mask,
+                    double complex *buf, double *env_loc, double *Ls,
+                    double complex *expkL, int *shls_slice, int *ao_loc,
+                    int *shls_slice_orig, int *ao_loc_orig,
+                    double *sGv, double *b, int *sgxyz, int *gs, int nGv,
+                    int *atm, int natm, int *bas, int nbas, double *env,
+                    int nbas_orig)
+{
+        int ip = ish_orig + shls_slice_orig[0];
+        int jp = jsh_orig + shls_slice_orig[2] - nbas_orig;
+        if (ip > jp) {
+                _ft_bvk_k_spltbas(intor, eval_aopair, eval_gz,
+                          &sort_s2_igtj_spltbas,
+                          out, nkpts, comp, nimgs, bvk_nimgs, blksize,
+                          ish, jsh, ish_orig, jsh_orig,
+                          cell_loc_bvk, ovlp_mask,
+                          buf, env_loc, Ls, expkL, shls_slice, ao_loc,
+                          shls_slice_orig, ao_loc_orig,
+                          sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
+        } else if (ip == jp) {
+                _ft_bvk_k_spltbas(intor, eval_aopair, eval_gz,
+                          &sort_s2_ieqj_spltbas,
+                          out, nkpts, comp, nimgs, bvk_nimgs, blksize,
+                          ish, jsh, ish_orig, jsh_orig,
+                          cell_loc_bvk, ovlp_mask,
+                          buf, env_loc, Ls, expkL, shls_slice, ao_loc,
+                          shls_slice_orig, ao_loc_orig,
                           sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
         }
 }
@@ -623,6 +953,63 @@ void PBC_ft_bvk_nk1s2(int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
                             out, nkpts, comp, nimgs, bvk_nimgs, blksize,
                             ish, jsh, cell_loc_bvk, ovlp_mask,
                             buf, env_loc, Ls, expkL, shls_slice, ao_loc,
+                            sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
+        }
+}
+
+void PBC_ft_bvk_nk1s1_spltbas(
+                      int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
+                      double complex *out, int nkpts, int comp, int nimgs,
+                      int bvk_nimgs, int blksize,
+                      int ish, int jsh, int ish_orig, int jsh_orig,
+                      int *cell_loc_bvk, char *ovlp_mask,
+                      double complex *buf, double *env_loc, double *Ls,
+                      double complex *expkL, int *shls_slice, int *ao_loc,
+                      int *shls_slice_orig, int *ao_loc_orig,
+                      double *sGv, double *b, int *sgxyz, int *gs, int nGv,
+                      int *atm, int natm, int *bas, int nbas, double *env)
+{
+        _ft_bvk_nk1_spltbas(intor, eval_aopair, eval_gz, &sort_s1_spltbas,
+                    out, nkpts, comp, nimgs, bvk_nimgs, blksize,
+                    ish, jsh, ish_orig, jsh_orig,
+                    cell_loc_bvk, ovlp_mask,
+                    buf, env_loc, Ls, expkL, shls_slice, ao_loc,
+                    shls_slice_orig, ao_loc_orig,
+                    sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
+}
+
+void PBC_ft_bvk_nk1s2_spltbas(
+                      int (*intor)(), int (*eval_aopair)(), void (*eval_gz)(),
+                      double complex *out, int nkpts, int comp, int nimgs,
+                      int bvk_nimgs, int blksize,
+                      int ish, int jsh, int ish_orig, int jsh_orig,
+                      int *cell_loc_bvk, char *ovlp_mask,
+                      double complex *buf, double *env_loc, double *Ls,
+                      double complex *expkL, int *shls_slice, int *ao_loc,
+                      int *shls_slice_orig, int *ao_loc_orig,
+                      double *sGv, double *b, int *sgxyz, int *gs, int nGv,
+                      int *atm, int natm, int *bas, int nbas, double *env,
+                      int nbas_orig)
+{
+        int ip = ish_orig + shls_slice_orig[0];
+        int jp = jsh_orig + shls_slice_orig[2] - nbas_orig;
+        if (ip > jp) {
+                _ft_bvk_nk1_spltbas(intor, eval_aopair, eval_gz,
+                            &sort_s2_igtj_spltbas,
+                            out, nkpts, comp, nimgs, bvk_nimgs, blksize,
+                            ish, jsh, ish_orig, jsh_orig,
+                            cell_loc_bvk, ovlp_mask,
+                            buf, env_loc, Ls, expkL, shls_slice, ao_loc,
+                            shls_slice_orig, ao_loc_orig,
+                            sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
+        } else if (ip == jp) {
+                _ft_bvk_nk1_spltbas(intor, eval_aopair, eval_gz,
+                            &sort_s2_ieqj_spltbas,
+                            out, nkpts, comp, nimgs, bvk_nimgs, blksize,
+                            ish, jsh, ish_orig, jsh_orig,
+                            cell_loc_bvk, ovlp_mask,
+                            buf, env_loc, Ls, expkL, shls_slice, ao_loc,
+                            shls_slice_orig, ao_loc_orig,
                             sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
         }
 }
@@ -764,6 +1151,87 @@ void PBC_ft_bvk_drv(int (*intor)(), void (*eval_gz)(), void (*fill)(),
                         i, j, cell_loc_bvk, ovlp_mask,
                         buf, env_loc, Ls, expkL, shls_slice, ao_loc,
                         sGv, b, sgxyz, gs, nGv, atm, natm, bas, nbas, env);
+        }
+        free(buf);
+        free(env_loc);
+}
+        free(sGv);
+        if (sgxyz != NULL) {
+                free(sgxyz);
+        }
+}
+
+void PBC_ft_bvk_spltbas_drv(int (*intor)(), void (*eval_gz)(), void (*fill)(),
+                    double complex *out, int nkpts, int comp, int nimgs,
+                    int bvk_nimgs, double *Ls, double complex *expkL,
+                    int *shls_slice, int *ao_loc,
+                    int *shls_slice_orig, int *ao_loc_orig,
+                    int *shl_idx_orig, int *shl_loc_orig, char *shlpr_mask,
+                    int *cell_loc_bvk, char *ovlp_mask,
+                    double *Gv, double *b, int *gxyz, int *gs, int nGv,
+                    int *atm, int natm, int *bas, int nbas, double *env,
+                    int *bas_orig, int nbas_orig, double *env_orig)
+{
+        const int ish0 = shls_slice[0];
+        const int ish1 = shls_slice[1];
+        const int jsh0 = shls_slice[2];
+        const int jsh1 = shls_slice[3];
+        const int nish = ish1 - ish0;
+        const int njsh = jsh1 - jsh0;
+        const int ish0_orig = shls_slice_orig[0];
+        const int ish1_orig = shls_slice_orig[1];
+        const int jsh0_orig = shls_slice_orig[2];
+        const int jsh1_orig = shls_slice_orig[3];
+        const int nish_orig = ish1_orig - ish0_orig;
+        const int njsh_orig = jsh1_orig - jsh0_orig;
+        double *sGv = malloc(sizeof(double) * nGv * 3);
+        int *sgxyz = NULL;
+        if (gxyz != NULL) {
+                sgxyz = malloc(sizeof(int) * nGv * 3);
+        }
+        int blksize = subgroupGv(sGv, sgxyz, Gv, gxyz, nGv, INTBUFMAX,
+                                 shls_slice_orig, ao_loc_orig, atm, natm,
+                                 bas_orig, nbas_orig, env_orig);
+        int (*eval_aopair)() = NULL;
+        if (intor != &GTO_ft_ovlp_cart && intor != &GTO_ft_ovlp_sph) {
+                eval_aopair = &GTO_aopair_lazy_contract;
+        }
+
+#pragma omp parallel
+{
+        int i, j, ij;
+        int i_orig, j_orig, ij_orig, i_loc, j_loc;
+        int nenv = PBCsizeof_env(shls_slice, atm, natm, bas, nbas, env);
+        nenv = MAX(nenv, PBCsizeof_env(shls_slice+2, atm, natm, bas, nbas, env));
+        double *env_loc = malloc(sizeof(double)*nenv);
+        memcpy(env_loc, env, sizeof(double)*nenv);
+        size_t count = nkpts + bvk_nimgs;
+        double complex *buf = malloc(sizeof(double complex)*count*INTBUFMAX*comp);
+#pragma omp for schedule(dynamic)
+        for (ij_orig = 0; ij_orig < nish_orig*njsh_orig; ij_orig++) {
+                i_orig = ij_orig / njsh_orig;
+                j_orig = ij_orig % njsh_orig;
+                for (i_loc = shl_loc_orig[i_orig];
+                    i_loc < shl_loc_orig[i_orig+1]; i_loc++) {
+                        i = shl_idx_orig[i_loc];
+                        for (j_loc = shl_loc_orig[j_orig];
+                            j_loc < shl_loc_orig[j_orig+1]; j_loc++) {
+                                j = shl_idx_orig[j_loc];
+                                ij = i * njsh + j;
+                                if (!shlpr_mask[ij]) {
+                                        continue;
+                                }
+                                (*fill)(intor, eval_aopair, eval_gz, out,
+                                        nkpts, comp, nimgs, bvk_nimgs, blksize,
+                                        i, j, i_orig, j_orig,
+                                        cell_loc_bvk, ovlp_mask,
+                                        buf, env_loc, Ls, expkL,
+                                        shls_slice, ao_loc,
+                                        shls_slice_orig, ao_loc_orig,
+                                        sGv, b, sgxyz, gs, nGv, atm, natm, bas,
+                                        nbas, env, nbas_orig);
+                        }
+                }
         }
         free(buf);
         free(env_loc);

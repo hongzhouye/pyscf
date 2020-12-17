@@ -361,6 +361,7 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
         self.use_bvkcell = False    # for testing
         self.prescreening_type = 0
         self.split_basis = False
+        self.split_auxbasis = False
 
         self.kpts = kpts  # default is gamma point
         self.kpts_band = None
@@ -511,7 +512,8 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
     def rs_build(self):
         # For each shell, using eta_lr as a cutoff to split it into the diffuse (d) and the compact (c) parts.
         if self.split_basis:
-            self.cell_fat = _reorder_cell(self.cell, self.eta_lr)
+            # self.cell_fat = _reorder_cell(self.cell, self.eta_lr)
+            self.cell_fat = _reorder_cell(self.cell, 0, self.npw_max)
             if self.cell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 self.mesh_lr = _estimate_mesh_lr(self.cell_fat,
                                                  self.cell.precision)
@@ -521,28 +523,7 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
         # If omega is not given, estimate an appropriate value for omega
         if self.omega is None:
             # Otherwise, estimate it from the maximum allowed PW size (npw_max)
-            omega = estimate_omega_for_npw(self.cell, self.npw_max)
-            # The short-range coulomb roughly corresponds to a 1s orb with exponent omega**2. So if omega**2 gets too small, rcut needs to be adjusted.
-            # [TODO] adjust rcut based on cell_fat when split basis
-            # eomega = omega**2.
-            # emin = np.min([np.min(self.cell.bas_exp(ib))
-            #               for ib in range(self.cell.nbas)])
-            # if eomega < emin:
-            #     from pyscf.pbc.gto.cell import _estimate_rcut
-            #     rcut = _estimate_rcut(eomega, 0, 1.,
-            #                           precision=self.cell.precision)
-            #     logger.warn(self, """The squared omega (%.2f) determined from the required PW size (%d PWs) is smaller than the minimum GTO exponents (%.2f). The recommended value for cell.rcut is %s (current value %s)""",
-            #                 eomega, self.npw_max, emin, rcut, self.cell.rcut)
-            #     raise RuntimeError
-            # If basis is split, see if the most diffuse AOs in the compact AO group give a smaller one (hence fewer PWs needed)
-            if not self.cell_fat is None:
-                nbas_c,nbas_d = self.cell_fat._nbas_each_set
-                ec_min = np.min([np.min(self.cell_fat.bas_exp(ib))
-                                for ib in range(nbas_c)])
-                omega2 = ec_min**-0.5
-                if omega2 < omega:
-                    omega = omega2
-            self.omega = omega
+            self.omega = estimate_omega_for_npw(self.cell, self.npw_max)
 
         self.ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(self.cell,
                                                              self.omega)
@@ -717,7 +698,7 @@ def _estimate_mesh_primitive(cell, precision, round2odd=True):
         nprim = cell.bas_nprim(ib)
         nctr = cell.bas_nctr(ib)
         es = cell.bas_exp(ib)
-        cs = np.max(np.abs(cell.bas_ctr_coeff(ib).reshape(nctr,nprim)), axis=0)
+        cs = np.max(np.abs(cell.bas_ctr_coeff(ib)), axis=1)
         l = cell.bas_angular(ib)
         kecuts[ib] = _estimate_ke_cutoff(es, l, cs, precision=precision)
 
@@ -729,9 +710,14 @@ def _estimate_mesh_primitive(cell, precision, round2odd=True):
 
     return meshs
 
-def _estimate_mesh_lr(cell_fat, precision):
+def _estimate_mesh_lr(cell_fat, precision, round2odd=True):
     ''' Estimate the minimum mesh for the diffuse shells.
     '''
+    if round2odd:
+        fround = lambda x: df.df._round_off_to_odd_mesh(x)
+    else:
+        fround = lambda x: x
+
     nc, nd = cell_fat._nbas_each_set
     # from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
     # kecuts = _primitive_gto_cutoff(cell_fat, cell_fat.precision)[1]
@@ -742,12 +728,11 @@ def _estimate_mesh_lr(cell_fat, precision):
         nprim = cell_fat.bas_nprim(ib)
         nctr = cell_fat.bas_nctr(ib)
         es = cell_fat.bas_exp(ib)
-        cs = np.max(np.abs(cell_fat.bas_ctr_coeff(ib).reshape(nctr,nprim)),
-                    axis=0)
+        cs = np.max(np.abs(cell_fat.bas_ctr_coeff(ib)), axis=1)
         l = cell_fat.bas_angular(ib)
         kecut = max(kecut, np.max(_estimate_ke_cutoff(es, l, cs,
                     precision=precision)))
-    mesh_lr = pbctools.cutoff_to_mesh(cell_fat.lattice_vectors(), kecut)
+    mesh_lr = fround(pbctools.cutoff_to_mesh(cell_fat.lattice_vectors(), kecut))
 
     return mesh_lr
 

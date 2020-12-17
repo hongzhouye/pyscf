@@ -375,7 +375,7 @@ def wrap_int3c_hy_nosplitbasis(cell, auxcell, shlpr_mask,
     return int3c
 
 
-def wrap_int3c_hy_splitbasis(cell, cell0, auxcell, shlpr_mask,
+def wrap_int3c_hy_spltbas(cell, cell0, auxcell, shlpr_mask,
                   intor='int3c2e', aosym='s1', comp=1,
                   kptij_lst=numpy.zeros((1,2,3)),
                   cintopt=None, pbcopt=None,
@@ -402,7 +402,17 @@ def wrap_int3c_hy_splitbasis(cell, cell0, auxcell, shlpr_mask,
     ao_loc0 = gto.moleintor.make_loc(bas0, intor)
     ao_loc0 = numpy.asarray(numpy.hstack([ao_loc0, ao_loc0[-1]+aux_loc[1:]]),
                             dtype=numpy.int32)
+    atm0, bas0, env0 = gto.conc_env(atm0, bas0, env0,
+                                    auxcell._atm, auxcell._bas, auxcell._env)
     nbas0 = cell0.nbas
+
+    # map orig cell to cell_fat
+    bas_idx0 = numpy.asarray(cell._bas_idx)
+    shl_idx0 = [numpy.where(bas_idx0 == ib)[0] for ib in range(cell0.nbas)]
+    shl_loc0 = numpy.cumsum([0] + [s.size for s in shl_idx0])
+    shl_idx0 = numpy.concatenate(shl_idx0)
+    shl_loc0 = numpy.asarray(shl_loc0, dtype=numpy.int32, order="C")
+    shl_idx0 = numpy.asarray(shl_idx0, dtype=numpy.int32, order="C")
 
     kpti = kptij_lst[:,0]
     kptj = kptij_lst[:,1]
@@ -487,11 +497,11 @@ def wrap_int3c_hy_splitbasis(cell, cell0, auxcell, shlpr_mask,
         drv = libpbc.PBCnr3c_drv
     else:
         fill = 'PBCnr3c_bvk_%s%s' % (kk_type, aosym[:2])
-        drv = libpbc.PBCnr3c_bvk_splitbasis_drv
+        drv = libpbc.PBCnr3c_bvk_spltbas_drv
 
     if prescreening_type > 0:
         fill += "_prescreen%d" % 1
-    fill += "_splitbasis"
+    fill += "_spltbas"
     print(fill)
 
     if cintopt is None:
@@ -511,26 +521,7 @@ def wrap_int3c_hy_splitbasis(cell, cell0, auxcell, shlpr_mask,
         cpbcopt = lib.c_null_ptr()
 
     if bvk_kmesh is None:
-        def int3c(shls_slice, out):
-            shls_slice = (shls_slice[0], shls_slice[1],
-                          nbas+shls_slice[2], nbas+shls_slice[3],
-                          nbas*2+shls_slice[4], nbas*2+shls_slice[5])
-            # for some (unknown) reason, this line is needed for the c code to use pbcopt->fprescreen
-            _ = pbcopt._this == lib.c_null_ptr()
-            drv(getattr(libpbc, intor), getattr(libpbc, fill),
-                out.ctypes.data_as(ctypes.c_void_p),
-                ctypes.c_int(nkptij), ctypes.c_int(nkpts),
-                ctypes.c_int(comp), ctypes.c_int(nimgs),
-                Ls.ctypes.data_as(ctypes.c_void_p),
-                expkL.ctypes.data_as(ctypes.c_void_p),
-                kptij_idx.ctypes.data_as(ctypes.c_void_p),
-                (ctypes.c_int*6)(*shls_slice),
-                ao_loc.ctypes.data_as(ctypes.c_void_p), cintopt, cpbcopt,
-                atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
-                bas.ctypes.data_as(ctypes.c_void_p),
-                ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
-                env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
-            return out
+        raise NotImplementedError
     else:
         def int3c(shls_slice, out):
             shls_slice = (shls_slice[0], shls_slice[1],
@@ -539,15 +530,7 @@ def wrap_int3c_hy_splitbasis(cell, cell0, auxcell, shlpr_mask,
             msh_shift = (nbas-nbas0) * 2
             shls_slice0 = (0, nbas0, nbas0, nbas0*2,
                            shls_slice[4]-msh_shift, shls_slice[5]-msh_shift)
-            bas_idx0 = numpy.asarray(cell._bas_idx, dtype=numpy.int32,
-                                     order="C")
-            print(ao_loc)
-            print(ao_loc0)
-            print(shls_slice)
-            print(shls_slice0)
-            print(bas_idx0)
-            print(out.shape)
-            out.fill(0.)
+            out.fill(0)
             # for some (unknown) reason, this line is needed for the c code to use pbcopt->fprescreen
             _ = pbcopt._this == lib.c_null_ptr()
             drv(getattr(libpbc, intor), getattr(libpbc, fill),
@@ -562,18 +545,221 @@ def wrap_int3c_hy_splitbasis(cell, cell0, auxcell, shlpr_mask,
                 ao_loc.ctypes.data_as(ctypes.c_void_p),
                 (ctypes.c_int*6)(*shls_slice0),    # shls_slice0
                 ao_loc0.ctypes.data_as(ctypes.c_void_p),  # ao_loc0
-                ctypes.c_int(msh_shift),    # msh_shift
+                shl_idx0.ctypes.data_as(ctypes.c_void_p),   # shl_idx0
+                shl_loc0.ctypes.data_as(ctypes.c_void_p),   # shl_loc0
                 cell_loc_bvk.ctypes.data_as(ctypes.c_void_p),   # cell_loc_bvk
                 shlpr_mask.ctypes.data_as(ctypes.c_void_p),  # shlpr_mask
-                bas_idx0.ctypes.data_as(ctypes.c_void_p), # bas_idx0
                 cintopt, cpbcopt,
                 atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
                 bas.ctypes.data_as(ctypes.c_void_p),
                 ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
-                env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
+                env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size),
+                bas0.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(nbas0),
+                env0.ctypes.data_as(ctypes.c_void_p))
             return out
 
     return int3c
+
+
+# def wrap_int3c_hy_splitbasis(cell, cell0, auxcell, shlpr_mask,
+#                   intor='int3c2e', aosym='s1', comp=1,
+#                   kptij_lst=numpy.zeros((1,2,3)),
+#                   cintopt=None, pbcopt=None,
+#                   bvk_kmesh=None, prescreening_type=0):
+#     intor = cell._add_suffix(intor)
+#     pcell = copy.copy(cell)
+#     pcell._atm, pcell._bas, pcell._env = \
+#     atm, bas, env = gto.conc_env(cell._atm, cell._bas, cell._env,
+#                                  cell._atm, cell._bas, cell._env)
+#     ao_loc = gto.moleintor.make_loc(bas, intor)
+#     aux_loc = auxcell.ao_loc_nr(auxcell.cart or 'ssc' in intor)
+#     ao_loc = numpy.asarray(numpy.hstack([ao_loc, ao_loc[-1]+aux_loc[1:]]),
+#                            dtype=numpy.int32)
+#     atm, bas, env = gto.conc_env(atm, bas, env,
+#                                  auxcell._atm, auxcell._bas, auxcell._env)
+#     Ls = cell.get_lattice_Ls()
+#     nimgs = len(Ls)
+#     nbas = cell.nbas
+#
+#     pcell0 = copy.copy(cell0)
+#     pcell0._atm, pcell0._bas, pcell0._env = \
+#     atm0, bas0, env0 = gto.conc_env(cell0._atm, cell0._bas, cell0._env,
+#                                     cell0._atm, cell0._bas, cell0._env)
+#     ao_loc0 = gto.moleintor.make_loc(bas0, intor)
+#     ao_loc0 = numpy.asarray(numpy.hstack([ao_loc0, ao_loc0[-1]+aux_loc[1:]]),
+#                             dtype=numpy.int32)
+#     nbas0 = cell0.nbas
+#
+#     kpti = kptij_lst[:,0]
+#     kptj = kptij_lst[:,1]
+#
+#     if bvk_kmesh is None:
+#         Ls_ = Ls
+#     else:
+#         """
+#         ### [START] Qiming's style of bvk
+#         Ls = Ls[numpy.linalg.norm(Ls, axis=1).argsort()]
+#
+#         # Using Ls = translations.dot(a)
+#         translations = numpy.linalg.solve(cell.lattice_vectors().T, Ls.T)
+#         # t_mod is the translations inside the BvK cell
+#         t_mod = translations.round(3).astype(int) % numpy.asarray(bvk_kmesh)[:,None]
+#         cell_loc_bvk = numpy.ravel_multi_index(t_mod, bvk_kmesh).astype(numpy.int32)
+#
+#         from pyscf.pbc.df.ft_ao import _estimate_overlap
+#         ovlp_mask = _estimate_overlap(cell, Ls) > cell.precision
+#         ovlp_mask = numpy.asarray(ovlp_mask, dtype=numpy.int8, order='C')
+#         ### [END] Qiming's style of bvk
+#         """
+#
+#         ### [START] Hongzhou's style of bvk
+#         # Using Ls = translations.dot(a)
+#         translations = numpy.linalg.solve(cell.lattice_vectors().T, Ls.T)
+#         # t_mod is the translations inside the BvK cell
+#         t_mod = translations.round(3).astype(int) % numpy.asarray(bvk_kmesh)[:,None]
+#         cell_loc_bvk = numpy.ravel_multi_index(t_mod, bvk_kmesh).astype(numpy.int32)
+#
+#         nimgs = Ls.shape[0]
+#         bvk_nimgs = numpy.prod(bvk_kmesh)
+#         iL_by_bvk = numpy.zeros(nimgs, dtype=int)
+#         cell_loc = numpy.zeros(bvk_nimgs+1, dtype=int)
+#         shift = 0
+#         for i in range(bvk_nimgs):
+#             x = numpy.where(cell_loc_bvk == i)[0]
+#             nx = x.size
+#             cell_loc[i+1] = nx
+#             iL_by_bvk[shift:shift+nx] = x
+#             shift += nx
+#
+#         cell_loc[1:] = numpy.cumsum(cell_loc[1:])
+#         cell_loc_bvk = numpy.asarray(cell_loc, dtype=numpy.int32, order="C")
+#
+#         Ls = Ls[iL_by_bvk]
+#
+#         ovlp_mask = numpy.array([1], dtype=numpy.int8, order="C")
+#         ### [END] Hongzhou's style of bvk
+#
+#         from pyscf.pbc.tools import k2gamma
+#         bvkmesh_Ls = k2gamma.translation_vectors_for_kmesh(cell, bvk_kmesh)
+#
+#         Ls_ = bvkmesh_Ls
+#
+#     if gamma_point(kptij_lst):
+#         kk_type = 'g'
+#         dtype = numpy.double
+#         nkpts = nkptij = 1
+#         kptij_idx = numpy.array([0], dtype=numpy.int32)
+#         expkL = numpy.ones(1)
+#     elif is_zero(kpti-kptj):  # j_only
+#         kk_type = 'k'
+#         dtype = numpy.complex128
+#         kpts = kptij_idx = numpy.asarray(kpti, order='C')
+#         expkL = numpy.exp(1j * numpy.dot(kpts, Ls_.T))
+#         nkpts = nkptij = len(kpts)
+#     else:
+#         kk_type = 'kk'
+#         dtype = numpy.complex128
+#         kpts = unique(numpy.vstack([kpti,kptj]))[0]
+#         expkL = numpy.exp(1j * numpy.dot(kpts, Ls_.T))
+#         wherei = numpy.where(abs(kpti.reshape(-1,1,3)-kpts).sum(axis=2) < KPT_DIFF_TOL)[1]
+#         wherej = numpy.where(abs(kptj.reshape(-1,1,3)-kpts).sum(axis=2) < KPT_DIFF_TOL)[1]
+#         nkpts = len(kpts)
+#         kptij_idx = numpy.asarray(wherei*nkpts+wherej, dtype=numpy.int32)
+#         nkptij = len(kptij_lst)
+#
+#     if bvk_kmesh is None:
+#         raise NotImplementedError
+#         fill = 'PBCnr3c_fill_%s%s' % (kk_type, aosym[:2])
+#         drv = libpbc.PBCnr3c_drv
+#     else:
+#         fill = 'PBCnr3c_bvk_%s%s' % (kk_type, aosym[:2])
+#         drv = libpbc.PBCnr3c_bvk_splitbasis_drv
+#
+#     if prescreening_type > 0:
+#         fill += "_prescreen%d" % 1
+#     fill += "_splitbasis"
+#     print(fill)
+#
+#     if cintopt is None:
+#         if nbas > 0:
+#             cintopt = _vhf.make_cintopt(atm, bas, env, intor)
+#         else:
+#             cintopt = lib.c_null_ptr()
+# # Remove the precomputed pair data because the pair data corresponds to the
+# # integral of cell #0 while the lattice sum moves shls to all repeated images.
+#         if intor[:3] != 'ECP':
+#             libpbc.CINTdel_pairdata_optimizer(cintopt)
+#     if pbcopt is None:
+#         pbcopt = _pbcintor.PBCOpt(pcell).init_rcut_cond(pcell)
+#     if isinstance(pbcopt, _pbcintor.PBCOpt):
+#         cpbcopt = pbcopt._this
+#     else:
+#         cpbcopt = lib.c_null_ptr()
+#
+#     if bvk_kmesh is None:
+#         def int3c(shls_slice, out):
+#             shls_slice = (shls_slice[0], shls_slice[1],
+#                           nbas+shls_slice[2], nbas+shls_slice[3],
+#                           nbas*2+shls_slice[4], nbas*2+shls_slice[5])
+#             # for some (unknown) reason, this line is needed for the c code to use pbcopt->fprescreen
+#             _ = pbcopt._this == lib.c_null_ptr()
+#             drv(getattr(libpbc, intor), getattr(libpbc, fill),
+#                 out.ctypes.data_as(ctypes.c_void_p),
+#                 ctypes.c_int(nkptij), ctypes.c_int(nkpts),
+#                 ctypes.c_int(comp), ctypes.c_int(nimgs),
+#                 Ls.ctypes.data_as(ctypes.c_void_p),
+#                 expkL.ctypes.data_as(ctypes.c_void_p),
+#                 kptij_idx.ctypes.data_as(ctypes.c_void_p),
+#                 (ctypes.c_int*6)(*shls_slice),
+#                 ao_loc.ctypes.data_as(ctypes.c_void_p), cintopt, cpbcopt,
+#                 atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
+#                 bas.ctypes.data_as(ctypes.c_void_p),
+#                 ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
+#                 env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
+#             return out
+#     else:
+#         def int3c(shls_slice, out):
+#             shls_slice = (shls_slice[0], shls_slice[1],
+#                           nbas+shls_slice[2], nbas+shls_slice[3],
+#                           nbas*2+shls_slice[4], nbas*2+shls_slice[5])
+#             msh_shift = (nbas-nbas0) * 2
+#             shls_slice0 = (0, nbas0, nbas0, nbas0*2,
+#                            shls_slice[4]-msh_shift, shls_slice[5]-msh_shift)
+#             bas_idx0 = numpy.asarray(cell._bas_idx, dtype=numpy.int32,
+#                                      order="C")
+#             print(ao_loc)
+#             print(ao_loc0)
+#             print(shls_slice)
+#             print(shls_slice0)
+#             print(bas_idx0)
+#             print(out.shape)
+#             out.fill(0.)
+#             # for some (unknown) reason, this line is needed for the c code to use pbcopt->fprescreen
+#             _ = pbcopt._this == lib.c_null_ptr()
+#             drv(getattr(libpbc, intor), getattr(libpbc, fill),
+#                 out.ctypes.data_as(ctypes.c_void_p),
+#                 ctypes.c_int(nkptij), ctypes.c_int(nkpts),
+#                 ctypes.c_int(comp), ctypes.c_int(nimgs),
+#                 ctypes.c_int(bvk_nimgs),   # bvk_nimgs
+#                 Ls.ctypes.data_as(ctypes.c_void_p),
+#                 expkL.ctypes.data_as(ctypes.c_void_p),
+#                 kptij_idx.ctypes.data_as(ctypes.c_void_p),
+#                 (ctypes.c_int*6)(*shls_slice),
+#                 ao_loc.ctypes.data_as(ctypes.c_void_p),
+#                 (ctypes.c_int*6)(*shls_slice0),    # shls_slice0
+#                 ao_loc0.ctypes.data_as(ctypes.c_void_p),  # ao_loc0
+#                 ctypes.c_int(msh_shift),    # msh_shift
+#                 cell_loc_bvk.ctypes.data_as(ctypes.c_void_p),   # cell_loc_bvk
+#                 shlpr_mask.ctypes.data_as(ctypes.c_void_p),  # shlpr_mask
+#                 bas_idx0.ctypes.data_as(ctypes.c_void_p), # bas_idx0
+#                 cintopt, cpbcopt,
+#                 atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
+#                 bas.ctypes.data_as(ctypes.c_void_p),
+#                 ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
+#                 env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
+#             return out
+#
+#     return int3c
 
 
 def fill_2c2e(cell, auxcell_or_auxbasis, intor='int2c2e', hermi=0, kpt=numpy.zeros(3)):

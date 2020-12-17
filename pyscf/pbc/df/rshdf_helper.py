@@ -1,9 +1,12 @@
 import sys
+import ctypes
 import numpy as np
 import scipy.special
 
 from pyscf import gto as mol_gto
 from pyscf import lib
+
+libpbc = lib.load_library('libpbc')
 
 
 def _normalize2s(es, q0=None):
@@ -507,3 +510,330 @@ def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
                             ind += 1
 
     return Rc_cut_mat, R12_cut_mat
+
+
+# Analytical Fourier transform of AO pairs. Support (1) masking out certain shlprs, and (2) computing using cell_fat (see rshdf.py, _reorder_cell) and write to a buffer according to the original cell.
+# TODO: support partial AFT and partial FFT (e.g., AFT for cc/cd, FFT for dd)
+# NOTE buffer out must be initialized to 0
+# gxyz is the index for Gvbase
+def ft_aopair_kpts_spltbas(cell, cell0, Gv, shls_slice0=None, aosym='s1',
+                   b=None, gxyz=None, Gvbase=None, q=np.zeros(3),
+                   kptjs=np.zeros((1,3)), intor='GTO_ft_ovlp', comp=1,
+                   bvk_kmesh=None, shlpr_mask=None, out=None):
+    r'''
+    Modified from ft_ao.py, ft_aopair_kpts.
+    This function should be solely used by RSHDF.
+
+    Fourier transform AO pair for a group of k-points
+    \sum_T exp(-i k_j * T) \int exp(-i(G+q)r) i(r) j(r-T) dr^3
+
+    The return array holds the AO pair
+    corresponding to the kpoints given by kptjs
+    '''
+
+    intor = cell._add_suffix(intor)
+
+    q = np.reshape(q, 3)
+    kptjs = np.asarray(kptjs, order='C').reshape(-1,3)
+    Gv = np.asarray(Gv, order='C').reshape(-1,3)
+    nGv = Gv.shape[0]
+    GvT = np.asarray(Gv.T, order='C')
+    GvT += q.reshape(-1,1)
+
+    if (gxyz is None or b is None or Gvbase is None or (abs(q).sum() > 1e-9)
+# backward compatibility for pyscf-1.2, in which the argument Gvbase is gs
+        or (Gvbase is not None and isinstance(Gvbase[0], (int, np.integer)))):
+        p_gxyzT = lib.c_null_ptr()
+        p_mesh = (ctypes.c_int*3)(0,0,0)
+        p_b = (ctypes.c_double*1)(0)
+        eval_gz = 'GTO_Gv_general'
+    else:
+        if abs(b-np.diag(b.diagonal())).sum() < 1e-8:
+            eval_gz = 'GTO_Gv_orth'
+        else:
+            eval_gz = 'GTO_Gv_nonorth'
+        gxyzT = np.asarray(gxyz.T, order='C', dtype=np.int32)
+        p_gxyzT = gxyzT.ctypes.data_as(ctypes.c_void_p)
+        b = np.hstack((b.ravel(), q) + Gvbase)
+        p_b = b.ctypes.data_as(ctypes.c_void_p)
+        p_mesh = (ctypes.c_int*3)(*[len(x) for x in Gvbase])
+
+    Ls = cell.get_lattice_Ls()
+    Ls = Ls[np.linalg.norm(Ls, axis=1).argsort()]
+    nkpts = len(kptjs)
+    nimgs = len(Ls)
+    nbas = cell.nbas
+    nbas0 = cell0.nbas
+
+    # map orig cell to cell_fat
+    bas_idx0 = np.asarray(cell._bas_idx)
+    shl_idx0 = [np.where(bas_idx0 == ib)[0] for ib in range(cell0.nbas)]
+    shl_loc0 = np.cumsum([0] + [s.size for s in shl_idx0])
+    shl_idx0 = np.concatenate(shl_idx0)
+    shl_loc0 = np.asarray(shl_loc0, dtype=np.int32, order="C")
+    shl_idx0 = np.asarray(shl_idx0, dtype=np.int32, order="C")
+
+    # determine shlpr mask
+    if shlpr_mask is None:
+        n_compact, n_diffuse = cell._nbas_each_set
+        shlpr_mask = np.ones((nbas, nbas), dtype=np.int8, order="C")
+        shlpr_mask[n_compact:,n_compact:] = 0
+
+    if bvk_kmesh is None:
+        raise NotImplementedError
+        expkL = np.exp(1j * np.dot(kptjs, Ls.T))
+    else:
+        from pyscf.pbc.df.ft_ao import _estimate_overlap
+        from pyscf.pbc.tools import k2gamma
+        ovlp_mask = _estimate_overlap(cell, Ls) > cell.precision
+        ovlp_mask = np.asarray(ovlp_mask, dtype=np.int8, order='C')
+
+        # Using Ls = translations.dot(a)
+        translations = np.linalg.solve(cell.lattice_vectors().T, Ls.T)
+        # t_mod is the translations inside the BvK cell
+        t_mod = translations.round(3).astype(int) % np.asarray(bvk_kmesh)[:,None]
+        cell_loc_bvk = np.ravel_multi_index(t_mod, bvk_kmesh).astype(np.int32)
+
+        bvkmesh_Ls = k2gamma.translation_vectors_for_kmesh(cell, bvk_kmesh)
+        expkL = np.exp(1j * np.dot(kptjs, bvkmesh_Ls.T))
+
+    atm, bas, env = mol_gto.conc_env(cell._atm, cell._bas, cell._env,
+                                 cell._atm, cell._bas, cell._env)
+    ao_loc = mol_gto.moleintor.make_loc(bas, intor)
+    atm0, bas0, env0 = mol_gto.conc_env(cell0._atm, cell0._bas, cell0._env,
+                                    cell0._atm, cell0._bas, cell0._env)
+    ao_loc0 = mol_gto.moleintor.make_loc(bas0, intor)
+    if shls_slice0 is None:
+        shls_slice0 = (0, nbas0, nbas0, nbas0*2)
+    else:
+        shls_slice0 = (shls_slice0[0], shls_slice0[1],
+                      nbas0+shls_slice0[2], nbas0+shls_slice0[3])
+    shls_slice = (0, nbas, nbas, nbas*2)
+    ni = ao_loc0[shls_slice0[1]] - ao_loc0[shls_slice0[0]]
+    nj = ao_loc0[shls_slice0[3]] - ao_loc0[shls_slice0[2]]
+    shape = (nkpts, comp, ni, nj, nGv)
+
+# Theoretically, hermitian symmetry can be also found for kpti == kptj:
+#       f_ji(G) = \int f_ji exp(-iGr) = \int f_ij^* exp(-iGr) = [f_ij(-G)]^*
+# hermi operation needs reordering the axis-0.  It is inefficient.
+    if aosym == 's1hermi': # Symmetry for Gamma point
+        assert(is_zero(q) and is_zero(kptjs) and ni == nj)
+    elif aosym == 's2':
+        i0 = ao_loc0[shls_slice0[0]]
+        i1 = ao_loc0[shls_slice0[1]]
+        nij = i1*(i1+1)//2 - i0*(i0+1)//2
+        shape = (nkpts, comp, nij, nGv)
+
+    cintor = getattr(libpbc, intor)
+    eval_gz = getattr(libpbc, eval_gz)
+
+    out = np.ndarray(shape, dtype=np.complex128, buffer=out)
+    out.fill(0)
+
+    if bvk_kmesh is None:
+        raise NotImplementedError
+        if nkpts == 1:
+            fill = getattr(libpbc, 'PBC_ft_fill_nk1'+aosym)
+        else:
+            fill = getattr(libpbc, 'PBC_ft_fill_k'+aosym)
+        drv = libpbc.PBC_ft_latsum_drv
+        drv(cintor, eval_gz, fill, out.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nkpts), ctypes.c_int(comp), ctypes.c_int(nimgs),
+            Ls.ctypes.data_as(ctypes.c_void_p), expkL.ctypes.data_as(ctypes.c_void_p),
+            (ctypes.c_int*4)(*shls_slice), ao_loc.ctypes.data_as(ctypes.c_void_p),
+            GvT.ctypes.data_as(ctypes.c_void_p), p_b, p_gxyzT, p_mesh, ctypes.c_int(nGv),
+            atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
+            bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.nbas),
+            env.ctypes.data_as(ctypes.c_void_p))
+    else:
+        if nkpts == 1:
+            fill_name = 'PBC_ft_bvk_nk1'+aosym+"_spltbas"
+        else:
+            fill_name = 'PBC_ft_bvk_k'+aosym+"_spltbas"
+        fill = getattr(libpbc, fill_name)
+        drv = libpbc.PBC_ft_bvk_spltbas_drv
+        drv(cintor, eval_gz, fill, out.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_int(nkpts), ctypes.c_int(comp),
+            ctypes.c_int(nimgs), ctypes.c_int(expkL.shape[1]),
+            Ls.ctypes.data_as(ctypes.c_void_p), expkL.ctypes.data_as(ctypes.c_void_p),
+            (ctypes.c_int*4)(*shls_slice), ao_loc.ctypes.data_as(ctypes.c_void_p),
+            (ctypes.c_int*4)(*shls_slice0), ao_loc0.ctypes.data_as(ctypes.c_void_p),
+            shl_idx0.ctypes.data_as(ctypes.c_void_p),   # shl_idx0
+            shl_loc0.ctypes.data_as(ctypes.c_void_p),   # shl_loc0
+            shlpr_mask.ctypes.data_as(ctypes.c_void_p),  # shlpr_mask
+            cell_loc_bvk.ctypes.data_as(ctypes.c_void_p),
+            ovlp_mask.ctypes.data_as(ctypes.c_void_p),
+            GvT.ctypes.data_as(ctypes.c_void_p), p_b, p_gxyzT, p_mesh, ctypes.c_int(nGv),
+            atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
+            bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.nbas),
+            env.ctypes.data_as(ctypes.c_void_p),
+            bas0.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(nbas0),
+            env0.ctypes.data_as(ctypes.c_void_p))
+
+    if aosym == 's1hermi':
+        for i in range(1,ni):
+            out[:,:,:i,i] = out[:,:,i,:i]
+    out = np.rollaxis(out, -1, 2)
+    if comp == 1:
+        out = out[:,0]
+    return out
+
+
+###
+def fat_orig_loop(cell_fat, cell, aosym='s2', shlpr_mask=None, verbose=0):
+    if aosym == 's2':
+        return _fat_orig_loop_s2(cell_fat, cell, shlpr_mask, verbose)
+    elif aosym == 's1':
+        return _fat_orig_loop_s1(cell_fat, cell, shlpr_mask, verbose)
+    else:
+        raise KeyError('Unknown aosym = %s' % aosym)
+
+
+def _unfold_cgto_shl(cell_):
+    ao_loc_old = cell_.ao_loc_nr()
+    ao_loc = []
+    bas_map = []
+    for ib in range(cell_.nbas):
+        nctr = cell_.bas_nctr(ib)
+        i0, i1 = ao_loc_old[ib:ib+2]
+        norb = i1 - i0
+        ndeg = norb // nctr
+        assert(norb % nctr == 0)
+        ao_loc.append(np.arange(i0, i0+norb, ndeg))
+        bas_map += [ib,] * nctr
+    ao_loc.append([ao_loc_old[-1]])
+    ao_loc = np.concatenate(ao_loc)
+
+    return ao_loc, np.asarray(bas_map)
+
+
+def _fat_orig_loop_s2(cell_fat, cell, shlpr_mask=False, verbose=0):
+
+    log = lib.logger.Logger(cell.stdout, verbose)
+
+    # For aosym='s2', we need to unravel cGTOs that share same exponents
+    ao_loc, bas_map = _unfold_cgto_shl(cell_fat)
+    nbas = ao_loc.size - 1
+    nao = ao_loc[-1]
+
+    ao_loc0, bas_map0 = _unfold_cgto_shl(cell)
+    nbas0 = ao_loc0.size - 1
+    nao0 = ao_loc0[-1]
+
+    ao_loc_fat = cell_fat.ao_loc_nr()
+    nbas_c_fat, nbas_d_fat = cell_fat._nbas_each_set
+    nbas_c = np.where(ao_loc <= ao_loc_fat[nbas_c_fat])[0][-1]
+    nbas_d = nbas - nbas_c
+
+    bas_idx_old = cell_fat._bas_idx
+    bas_idx = []
+    for ib_old in range(cell_fat.nbas):
+        ib_lst = np.where(bas_map == ib_old)[0]
+        ib0_lst = np.where(bas_map0 == bas_idx_old[ib_old])[0]
+        bas_idx.append(ib0_lst)
+    bas_idx = np.concatenate(bas_idx)
+
+    bas_f2o = bas_idx
+    log.debug2("bas_f2o: %s", bas_f2o)
+    log.debug2("ao_loc: %s", ao_loc)
+    log.debug2("ao_loc0: %s", ao_loc0)
+
+    ao_rg = [np.arange(*ao_loc[i:i+2]) for i in range(nbas)]
+    ao_rg0 = [np.arange(*ao_loc0[i:i+2]) for i in range(nbas0)]
+    log.debug2("ao range list= %s", ao_rg)
+    log.debug2("ao range list0= %s", ao_rg0)
+
+    if shlpr_mask is None:
+        shlpr_mask = np.ones((nbas,nbas), dtype=int)
+
+    A = np.zeros((nao,nao), dtype=int)
+    nao2 = nao*(nao+1) // 2
+    A[np.tril_indices(nao)] = np.arange(nao2)
+    A = A.ravel()
+
+    A0_ieqj = np.zeros((nao0,nao0), dtype=int)
+    nao02 = nao0*(nao0+1) // 2
+    A0_ieqj[np.tril_indices(nao0)] = np.arange(nao02)
+    A0_ineqj = np.zeros_like(A0_ieqj)
+    A0_ineqj[np.tril_indices(nao0)] = A0_ieqj[np.tril_indices(nao0)]
+    A0_ineqj += A0_ineqj.T
+    np.fill_diagonal(A0_ineqj, np.diag(A0_ieqj))
+    A0_ieqj = A0_ieqj.ravel()
+    A0_ineqj = A0_ineqj.ravel()
+
+    for i in range(nbas):
+        i0 = bas_f2o[i]
+        for j in range(i+1):
+            if not shlpr_mask[i,j]:
+                continue
+
+            j0 = bas_f2o[j]
+            ap = ao_rg[i][:,None]*nao + ao_rg[j]
+            ap0 = ao_rg0[i0][:,None]*nao0 + ao_rg0[j0]
+            log.debug2("(i,j,i0,j0)= (%d,%d,%d,%d) ap= %s ap0= %s",
+                       i,j,i0,j0, ap, ap0)
+
+            # source indices
+            if i == j:
+                ap = ap[np.tril_indices_from(ap)]
+                ap = A[ap]
+                ap2 = None
+            elif i0 != j0:
+                ap = ap.ravel()
+                ap = A[ap]
+                ap2 = None
+            else:   # special case: different sources but same destination
+                tril_inds = np.tril_indices_from(ap)
+                ap2 = ap.T[tril_inds]
+                ap = ap[tril_inds]
+                ap = A[ap]
+                ap2 = A[ap2]
+
+            # destination indices
+            if i0 == j0:
+                ap0 = ap0[np.tril_indices_from(ap0)]
+                ap0 = A0_ieqj[ap0]
+            else:
+                ap0 = ap0.ravel()
+                ap0 = A0_ineqj[ap0]
+
+            log.debug2("                           ap= %s ap0= %s", ap, ap0)
+
+            yield ap, ap0, ap2
+
+
+def _fat_orig_loop_s1(cell_fat, cell, shlpr_mask=None, verbose=0):
+    log = lib.logger.Logger(sys.stdout, verbose)
+
+    nbas = cell_fat.nbas
+    nbas0 = cell.nbas
+    ao_loc = cell_fat.ao_loc_nr()
+    nao = ao_loc[-1]
+    ao_loc0 = cell.ao_loc_nr()
+    nao0 = ao_loc0[-1]
+    nbas_c, nbas_d = cell_fat._nbas_each_set
+
+    bas_f2o = cell_fat._bas_idx
+    log.debug2("bas_f2o: %s", bas_f2o)
+    log.debug2("ao_loc: %s", ao_loc)
+    log.debug2("ao_loc0: %s", ao_loc0)
+
+    ao_rg = [np.arange(*ao_loc[i:i+2]) for i in range(nbas)]
+    ao_rg0 = [np.arange(*ao_loc0[i:i+2]) for i in range(nbas0)]
+    log.debug2("ao range list= %s", ao_rg)
+    log.debug2("ao range list0= %s", ao_rg0)
+
+    if shlpr_mask is None:
+        shlpr_mask = np.ones((nbas,nbas), dtype=int)
+
+    for i in range(nbas):
+        i0 = bas_f2o[i]
+        for j in range(nbas):
+            if not shlpr_mask[i,j]:
+                continue
+
+            j0 = bas_f2o[j]
+            ap = (ao_rg[i][:,None]*nao + ao_rg[j]).ravel()
+            ap0 = (ao_rg0[i0][:,None]*nao0 + ao_rg0[j0]).ravel()
+
+            yield ap, ap0

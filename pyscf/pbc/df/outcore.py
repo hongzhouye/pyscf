@@ -281,7 +281,7 @@ def _aux_e2_hy(cell, auxcell_or_auxbasis, erifile, intor='int3c2e',
                               prescreening_data=prescreening_data,
                               verbose=verbose)
     else:
-        _aux_e2_hy_splitbas2(cell, cell_fat, auxcell_or_auxbasis, erifile,
+        _aux_e2_hy_spltbas(cell, cell_fat, auxcell_or_auxbasis, erifile,
                             intor=intor, aosym=aosym, comp=comp,
                             kptij_lst=kptij_lst, dataname=dataname,
                             shls_slice=shls_slice, max_memory=max_memory,
@@ -438,6 +438,168 @@ def _aux_e2_hy_nosplitbas(cell, auxcell_or_auxbasis, erifile,
             sub_slice = (shls_slice[0], shls_slice[1],
                          shls_slice[2], shls_slice[3],
                          shls_slice[4]+sh0, shls_slice[4]+sh1)
+            mat = numpy.ndarray((nkptij,comp,nao_pair,nrow), dtype=dtype, buffer=buf)
+            t1 = (time.clock(), time.time())
+            bsave(istep, int3c(sub_slice, mat))
+            t1 = log.timer_debug1('cmpt+save %d'%istep, *t1)
+            buf, buf1 = buf1, buf
+
+    if not isinstance(erifile, h5py.Group):
+        feri.close()
+    return erifile
+
+
+def _aux_e2_hy_spltbas(cell, cell_fat, auxcell_or_auxbasis, erifile,
+               intor='int3c2e', aosym='s2ij', comp=None, kptij_lst=None,
+               dataname='eri_mo', shls_slice=None, max_memory=2000,
+               bvk_kmesh=None, shlpr_mask_fat=None,
+               prescreening_type=0, prescreening_data=None,
+               verbose=0):
+    r'''3-center AO integrals (ij|L) with double lattice sum:
+    \sum_{lm} (i[l]j[m]|L[0]), where L is the auxiliary basis.
+    Three-index integral tensor (kptij_idx, nao_pair, naux) or four-index
+    integral tensor (kptij_idx, comp, nao_pair, naux) are stored on disk.
+
+    **This function should be only used by df and mdf initialization function
+    _make_j3c**
+
+    Args:
+        kptij_lst : (*,2,3) array
+            A list of (kpti, kptj)
+    '''
+    log = lib.logger.Logger(cell.stdout, cell.verbose)
+
+    if isinstance(auxcell_or_auxbasis, gto.Mole):
+        auxcell = auxcell_or_auxbasis
+    else:
+        auxcell = make_auxcell(cell, auxcell_or_auxbasis)
+
+    intor, comp = gto.moleintor._get_intor_and_comp(cell._add_suffix(intor), comp)
+
+    if isinstance(erifile, h5py.Group):
+        feri = erifile
+    elif h5py.is_hdf5(erifile):
+        feri = h5py.File(erifile, 'a')
+    else:
+        feri = h5py.File(erifile, 'w')
+    if dataname in feri:
+        del(feri[dataname])
+    if dataname+'-kptij' in feri:
+        del(feri[dataname+'-kptij'])
+
+    if kptij_lst is None:
+        kptij_lst = numpy.zeros((1,2,3))
+    feri[dataname+'-kptij'] = kptij_lst
+
+    if shls_slice is None:
+        shls_slice = (0, cell.nbas, 0, cell.nbas, 0, auxcell.nbas)
+    shls_slice_fat = (0, cell_fat.nbas, 0, cell_fat.nbas, 0, auxcell.nbas)
+
+    if shlpr_mask_fat is None:
+        n_compact, n_diffuse = cell_fat._nbas_each_set
+        shlpr_mask_fat = numpy.ones((shls_slice_fat[1]-shls_slice_fat[0],
+                                    shls_slice_fat[3]-shls_slice_fat[2]),
+                                    dtype=numpy.int8, order="C")
+        shlpr_mask_fat[n_compact:,n_compact:] = 0
+
+    ao_loc = cell.ao_loc_nr()
+    aux_loc = auxcell.ao_loc_nr(auxcell.cart or 'ssc' in intor)[:shls_slice[5]+1]
+    ni = ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]]
+    nj = ao_loc[shls_slice[3]] - ao_loc[shls_slice[2]]
+    nkptij = len(kptij_lst)
+
+    nii = (ao_loc[shls_slice[1]]*(ao_loc[shls_slice[1]]+1)//2 -
+           ao_loc[shls_slice[0]]*(ao_loc[shls_slice[0]]+1)//2)
+    nij = ni * nj
+
+    kpti = kptij_lst[:,0]
+    kptj = kptij_lst[:,1]
+    aosym_ks2 = abs(kpti-kptj).sum(axis=1) < KPT_DIFF_TOL
+    j_only = numpy.all(aosym_ks2)
+    #aosym_ks2 &= (aosym[:2] == 's2' and shls_slice[:2] == shls_slice[2:4])
+    aosym_ks2 &= aosym[:2] == 's2'
+
+    if j_only and aosym[:2] == 's2':
+        assert(shls_slice[2] == 0)
+        nao_pair = nii
+    else:
+        nao_pair = nij
+
+    if gamma_point(kptij_lst):
+        dtype = numpy.double
+    else:
+        dtype = numpy.complex128
+
+    buflen = max(8, int(max_memory*.47e6/16/(nkptij*ni*nj*comp)))
+    auxdims = aux_loc[shls_slice[4]+1:shls_slice[5]+1] - aux_loc[shls_slice[4]:shls_slice[5]]
+    auxranges = balance_segs(auxdims, buflen)
+    buflen = max([x[2] for x in auxranges])
+    buf = numpy.empty(nkptij*comp*ni*nj*buflen, dtype=dtype)
+    buf1 = numpy.empty_like(buf)
+    bufmem = buf.size*16/1024**2.
+    # TODO: significant performance loss is observed when the size of buf exceeds ~1 GB. This happens in large k-mesh where nkptij is large. Simply reducing buflen to keep buf size < 1 GB is not an option, as for large k-mesh even a buflen as small as < 4 requires > 1 GB memory. One solution is to batch nkptij, too.
+    if bufmem > max_memory * 0.5:
+        raise RuntimeError("Computing 3c2e integrals requires %.2f MB memory, which exceeds the given maximum memory %.2f MB. Try giving PySCF more memory." % (bufmem*2., max_memory))
+
+    if prescreening_type == 0:
+        pbcopt = None
+    else:
+        from pyscf.pbc.gto import _pbcintor
+        import copy
+        pcell = copy.copy(cell_fat)
+        pcell._atm, pcell._bas, pcell._env = \
+                    gto.conc_env(cell_fat._atm, cell_fat._bas, cell_fat._env,
+                                 cell_fat._atm, cell_fat._bas, cell_fat._env)
+        if prescreening_type == 1:
+            pbcopt = _pbcintor.PBCOpt1(pcell).init_rcut_cond(pcell,
+                                                             prescreening_data)
+        elif prescreening_type >= 2:
+            pbcopt = _pbcintor.PBCOpt2(pcell).init_rcut_cond(pcell,
+                                                             prescreening_data)
+    from pyscf.pbc.df.incore import wrap_int3c_hy_spltbas
+    int3c = wrap_int3c_hy_spltbas(cell_fat, cell, auxcell, shlpr_mask_fat,
+                                  intor, aosym, comp, kptij_lst,
+                                  bvk_kmesh=bvk_kmesh,
+                                  pbcopt=pbcopt,
+                                  prescreening_type=prescreening_type)
+
+    kptis = kptij_lst[:,0]
+    kptjs = kptij_lst[:,1]
+    kpt_ji = kptjs - kptis
+    uniq_kpts, uniq_index, uniq_inverse = unique(kpt_ji)
+# sorted_ij_idx: Sort and group the kptij_lst according to the ordering in
+# df._make_j3c to reduce the data fragment in the hdf5 file.  When datasets
+# are written to hdf5, they are saved sequentially. If the integral data are
+# saved as the order of kptij_lst, removing the datasets in df._make_j3c will
+# lead to holes that can not be reused.
+    sorted_ij_idx = numpy.hstack([numpy.where(uniq_inverse == k)[0]
+                                  for k, kpt in enumerate(uniq_kpts)])
+
+    tril_idx = numpy.tril_indices(ni)
+    tril_idx = tril_idx[0] * ni + tril_idx[1]
+    def save(istep, mat):
+        tspan = numpy.zeros((2))
+        t1 = numpy.zeros((2))
+        t2 = numpy.zeros((2))
+        for k in sorted_ij_idx:
+            v = mat[k]
+            if gamma_point(kptij_lst[k]):
+                v = v.real
+            if aosym_ks2[k] and nao_pair == ni**2:
+                v = v[:,tril_idx]
+            t1[:] = [time.clock(), time.time()]
+            feri['%s/%d/%d' % (dataname,k,istep)] = v
+            t2[:] = [time.clock(), time.time()]
+            tspan += t2 - t1
+        log.debug1("    CPU time for %s %9.2f sec, wall time %9.2f sec",
+                   "     save %d"%istep, *tspan)
+
+    with lib.call_in_background(save) as bsave:
+        for istep, auxrange in enumerate(auxranges):
+            sh0, sh1, nrow = auxrange
+            sub_slice = (shls_slice_fat[0], shls_slice_fat[1],
+                         shls_slice_fat[2], shls_slice_fat[3],
+                         shls_slice_fat[4]+sh0, shls_slice_fat[4]+sh1)
             mat = numpy.ndarray((nkptij,comp,nao_pair,nrow), dtype=dtype, buffer=buf)
             t1 = (time.clock(), time.time())
             bsave(istep, int3c(sub_slice, mat))
