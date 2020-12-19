@@ -417,11 +417,16 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
                     log.debug1("  c exp: %s\n  d exp: %s",
                                cell_fat.bas_exp(idx[0]),
                                cell_fat.bas_exp(idx[1]))
+                    log.debug2("  c cff: %s\n  d cff: %s",
+                               cell_fat._libcint_ctr_coeff(idx[0]),
+                               cell_fat._libcint_ctr_coeff(idx[1]))
                 else:
                     btype = "c" if idx[0] < nbas_c else "d"
                     log.debug("orig bas %d (l = %d) -> %s %d", ib, l, btype,
                               idx[0])
                     log.debug1("  %s exp: %s", btype, cell_fat.bas_exp(idx[0]))
+                    log.debug2("  %s cff: %s", btype,
+                               cell_fat._libcint_ctr_coeff(idx[0]))
 
         if self.auxcell is None:
             log.info('auxbasis = %s', self.auxbasis)
