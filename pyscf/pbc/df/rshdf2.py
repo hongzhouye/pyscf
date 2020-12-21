@@ -58,7 +58,8 @@ from pyscf.pbc import df
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.df import outcore
 from pyscf.pbc.df import rshdf_ao2mo
-from pyscf.pbc.df.rshdf_helper import ft_aopair_kpts_spltbas, fat_orig_loop
+from pyscf.pbc.df.rshdf_helper import (ft_aopair_kpts_spltbas,
+                                       fft_aopair_kpts_spltbas, fat_orig_loop)
 from pyscf.pbc.tools import k2gamma
 from pyscf.df.outcore import _guess_shell_ranges
 from pyscf.pbc import tools as pbctools
@@ -156,6 +157,9 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     split_basis = not cell_fat is None
     if split_basis:
+        shl_mask_fat_c = np.ones(cell_fat.nbas, dtype=bool)
+        shl_mask_fat_c[cell_fat._nbas_c:] = 0
+        shl_mask_fat_d = ~shl_mask_fat_c
         shlpr_mask_fat_c, shlpr_mask_fat_d = get_shlpr_aopr_mask(cell, cell_fat)
         aopr_mask_c, aopr_mask_d, aopr_loc = get_aopr_mask(cell, cell_fat,
                                                            shlpr_mask_fat_c,
@@ -185,6 +189,8 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     b = cell.reciprocal_vectors()
     gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
     ngrids = gxyz.shape[0]
+    if split_basis:
+        coords = cell.gen_uniform_grids(mesh)
 
     kptis = kptij_lst[:,0]
     kptjs = kptij_lst[:,1]
@@ -267,21 +273,18 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         return j2c, j2c_negative, j2ctag
 
 # compute j3c
-    # inverting gamma point j2c, and use it's row max to determine extra precision for 3c2e prescreening
-    k_gamma = None
-    for k, kpt in enumerate(uniq_kpts):
-        if is_zero(kpt):
-            k_gamma = k
-            break
-    if k_gamma is None: k_gamma = 0
-    j2c, j2c_negative, j2ctag = cholesky_decomposed_metric(k_gamma)
-    if j2ctag == "CD":
-        j2c_inv = np.eye(j2c.shape[0])
-        j2c_inv = scipy.linalg.solve_triangular(j2c, j2c_inv, lower=True,
-                                                overwrite_b=True)
-    else:
-        j2c_inv = j2c
-    extra_precision = 1./(np.max(np.abs(j2c_inv), axis=0)+1.)
+    # inverting j2c, and use it's column max to determine an extra precision for 3c2e prescreening
+    extra_precision = np.ones(auxcell.nao_nr())
+    for k in range(len(uniq_kpts)):
+        j2c, j2c_negative, j2ctag = cholesky_decomposed_metric(k)
+        if j2ctag == "CD":
+            j2c_inv = np.eye(j2c.shape[0])
+            j2c_inv = scipy.linalg.solve_triangular(j2c, j2c_inv, lower=True,
+                                                    overwrite_b=True)
+        else:
+            j2c_inv = j2c
+        extra_precision = np.minimum(1./(np.max(np.abs(j2c_inv), axis=0)+1.),
+                                      extra_precision)
 
     from pyscf.pbc.df.rshdf import get_prescreening_data
     prescreening_data = get_prescreening_data(mydf, cell_fat, extra_precision)
@@ -368,16 +371,17 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                 vbar = qaux * g0
                 if split_basis: # only compute ovlp for cc and cd
                     nao_fat = cell_fat.nao_nr()
-                    ovlp_fat = np.asarray(cell_fat.pbc_intor('int1e_ovlp',
-                                          hermi=1,
-                                          kpts=adapted_kptjs)).real.reshape(
-                                          -1,nao_fat*nao_fat)
-                    ovlp = np.zeros((ovlp_fat.shape[0],nao*nao),
-                                    dtype=ovlp_fat.dtype)
+                    ovlp_fat = cell_fat.pbc_intor('int1e_ovlp', hermi=1,
+                                                  kpts=adapted_kptjs)
+                    ovlp_fat = [s.ravel() for s in ovlp_fat]
+                    nkj = len(ovlp_fat)
+                    ovlp = [np.zeros((nao*nao), dtype=ovlp_fat[k].dtype)
+                            for k in range(nkj)]
                     for iap_fat, iap in fat_orig_loop(cell_fat, cell,
                                                       aosym='s1',
                                                       shlpr_mask=shlpr_mask_fat_c):
-                        ovlp[:,iap] += ovlp_fat[:,iap_fat]
+                        for k in range(nkj):
+                            ovlp[k][iap] += ovlp_fat[k][iap_fat]
                     ovlp = [lib.pack_tril(s.reshape(nao,nao)) for s in ovlp]
                 else:
                     ovlp = cell.pbc_intor('int1e_ovlp', hermi=1,
@@ -427,6 +431,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                 has_d = mask_d.any()
 
                 for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                    nG = p1 - p0
                     if has_c:
                         tick_ = np.asarray([time.clock(), time.time()])
                         # long-range coulomb for cc and cd
@@ -439,7 +444,6 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                                                      shlpr_mask=shlpr_mask_fat_c)
                         tock_ = np.asarray([time.clock(), time.time()])
                         tspans[0] += tock_ - tick_
-                        nG = p1 - p0
                         for k, ji in enumerate(adapted_ji_idx):
                             aoao = dat[k].reshape(nG,ncol)[:,mask_c]
                             pqkR = np.ndarray((ncol_c,nG), buffer=pqkRbuf)
@@ -497,6 +501,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                 has_d = mask_d.any()
 
                 for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                    nG = p1 - p0
                     if has_c:
                         tick_ = np.asarray([time.clock(), time.time()])
                         # long-range coulomb for cc and cd
@@ -509,7 +514,6 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                                                      shlpr_mask=shlpr_mask_fat_c)
                         tock_ = np.asarray([time.clock(), time.time()])
                         tspans[0] += tock_ - tick_
-                        nG = p1 - p0
                         for k, ji in enumerate(adapted_ji_idx):
                             aoao = dat[k].reshape(nG,ncol)
                             pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
@@ -528,13 +532,21 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                     # add full coulomb for dd
                     if has_d:
                         tick_ = np.asarray([time.clock(), time.time()])
-                        dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
-                                                     shls_slice, aosym,
-                                                     b, gxyz[p0:p1], Gvbase,
-                                                     kpt, adapted_kptjs,
-                                                     out=buf,
-                                                     bvk_kmesh=bvk_kmesh,
-                                                     shlpr_mask=shlpr_mask_fat_d)
+                        # dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
+                        #                              shls_slice, aosym,
+                        #                              b, gxyz[p0:p1], Gvbase,
+                        #                              kpt, adapted_kptjs,
+                        #                              out=buf,
+                        #                              bvk_kmesh=bvk_kmesh,
+                        #                              shlpr_mask=shlpr_mask_fat_d)
+                        dat = fft_aopair_kpts_spltbas(mydf._numint,
+                                                      cell_fat, cell,
+                                                      mesh, coords,
+                                                      aosym=aosym, q=kpt,
+                                                      kptjs=adapted_kptjs,
+                                                      shls_slice0=shls_slice,
+                                                      shl_mask=shl_mask_fat_d,
+                                                      out=buf)
                         tock_ = np.asarray([time.clock(), time.time()])
                         tspans[0] += tock_ - tick_
 

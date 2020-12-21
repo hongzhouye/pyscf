@@ -386,6 +386,9 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
         self.cell_fat = None
         self.mesh_lr = None
 
+        # if AO basis is split, numint is needed for FFT evaluating (*|dd)
+        self._numint = None
+
     def dump_flags(self, verbose=None):
         cell = self.cell
         cell_fat = self.cell_fat
@@ -522,6 +525,8 @@ class RangeSeparatedHybridDensityFitting(df.df.GDF):
             if self.cell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 self.mesh_lr = _estimate_mesh_lr(self.cell_fat,
                                                  self.cell.precision)
+                from pyscf.pbc.dft import numint
+                self._numint = numint.KNumInt()
             else:
                 self.cell_fat = None    # no split basis happens
 

@@ -4,6 +4,8 @@ import numpy as np
 import scipy.special
 
 from pyscf import gto as mol_gto
+from pyscf.pbc.lib.kpts_helper import is_zero
+from pyscf.pbc import tools as pbctools
 from pyscf import lib
 
 libpbc = lib.load_library('libpbc')
@@ -422,16 +424,18 @@ def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
                         Ls_sr = Ls_sort[:np.searchsorted(
                                         dLs_sort,max(R12_sr,Rc_sr))]
 
+                        Rcs0_sr_raw = _get_squared_dist(ei*Ls_sr,
+                                                        -ej*Ls_sr)**0.5 / sumeij
                         Rcs_sr_raw = _get_squared_dist(ei*(Ls_sr+Ri),
                                                        -ej*(Ls_sr+Rj))**0.5 / sumeij
 
-                        idx1, idx2 = np.where(Rcs_sr_raw < r0*1.1)
+                        idx1, idx2 = np.where(Rcs0_sr_raw < r0*1.1)
                         R12s2_sr = np.linalg.norm(Ls_sr[idx1]+Ri -
                                                   (Ls_sr[idx2]+Rj), axis=-1)**2.
                         rho0 = np.sum(np.exp(-etaij2 * R12s2_sr))
 
                         Rcs_sr, nRcs_sr = np.unique(
-                                        Rcs_sr_raw[Rcs_sr_raw<Rc_sr].round(1),
+                                        Rcs_sr_raw[Rcs0_sr_raw<Rc_sr].round(1),
                                         return_counts=True)
                         # effectively removing zero
                         Rcs_sr[Rcs_sr<1.e-3] = dLs_sort[-1]
@@ -678,6 +682,156 @@ def ft_aopair_kpts_spltbas(cell, cell0, Gv, shls_slice0=None, aosym='s1',
     if comp == 1:
         out = out[:,0]
     return out
+
+
+def fft_aopair_kpts_spltbas(nint, cell, cell0, mesh, coords, aosym="s1",
+                            q=np.zeros(3), kptjs=np.zeros((1,3)),
+                            shls_slice0=None, shl_mask=None, out=None):
+    '''Modified from fft_ao2mo.py, get_ao_pairs_G
+    This function should be solely used by RSHDF.
+
+    Calculate forward (G|ij) FFT of all AO pairs.
+
+    Returns:
+        ao_pairs_G : 2D complex array
+            For gamma point, the shape is (ngrids, nao*(nao+1)/2); otherwise the
+            shape is (ngrids, nao*nao)
+    '''
+    dtype = np.complex128
+    dlen = 16
+
+    q = np.reshape(q, 3)
+    if aosym == "s2":
+        assert(is_zero(q))
+    kptjs = np.reshape(kptjs, (-1,3))
+    nkpts = len(kptjs)
+    ngrids = coords.shape[0]
+    weight = cell.vol / ngrids
+
+    ao_loc = cell.ao_loc_nr()
+    nao = ao_loc[-1]
+    nbas = ao_loc.size - 1
+    ao_loc0 = cell0.ao_loc_nr()
+    nao0 = ao_loc0[-1]
+    nbas0 = ao_loc0.size - 1
+
+    nbas_c, nbas_d = cell._nbas_each_set
+    nao_c = ao_loc[nbas_c]
+    nao_d = nao - nao_c
+    ao_loc_d = ao_loc[nbas_c:] - nao_c
+
+    if shls_slice0 is None:
+        shls_slice0 = (0,nbas0,0,nbas0)
+
+    nish0 = shls_slice0[1] - shls_slice0[0]
+    njsh0 = shls_slice0[3] - shls_slice0[2]
+
+    ish0, ish1, jsh0, jsh1 = shls_slice0
+    nish0 = ish1 - ish0
+    njsh0 = jsh1 - jsh0
+
+    if shl_mask is None:
+        shl_mask = np.ones(nbas, dtype=np.bool)
+        shl_mask[:nbas_c] = False
+
+    shl_idx = cell._bas_idx
+    shls_slice = (nbas_c, nbas)
+    bas_idx0 = np.asarray(cell._bas_idx)[shl_mask]  # active shl only
+    # map cell0 shl idx to cell0 ao idx
+    shl0_to_ao0 = [np.arange(*ao_loc0[ib0:ib0+2]) for ib0 in range(nbas0)]
+    # map cell0 shl idx to cell active shl idx
+    shl0_to_shl = [np.where(bas_idx0 == ib0)[0] for ib0 in range(nbas0)]
+
+    kjaos = nint.eval_ao(cell, coords, kptjs, shls_slice=shls_slice)
+    kjaos = [np.asarray(x.T, order="C") for x in kjaos]
+
+    if aosym == "s2":   # q = 0
+        i0, i1 = ao_loc0[ish0], ao_loc0[ish1]
+        nao_pair0 = i1*(i1+1)//2 - i0*(i0+1)//2
+        ao_pairs_G = np.ndarray((nkpts,nao_pair0,ngrids), dtype=dtype,
+                                buffer=out)
+        ao_pairs_G.fill(0)
+
+        i0 = ao_loc0[ish0]
+        iap0_shift = i0*(i0+1) // 2
+        nao02 = nao0*(nao0+1) // 2
+        iap0_tab = np.zeros((nao0,nao0), dtype=int)
+        iap0_tab[np.tril_indices_from(iap0_tab)] = np.arange(nao02)
+        iap0_tab -= iap0_shift
+
+        for k in range(nkpts):
+            aoi = kjaos[k].conj() * weight
+            aoj = kjaos[k]
+            for ib0 in range(ish0,ish1):
+                ibs = shl0_to_shl[ib0]
+                if ibs.size == 0:
+                    continue
+                i00,i01 = ao_loc0[ib0], ao_loc0[ib0+1]
+                for jb0 in range(ib0+1):
+                    jbs = shl0_to_shl[jb0]
+                    if jbs.size == 0:
+                        continue
+                    j00,j01 = ao_loc0[jb0], ao_loc0[jb0+1]
+                    idx0 = iap0_tab[i00:i01,j00:j01]
+                    tmp = 0
+                    for ib in ibs:
+                        i0,i1 = ao_loc_d[ib], ao_loc_d[ib+1]
+                        for jb in jbs:
+                            j0,j1 = ao_loc_d[jb], ao_loc_d[jb+1]
+                            tmp += aoi[i0:i1][:,None,:] * aoj[j0:j1]
+                    if ib0 == jb0:
+                        nj0 = idx0.shape[1]
+                        tril_idx = np.tril_indices(nj0)
+                        idx0 = idx0[tril_idx].ravel()
+                        tmp = tmp[tril_idx]
+                    else:
+                        idx0 = idx0.ravel()
+                        tmp = np.reshape(tmp, (-1,ngrids))
+                    ao_pairs_G[k,idx0,] = pbctools.fft(tmp, mesh)
+                    tmp = None
+    else:
+        kptis = kptjs - q
+        kiaos = nint.eval_ao(cell, coords, kptis, shls_slice=shls_slice)
+        kiaos = [np.asarray(x.T, order="C") for x in kiaos]
+        phase = np.exp(-1j * np.dot(coords, q))
+
+        i0, i1 = ao_loc0[ish0], ao_loc0[ish1]
+        j0, j1 = ao_loc0[jsh0], ao_loc0[jsh1]
+        nao_pair0 = (i1-i0) * (j1-j0)
+        ao_pairs_G = np.ndarray((nkpts,nao_pair0,ngrids), dtype=dtype,
+                                buffer=out)
+        ao_pairs_G.fill(0)
+
+        iap0_tab = np.arange(nao0*nao0, dtype=int).reshape(nao0,nao0)
+        iap0_tab -= i0 * nao0
+
+        for k in range(nkpts):
+            aoi = kiaos[k].conj() * phase * weight
+            aoj = kjaos[k]
+            for ib0 in range(ish0,ish1):
+                ibs = shl0_to_shl[ib0]
+                if ibs.size == 0:
+                    continue
+                i00,i01 = ao_loc0[ib0], ao_loc0[ib0+1]
+                for jb0 in range(jsh0,jsh1):
+                    jbs = shl0_to_shl[jb0]
+                    if jbs.size == 0:
+                        continue
+                    j00,j01 = ao_loc0[jb0], ao_loc0[jb0+1]
+                    idx0 = iap0_tab[i00:i01,j00:j01].ravel()
+                    tmp = 0.
+                    for ib in ibs:
+                        i0,i1 = ao_loc_d[ib], ao_loc_d[ib+1]
+                        for jb in jbs:
+                            j0,j1 = ao_loc_d[jb], ao_loc_d[jb+1]
+                            tmp += aoi[i0:i1][:,None,:] * aoj[j0:j1]
+                    tmp = np.reshape(tmp, (-1,ngrids))
+                    ao_pairs_G[k,idx0] = pbctools.fft(tmp, mesh)
+                    tmp = None
+
+    ao_pairs_G = np.rollaxis(ao_pairs_G, -1, 1)
+
+    return ao_pairs_G
 
 
 ###
