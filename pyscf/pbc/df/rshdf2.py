@@ -189,17 +189,9 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     # get charge of auxbasis
     qaux = df.rshdf.get_aux_chg(auxcell)
-    g0 = np.pi/mydf.omega**2./cell.vol
 
     nao = cell.nao_nr()
     naux = auxcell.nao_nr()
-    mesh = mydf.mesh_compact
-    Gv, Gvbase, kws = cell.get_Gv_weights(mesh)
-    b = cell.reciprocal_vectors()
-    gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
-    ngrids = gxyz.shape[0]
-    if split_basis:
-        coords = cell.gen_uniform_grids(mesh)
 
     kptis = kptij_lst[:,0]
     kptjs = kptij_lst[:,1]
@@ -211,17 +203,25 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
 # compute j2c first as it informs the integral screening in computing j3c
     # short-range part of j2c ~ (-kpt_ji | kpt_ji)
+    omega_j2c = abs(mydf.omega_j2c)
     """
-    with auxcell.with_range_coulomb(-omega):
+    with auxcell.with_range_coulomb(-omega_j2c):
         j2c = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
     """
     j2c_full = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
-    with auxcell.with_range_coulomb(omega):
+    with auxcell.with_range_coulomb(omega_j2c):
         j2c_lr = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
     j2c = [j2c_full[k] - j2c_lr[k] for k in range(len(uniq_kpts))]
 
     # Add (1) short-range G=0 (i.e., charge) part and (2) long-range part
     qaux2 = None
+    g0_j2c = np.pi/omega_j2c**2./cell.vol
+    mesh_j2c = mydf.mesh_j2c
+    Gv, Gvbase, kws = cell.get_Gv_weights(mesh_j2c)
+    b = cell.reciprocal_vectors()
+    gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
+    ngrids = gxyz.shape[0]
+
     max_memory = max(2000, mydf.max_memory - lib.current_memory()[0])
     blksize = max(2048, int(max_memory*.5e6/16/auxcell.nao_nr()))
     log.debug2('max_memory %s (MB)  blocksize %s', max_memory, blksize)
@@ -230,9 +230,9 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         if is_zero(kpt):
             if qaux2 is None:
                 qaux2 = np.outer(qaux,qaux)
-            j2c[k] -= qaux2 * g0
+            j2c[k] -= qaux2 * g0_j2c
         # long-range part via aft
-        coulG_lr = weighted_coulG(cell, omega, kpt, False, mesh)
+        coulG_lr = weighted_coulG(cell, omega_j2c, kpt, False, mesh_j2c)
         for p0, p1 in lib.prange(0, ngrids, blksize):
             aoaux = ft_ao.ft_ao(auxcell, Gv[p0:p1], None, b, gxyz[p0:p1],
                                 Gvbase, kpt).T
@@ -329,6 +329,15 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     t1 = log.timer_debug1('3c2e', *t1)
 
     prescreening_data = None
+
+    # recompute g0 and Gvectors for j3c
+    g0 = np.pi/omega**2./cell.vol
+    mesh = mydf.mesh_compact
+    Gv, Gvbase, kws = cell.get_Gv_weights(mesh)
+    gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
+    ngrids = gxyz.shape[0]
+    if split_basis:
+        coords = cell.gen_uniform_grids(mesh)
 
     # mute charges for diffuse auxiliary shells
     if split_auxbasis:
@@ -738,11 +747,12 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         self.ke_cutoff = None
         self.mesh_compact = None
 
-        # omega and mesh for j2c. Since j2c is to be inverted, it is desirable to use (1) a "fixed" omega for reproducibility, and (2) a higher precision (1e-12 at least) to minimize the error caused by inversion.
+        # omega and mesh for j2c. Since j2c is to be inverted, it is desirable to use (1) a "fixed" omega for reproducibility, and (2) a higher precision to minimize the error caused by inversion.
         # This extra computational cost due to the higher precision is negligible compared to the j3c build.
-        self.omega_j2c = 0.7
+        # FOR EXPERTS: if you want omega_j2c to be the same as omega, set omega_j2c to be any negative number.
+        self.omega_j2c = 0.4
         self.mesh_j2c = None
-        self.precision_j2c = min(1e-12, self.cell.precision)
+        self.precision_j2c = 1e-8 * self.precision_G
 
         # If split_basis is True, each ao shell will be split into a diffuse (d) part and a compact (c) part based on the pGTO exponents & coeffs.
         # The criterion is such that a "d" shell must be expressed by a PW basis of size self.mesh_compact to achieve self.precision_G.
@@ -799,6 +809,9 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
             log.info('auxbasis = %s', self.auxcell.basis)
             log.info('auxcell precision= %s', self.auxcell.precision)
             log.info('auxcell rcut = %s', self.auxcell.rcut)
+            log.info('omega_j2c = %s', self.omega_j2c)
+            log.info('mesh_j2c = %s (%d PWs)', self.mesh_j2c,
+                     np.prod(self.mesh_j2c))
 
         auxcell = self.auxcell
         if hasattr(auxcell, "_bas_idx"):
@@ -830,11 +843,10 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
                                 rshdf_helper.estimate_omega_for_npw(
                                                 self.cell, self.npw_max)
         else:
-            self.ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(self.cell,
-                                                                 self.omega)
-            mesh_compact = pbctools.cutoff_to_mesh(self.cell.lattice_vectors(),
-                                                   self.ke_cutoff)
-            self.mesh_compact = df.df._round_off_to_odd_mesh(mesh_compact)
+            self.ke_cutoff, self.mesh_compact = \
+                                rshdf_helper.estimate_mesh_for_omega(
+                                                self.cell, self.omega,
+                                                round2odd=True)
 
         # For each shell, using npw_max to split into c and d parts such that d shells can be well-described by a PW of size self.mesh_compact
         if self.split_basis:
@@ -846,6 +858,9 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
             else:
                 self.cell_fat = None    # no split basis happens
 
+        # As explained in __init__, if negative omega_j2c --> use omega
+        if self.omega_j2c < 0: self.omega_j2c = self.omega
+
         # build auxcell and split its basis if request
         # Note 1) higher precision is used as explained in __init__
         # Note 2) that unlike AOs, auxiliary basis is all primitive, so _reorder_cell won't split any shells -- just reorder them so that compact shells come first. Thus, there's no need to differentiate auxcell and auxcell_fat.
@@ -854,6 +869,8 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         auxcell.precision = self.precision_j2c
         auxcell.rcut = max([auxcell.bas_rcut(ib, auxcell.precision)
                             for ib in range(auxcell.nbas)])
+        self.mesh_j2c = rshdf_helper.estimate_mesh_for_omega(
+                                auxcell, self.omega_j2c, round2odd=True)[1]
 
         if self.split_auxbasis:
             auxcell_fat = rshdf_helper._reorder_cell(auxcell, 0, self.npw_max)

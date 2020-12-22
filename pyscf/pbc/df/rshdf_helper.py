@@ -77,6 +77,14 @@ def estimate_omega_for_npw(cell, npw_max, round2odd=True):
 
     return omega, ke_cutoff, mesh
 
+def estimate_mesh_for_omega(cell, omega, round2odd=True):
+    ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(cell, omega)
+    mesh = pbctools.cutoff_to_mesh(cell.lattice_vectors(), ke_cutoff)
+    if round2odd:
+        mesh = df.df._round_off_to_odd_mesh(mesh)
+
+    return ke_cutoff, mesh
+
 def _estimate_mesh_primitive(cell, precision, round2odd=True):
     ''' Estimate the minimum mesh for the diffuse shells.
     '''
