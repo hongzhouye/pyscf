@@ -626,7 +626,6 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, verbose=None):
 
     if not npw_max is None:
         from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
-        # kecuts = _primitive_gto_cutoff(cell, cell.precision)[1]
         meshs = _estimate_mesh_primitive(cell, cell.precision, round2odd=True)
 
     _env = cell._env.copy()

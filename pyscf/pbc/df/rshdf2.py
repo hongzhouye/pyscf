@@ -57,9 +57,7 @@ from pyscf.gto.mole import PTR_RANGE_OMEGA
 from pyscf.pbc import df
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.df import outcore
-from pyscf.pbc.df import rshdf_ao2mo
-from pyscf.pbc.df.rshdf_helper import (ft_aopair_kpts_spltbas,
-                                       fft_aopair_kpts_spltbas, fat_orig_loop)
+from pyscf.pbc.df import rshdf_helper
 from pyscf.pbc.tools import k2gamma
 from pyscf.df.outcore import _guess_shell_ranges
 from pyscf.pbc import tools as pbctools
@@ -131,6 +129,17 @@ def get_aopr_mask(cell, cell_fat, shlpr_mask_fat_c, shlpr_mask_fat_d):
     return aopr_mask_c, aopr_mask_d, aopr_loc
 
 
+def get_prescreening_data(mydf, cell_fat, extra_precision):
+    if mydf.prescreening_type == 0:
+        return None
+
+    cell_ = mydf.cell if cell_fat is None else cell_fat
+    auxcell = mydf.auxcell
+    omega = abs(mydf.omega)
+    Rc_cut_mat, R12_cut_mat = rshdf_helper.estimate_Rc_R12_cut_SPLIT_batch(
+                                        cell_, auxcell, omega, extra_precision)
+    return Rc_cut_mat, R12_cut_mat
+
 # kpti == kptj: s2 symmetry
 # kpti == kptj == 0 (gamma point): real
 def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
@@ -184,7 +193,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     nao = cell.nao_nr()
     naux = auxcell.nao_nr()
-    mesh = mydf.mesh_sr
+    mesh = mydf.mesh_compact
     Gv, Gvbase, kws = cell.get_Gv_weights(mesh)
     b = cell.reciprocal_vectors()
     gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
@@ -286,7 +295,6 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         extra_precision = np.minimum(1./(np.max(np.abs(j2c_inv), axis=0)+1.),
                                       extra_precision)
 
-    from pyscf.pbc.df.rshdf import get_prescreening_data
     prescreening_data = get_prescreening_data(mydf, cell_fat, extra_precision)
 
     t1 = log.timer_debug1('prescrn warmup', *t1)
@@ -297,29 +305,27 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     else:
         shls_slice = None
 
-    if split_basis:
-        with cell.with_range_coulomb(-omega), \
-             auxcell.with_range_coulomb(-omega), \
-             cell_fat.with_range_coulomb(-omega):
-            outcore._aux_e2_hy_spltbas(
-                               cell, cell_fat, auxcell, fswap, 'int3c2e', aosym='s2',
-                               kptij_lst=kptij_lst, dataname='j3c-junk',
-                               max_memory=max_memory,
-                               bvk_kmesh=bvk_kmesh,
-                               prescreening_type=mydf.prescreening_type,
-                               prescreening_data=prescreening_data,
-                               shlpr_mask_fat=shlpr_mask_fat_c,
-                               shls_slice=shls_slice)
-    else:
-        with cell.with_range_coulomb(-omega), \
-             auxcell.with_range_coulomb(-omega):
-            outcore._aux_e2_hy(cell, auxcell, fswap, 'int3c2e', aosym='s2',
-                               kptij_lst=kptij_lst, dataname='j3c-junk',
-                               max_memory=max_memory,
-                               bvk_kmesh=bvk_kmesh,
-                               prescreening_type=mydf.prescreening_type,
-                               prescreening_data=prescreening_data,
-                               shls_slice=shls_slice)
+    with mydf.with_range_coulomb(-omega):
+        if split_basis:
+            rshdf_helper._aux_e2_spltbas(
+                            cell, cell_fat, auxcell, fswap, 'int3c2e',
+                            aosym='s2',
+                            kptij_lst=kptij_lst, dataname='j3c-junk',
+                            max_memory=max_memory,
+                            bvk_kmesh=bvk_kmesh,
+                            prescreening_type=mydf.prescreening_type,
+                            prescreening_data=prescreening_data,
+                            shlpr_mask_fat=shlpr_mask_fat_c,
+                            shls_slice=shls_slice)
+        else:
+            rshdf_helper._aux_e2_nospltbas(
+                            cell, auxcell, fswap, 'int3c2e', aosym='s2',
+                            kptij_lst=kptij_lst, dataname='j3c-junk',
+                            max_memory=max_memory,
+                            bvk_kmesh=bvk_kmesh,
+                            prescreening_type=mydf.prescreening_type,
+                            prescreening_data=prescreening_data,
+                            shls_slice=shls_slice)
     t1 = log.timer_debug1('3c2e', *t1)
 
     prescreening_data = None
@@ -377,9 +383,9 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                     nkj = len(ovlp_fat)
                     ovlp = [np.zeros((nao*nao), dtype=ovlp_fat[k].dtype)
                             for k in range(nkj)]
-                    for iap_fat, iap in fat_orig_loop(cell_fat, cell,
-                                                      aosym='s1',
-                                                      shlpr_mask=shlpr_mask_fat_c):
+                    for iap_fat, iap in rshdf_helper.fat_orig_loop(
+                                                cell_fat, cell, aosym='s1',
+                                                shlpr_mask=shlpr_mask_fat_c):
                         for k in range(nkj):
                             ovlp[k][iap] += ovlp_fat[k][iap_fat]
                     ovlp = [lib.pack_tril(s.reshape(nao,nao)) for s in ovlp]
@@ -494,13 +500,14 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                     for p0, p1 in lib.prange(0, ngrids, Gblksize):
                         nG = p1 - p0
                         tick_ = np.asarray([time.clock(), time.time()])
-                        dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
-                                                     shls_slice, aosym,
-                                                     b, gxyz[p0:p1], Gvbase,
-                                                     kpt, adapted_kptjs,
-                                                     out=buf,
-                                                     bvk_kmesh=bvk_kmesh,
-                                                     shlpr_mask=shlpr_mask_fat_c)
+                        dat = rshdf_helper.ft_aopair_kpts_spltbas(
+                                                cell_fat, cell, Gv[p0:p1],
+                                                shls_slice, aosym,
+                                                b, gxyz[p0:p1], Gvbase,
+                                                kpt, adapted_kptjs,
+                                                out=buf,
+                                                bvk_kmesh=bvk_kmesh,
+                                                shlpr_mask=shlpr_mask_fat_c)
                         tock_ = np.asarray([time.clock(), time.time()])
                         tspans[0] += tock_ - tick_
                         for k, ji in enumerate(adapted_ji_idx):
@@ -533,14 +540,14 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                         #                              out=buf,
                         #                              bvk_kmesh=bvk_kmesh,
                         #                              shlpr_mask=shlpr_mask_fat_d)
-                        dat = fft_aopair_kpts_spltbas(mydf._numint,
-                                                      cell_fat, cell,
-                                                      mesh, coords,
-                                                      aosym=aosym, q=kpt,
-                                                      kptjs=adapted_kptjs[k0:k1],
-                                                      shls_slice0=shls_slice,
-                                                      shl_mask=shl_mask_fat_d,
-                                                      out=buf)
+                        dat = rshdf_helper.fft_aopair_kpts_spltbas(
+                                                mydf._numint, cell_fat, cell,
+                                                mesh, coords, aosym=aosym,
+                                                q=kpt,
+                                                kptjs=adapted_kptjs[k0:k1],
+                                                shls_slice0=shls_slice,
+                                                shl_mask=shl_mask_fat_d,
+                                                out=buf)
                         tock_ = np.asarray([time.clock(), time.time()])
                         tspans[0] += tock_ - tick_
 
@@ -699,50 +706,258 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     log.debug1("%s", "")
 
 
-class RangeSeparatedHybridDensityFitting2(df.rshdf.RSHDF):
+class RangeSeparatedHybridDensityFitting2(df.df.GDF):
     '''Range Separated Hybrid Density Fitting
     '''
 
     # class methods defined outside the class
     _make_j3c = _make_j3c
 
-    # ao2mo
-    get_eri = get_ao_eri = rshdf_ao2mo.get_eri_sr
-    # ao2mo = get_mo_eri = rshdf_ao2mo.general
-    # ao2mo_7d = rshdf_ao2mo.ao2mo_7d
-
     def __init__(self, cell, kpts=np.zeros((1,3))):
-        df.rshdf.RSHDF.__init__(self, cell, kpts=kpts)
+        df.df.GDF.__init__(self, cell, kpts=kpts)
 
-        self.npw_max = 350
+        self.use_bvkcell = False    # set True to use bvkcell for j3c & AFT
+        self.prescreening_type = 3
+        self.split_basis = False
+        self.split_auxbasis = False
 
-    def rs2_build(self):
-        """ make auxcell
-        """
+        self.kpts = kpts
+        self.kpts_band = None
+        self._auxbasis = None
+
+        # precision for real-space lattice sum (R) and reciprocal-space Fourier transform (G).
+        # Both are are set to cell.precision by default and will be modified by the extra_precision determined from inverting j2c (see _make_j3c).
+        self.precision_R = self.cell.precision
+        self.precision_G = self.cell.precision
+
+        # One of {omega, npw_max} must be provided, and the other will be deduced automatically from it. The priority when both are given is omega > npw_max.
+        # The default is npw_max = 13^3 for Gamma point and 7^3 otherwise, which has been tested to be a good choice balancing accuracy and speed.
+        # Once omega is determined, mesh_compact is determined for (L|g^lr|pq) to achieve given accuracy, where L = C and pq = cc/cd.
+        self.npw_max = 2250 if is_zero(kpts) else 350
+        self.omega = None
+        self.ke_cutoff = None
+        self.mesh_compact = None
+
+        # omega and mesh for j2c. Since j2c is to be inverted, it is desirable to use (1) a "fixed" omega for reproducibility, and (2) a higher precision (1e-12 at least) to minimize the error caused by inversion.
+        # This extra computational cost due to the higher precision is negligible compared to the j3c build.
+        self.omega_j2c = 0.7
+        self.mesh_j2c = None
+        self.precision_j2c = min(1e-12, self.cell.precision)
+
+        # If split_basis is True, each ao shell will be split into a diffuse (d) part and a compact (c) part based on the pGTO exponents & coeffs.
+        # The criterion is such that a "d" shell must be expressed by a PW basis of size self.mesh_compact to achieve self.precision_G.
+        # (C|cc), (C|cd) will be computed using range-separation
+        # (D|cc), (D|cd), (C|dd), (D|dd) will be computed in G-space completely.
+        self.cell_fat = None
+
+        # if AO basis is split, numint is needed for FFT evaluating (*|dd)
+        self._numint = None
+
+    def dump_flags(self, verbose=None):
+        cell = self.cell
+        cell_fat = self.cell_fat
+        log = logger.new_logger(self, verbose)
+        log.info('\n')
+        log.info('******** %s ********', self.__class__)
+        log.info('cell num shells = %d, num cGTOs = %d, num pGTOs = %d',
+                 cell.nbas, cell.nao_nr(), cell.npgto_nr())
+        log.info('omega = %s', self.omega)
+        log.info('ke_cutoff = %s', self.ke_cutoff)
+        log.info('mesh = %s (%d PWs)', self.mesh, np.prod(self.mesh))
+        log.info('mesh_compact = %s (%d PWs)', self.mesh_compact,
+                 np.prod(self.mesh_compact))
+        if not cell_fat is None:
+            log.info('cell_fat num shells = %d, num cGTOs = %d, num pGTOs = %d',
+                     cell_fat.nbas, cell_fat.nao_nr(),
+                     cell_fat.npgto_nr())
+            log.info('         num compact shells = %d, num diffuse shells = %d',
+                     *cell_fat._nbas_each_set)
+            log.debug('cell-cell_fat bas mapping:%s', "")
+            nbas_c = cell_fat._nbas_c
+            for ib in range(cell.nbas):
+                idx = np.where(cell_fat._bas_idx == ib)[0]
+                l = cell.bas_angular(ib)
+                if idx.size == 2:
+                    log.debug("orig bas %d (l = %d) -> c %d, d %d", ib, l, *idx)
+                    log.debug1("  c exp: %s\n  d exp: %s",
+                               cell_fat.bas_exp(idx[0]),
+                               cell_fat.bas_exp(idx[1]))
+                    log.debug2("  c cff: %s\n  d cff: %s",
+                               cell_fat._libcint_ctr_coeff(idx[0]),
+                               cell_fat._libcint_ctr_coeff(idx[1]))
+                else:
+                    btype = "c" if idx[0] < nbas_c else "d"
+                    log.debug("orig bas %d (l = %d) -> %s %d", ib, l, btype,
+                              idx[0])
+                    log.debug1("  %s exp: %s", btype, cell_fat.bas_exp(idx[0]))
+                    log.debug2("  %s cff: %s", btype,
+                               cell_fat._libcint_ctr_coeff(idx[0]))
+
+        if self.auxcell is None:
+            log.info('auxbasis = %s', self.auxbasis)
+        else:
+            log.info('auxbasis = %s', self.auxcell.basis)
+            log.info('auxcell precision= %s', self.auxcell.precision)
+            log.info('auxcell rcut = %s', self.auxcell.rcut)
+
+        auxcell = self.auxcell
+        if hasattr(auxcell, "_bas_idx"):
+            log.info('auxcell num shells = %d, num cGTOs = %d, num pGTOs = %d',
+                     auxcell.nbas, auxcell.nao_nr(),
+                     auxcell.npgto_nr())
+            log.info('        num compact shells = %d, num diffuse shells = %d',
+                     *auxcell._nbas_each_set)
+
+        log.info('exp_to_discard = %s', self.exp_to_discard)
+        if isinstance(self._cderi, str):
+            log.info('_cderi = %s  where DF integrals are loaded (readonly).',
+                     self._cderi)
+        elif isinstance(self._cderi_to_save, str):
+            log.info('_cderi_to_save = %s', self._cderi_to_save)
+        else:
+            log.info('_cderi_to_save = %s', self._cderi_to_save.name)
+        log.info('len(kpts) = %d', len(self.kpts))
+        log.debug1('    kpts = %s', self.kpts)
+        if self.kpts_band is not None:
+            log.info('len(kpts_band) = %d', len(self.kpts_band))
+            log.debug1('    kpts_band = %s', self.kpts_band)
+        return self
+
+    def _rsh_build(self):
+        # If omega is not given, estimate it from npw_max
+        if self.omega is None:
+            self.omega, self.ke_cutoff, self.mesh_compact = \
+                                rshdf_helper.estimate_omega_for_npw(
+                                                self.cell, self.npw_max)
+        else:
+            self.ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(self.cell,
+                                                                 self.omega)
+            mesh_compact = pbctools.cutoff_to_mesh(self.cell.lattice_vectors(),
+                                                   self.ke_cutoff)
+            self.mesh_compact = df.df._round_off_to_odd_mesh(mesh_compact)
+
+        # For each shell, using npw_max to split into c and d parts such that d shells can be well-described by a PW of size self.mesh_compact
+        if self.split_basis:
+            self.cell_fat = rshdf_helper._reorder_cell(self.cell, 0,
+                                                       self.npw_max)
+            if self.cell_fat._nbas_each_set[1] > 0: # has diffuse shells
+                from pyscf.pbc.dft import numint
+                self._numint = numint.KNumInt()
+            else:
+                self.cell_fat = None    # no split basis happens
+
+        # build auxcell and split its basis if request
+        # Note 1) higher precision is used as explained in __init__
+        # Note 2) that unlike AOs, auxiliary basis is all primitive, so _reorder_cell won't split any shells -- just reorder them so that compact shells come first. Thus, there's no need to differentiate auxcell and auxcell_fat.
         from pyscf.df.addons import make_auxmol
         auxcell = make_auxmol(self.cell, self.auxbasis)
+        auxcell.precision = self.precision_j2c
+        auxcell.rcut = max([auxcell.bas_rcut(ib, auxcell.precision)
+                            for ib in range(auxcell.nbas)])
 
-        # Reorder auxiliary basis such that compact shells come first.
-        # Note that unlike AOs, auxiliary basis is all primitive, so _reorder_cell won't split any shells -- just reorder them. So there's no need to differentiate auxcell and auxcell_fat.
         if self.split_auxbasis:
-            from pyscf.pbc.df.rshdf import _reorder_cell, _estimate_mesh_lr
-            auxcell_fat = _reorder_cell(auxcell, self.eta, self.npw_max)
+            auxcell_fat = rshdf_helper._reorder_cell(auxcell, 0, self.npw_max)
             if auxcell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 auxcell = auxcell_fat
 
         self.auxcell = auxcell
 
-        # self.cell_fat = None    # for now
+    def _kpts_build(self, kpts_band=None):
+        if self.kpts_band is not None:
+            self.kpts_band = np.reshape(self.kpts_band, (-1,3))
+        if kpts_band is not None:
+            kpts_band = np.reshape(kpts_band, (-1,3))
+            if self.kpts_band is None:
+                self.kpts_band = kpts_band
+            else:
+                self.kpts_band = unique(np.vstack((self.kpts_band,kpts_band)))[0]
+
+    def _gdf_build(self, j_only=None, with_j3c=True):
+        # Remove duplicated k-points. Duplicated kpts may lead to a buffer
+        # located in incore.wrap_int3c larger than necessary. Integral code
+        # only fills necessary part of the buffer, leaving some space in the
+        # buffer unfilled.
+        uniq_idx = unique(self.kpts)[1]
+        kpts = np.asarray(self.kpts)[uniq_idx]
+        if self.kpts_band is None:
+            kband_uniq = np.zeros((0,3))
+        else:
+            kband_uniq = [k for k in self.kpts_band if len(member(k, kpts))==0]
+        if j_only is None:
+            j_only = self._j_only
+        if j_only:
+            kall = np.vstack([kpts,kband_uniq])
+            kptij_lst = np.hstack((kall,kall)).reshape(-1,2,3)
+        else:
+            kptij_lst = [(ki, kpts[j]) for i, ki in enumerate(kpts) for j in range(i+1)]
+            kptij_lst.extend([(ki, kj) for ki in kband_uniq for kj in kpts])
+            kptij_lst.extend([(ki, ki) for ki in kband_uniq])
+            kptij_lst = np.asarray(kptij_lst)
+
+        if with_j3c:
+            if isinstance(self._cderi_to_save, str):
+                cderi = self._cderi_to_save
+            else:
+                cderi = self._cderi_to_save.name
+            if isinstance(self._cderi, str):
+                if self._cderi == cderi and os.path.isfile(cderi):
+                    logger.warn(self, 'DF integrals in %s (specified by '
+                                '._cderi) is overwritten by GDF '
+                                'initialization. ', cderi)
+                else:
+                    logger.warn(self, 'Value of ._cderi is ignored. '
+                                'DF integrals will be saved in file %s .',
+                                cderi)
+            self._cderi = cderi
+            t1 = (time.clock(), time.time())
+            self._make_j3c(self.cell, self.auxcell, self.cell_fat, kptij_lst,
+                           cderi)
+            t1 = logger.timer_debug1(self, 'j3c', *t1)
 
     def build(self, j_only=None, with_j3c=True, kpts_band=None):
-        # build for range-separation
-        self.rs_build()
-        self.rs2_build()
+        # build for range-separation hybrid
+        self._rsh_build()
 
-        # do normal gdf build (NOTE: unlike in RSHDF.build(), here we do not globally use short-range coulomb, and let _make_j3c to decide which part is computed with short-range and which with long-range.)
-        self.gdf_build(j_only=j_only, with_j3c=with_j3c, kpts_band=kpts_band)
+        # formatting k-points
+        self._kpts_build(kpts_band=kpts_band)
+
+        # dump flags before the final build
+        self.check_sanity()
+        self.dump_flags()
+
+        # do normal gdf build with the modified _make_j3c
+        self._gdf_build(j_only=j_only, with_j3c=with_j3c)
 
         return self
+
+    def set_range_coulomb(self, omega):
+        self.cell._env[PTR_RANGE_OMEGA] = omega
+        self.auxcell._env[PTR_RANGE_OMEGA] = omega
+        if not self.cell_fat is None:
+            self.cell_fat._env[PTR_RANGE_OMEGA] = omega
+
+    def with_range_coulomb(self, omega):
+        omega0 = self.cell._env[PTR_RANGE_OMEGA].copy()
+        return self._TemporaryRSHDFContext(self.set_range_coulomb, (omega,),
+                                          (omega0,))
+
+    @contextlib.contextmanager
+    def _TemporaryRSHDFContext(self, method, args, args_bak):
+        '''Almost every method depends on the Mole environment. Ensure the
+        modification in temporary environment being thread safe
+        '''
+        haslock = hasattr(self, '_lock')
+        if not haslock:
+            self._lock = threading.RLock()
+
+        with self._lock:
+            method(*args)
+            try:
+                yield
+            finally:
+                method(*args_bak)
+                if not haslock:
+                    del self._lock
 
 RSHDF2 = RangeSeparatedHybridDensityFitting2
 HDF2 = RangeSeparatedHybridDensityFitting2
