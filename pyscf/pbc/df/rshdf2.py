@@ -424,11 +424,76 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                 has_c = mask_c.any()
                 has_d = mask_d.any()
 
-                for p0, p1 in lib.prange(0, ngrids, Gblksize):
-                    nG = p1 - p0
-                    if has_c:
+                # for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                #     nG = p1 - p0
+                #     if has_c:
+                #         tick_ = np.asarray([time.clock(), time.time()])
+                #         # long-range coulomb for cc and cd
+                #         dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
+                #                                      shls_slice, aosym,
+                #                                      b, gxyz[p0:p1], Gvbase,
+                #                                      kpt, adapted_kptjs,
+                #                                      out=buf,
+                #                                      bvk_kmesh=bvk_kmesh,
+                #                                      shlpr_mask=shlpr_mask_fat_c)
+                #         tock_ = np.asarray([time.clock(), time.time()])
+                #         tspans[0] += tock_ - tick_
+                #         for k, ji in enumerate(adapted_ji_idx):
+                #             aoao = dat[k].reshape(nG,ncol)
+                #             pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
+                #             pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
+                #             pqkR[:] = aoao.real.T
+                #             pqkI[:] = aoao.imag.T
+                #
+                #             lib.dot(kLR[p0:p1].T, pqkR.T, 1, j3cR[k], 1)
+                #             lib.dot(kLI[p0:p1].T, pqkI.T, 1, j3cR[k], 1)
+                #             if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                #                 lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3cI[k], 1)
+                #                 lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3cI[k], 1)
+                #         tick_ = np.asarray([time.clock(), time.time()])
+                #         tspans[1] += tick_ - tock_
+                #
+                #     # add full coulomb for dd
+                #     if has_d:
+                #         tick_ = np.asarray([time.clock(), time.time()])
+                #         # dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
+                #         #                              shls_slice, aosym,
+                #         #                              b, gxyz[p0:p1], Gvbase,
+                #         #                              kpt, adapted_kptjs,
+                #         #                              out=buf,
+                #         #                              bvk_kmesh=bvk_kmesh,
+                #         #                              shlpr_mask=shlpr_mask_fat_d)
+                #         dat = fft_aopair_kpts_spltbas(mydf._numint,
+                #                                       cell_fat, cell,
+                #                                       mesh, coords,
+                #                                       aosym=aosym, q=kpt,
+                #                                       kptjs=adapted_kptjs,
+                #                                       shls_slice0=shls_slice,
+                #                                       shl_mask=shl_mask_fat_d,
+                #                                       out=buf)
+                #         tock_ = np.asarray([time.clock(), time.time()])
+                #         tspans[0] += tock_ - tick_
+                #
+                #         for k, ji in enumerate(adapted_ji_idx):
+                #             aoao = dat[k].reshape(nG,ncol)
+                #             pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
+                #             pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
+                #             pqkR[:] = aoao.real.T
+                #             pqkI[:] = aoao.imag.T
+                #
+                #             lib.dot(kLR_d[p0:p1].T, pqkR.T, 1, j3cR[k], 1)
+                #             lib.dot(kLI_d[p0:p1].T, pqkI.T, 1, j3cR[k], 1)
+                #             if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                #                 lib.dot(kLR_d[p0:p1].T, pqkI.T, 1, j3cI[k], 1)
+                #                 lib.dot(kLI_d[p0:p1].T, pqkR.T, -1, j3cI[k], 1)
+                #         tick_ = np.asarray([time.clock(), time.time()])
+                #         tspans[1] += tick_ - tock_
+
+                # long-range coulomb for cc and cd
+                if has_c:
+                    for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                        nG = p1 - p0
                         tick_ = np.asarray([time.clock(), time.time()])
-                        # long-range coulomb for cc and cd
                         dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
                                                      shls_slice, aosym,
                                                      b, gxyz[p0:p1], Gvbase,
@@ -453,8 +518,13 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                         tick_ = np.asarray([time.clock(), time.time()])
                         tspans[1] += tick_ - tock_
 
-                    # add full coulomb for dd
-                    if has_d:
+                # add full coulomb for dd
+                if has_d:
+                    # Unlike AFT, FFT can't batch G. We instead batch kptj here.
+                    kblksize = min(nkptj, int(np.floor(
+                                   buf.size / float(ncol * ngrids))))
+                    for k0,k1 in lib.prange(0, nkptj, kblksize):
+                        log.debug1("kjseg: %d-%d/%d", k0, k1, nkptj)
                         tick_ = np.asarray([time.clock(), time.time()])
                         # dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
                         #                              shls_slice, aosym,
@@ -467,25 +537,27 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                                                       cell_fat, cell,
                                                       mesh, coords,
                                                       aosym=aosym, q=kpt,
-                                                      kptjs=adapted_kptjs,
+                                                      kptjs=adapted_kptjs[k0:k1],
                                                       shls_slice0=shls_slice,
                                                       shl_mask=shl_mask_fat_d,
                                                       out=buf)
                         tock_ = np.asarray([time.clock(), time.time()])
                         tspans[0] += tock_ - tick_
 
-                        for k, ji in enumerate(adapted_ji_idx):
-                            aoao = dat[k].reshape(nG,ncol)
-                            pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
-                            pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
-                            pqkR[:] = aoao.real.T
-                            pqkI[:] = aoao.imag.T
+                        for ik,k in enumerate(range(k0,k1)):
+                            aoao = dat[ik].reshape(ngrids,ncol)
+                            for p0, p1 in lib.prange(0, ngrids, Gblksize):
+                                nG = p1 - p0
+                                pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
+                                pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
+                                pqkR[:] = aoao[p0:p1].real.T
+                                pqkI[:] = aoao[p0:p1].imag.T
 
-                            lib.dot(kLR_d[p0:p1].T, pqkR.T, 1, j3cR[k], 1)
-                            lib.dot(kLI_d[p0:p1].T, pqkI.T, 1, j3cR[k], 1)
-                            if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
-                                lib.dot(kLR_d[p0:p1].T, pqkI.T, 1, j3cI[k], 1)
-                                lib.dot(kLI_d[p0:p1].T, pqkR.T, -1, j3cI[k], 1)
+                                lib.dot(kLR_d[p0:p1].T, pqkR.T, 1, j3cR[k], 1)
+                                lib.dot(kLI_d[p0:p1].T, pqkI.T, 1, j3cR[k], 1)
+                                if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                                    lib.dot(kLR_d[p0:p1].T, pqkI.T, 1, j3cI[k], 1)
+                                    lib.dot(kLI_d[p0:p1].T, pqkR.T, -1, j3cI[k], 1)
                         tick_ = np.asarray([time.clock(), time.time()])
                         tspans[1] += tick_ - tock_
             else:
