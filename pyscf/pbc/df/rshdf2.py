@@ -395,8 +395,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         log.debug2('memory = %s', mem_now)
         max_memory = max(2000, mydf.max_memory-mem_now)
         # nkptj for 3c-coulomb arrays plus 1 Lpq array
-        nbuf_extra = 1 if split_basis and mydf.split_basis_pwcntr == 1 else 0
-        buflen = min(max(int(max_memory*.38e6/16/naux/(nkptj+1+nbuf_extra)), 1),
+        buflen = min(max(int(max_memory*.38e6/16/naux/(nkptj+1)), 1),
                      nao_pair)
         shranges = _guess_shell_ranges(cell, buflen, aosym)
         buflen = max([x[2] for x in shranges])
@@ -410,9 +409,6 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         pqkIbuf = np.empty(buflen*Gblksize)
         # buf for ft_aopair
         buf = np.empty(nkptj*buflen*Gblksize, dtype=np.complex128)
-        if split_basis and mydf.split_basis_pwcntr == 1:
-            ncol_max = np.max([shrg[-1] for shrg in shranges])
-            jbuf = np.empty(ncol_max*naux, dtype=np.float64)
         def pw_contract(istep, sh_range, j3cR, j3cI):
             bstart, bend, ncol = sh_range
             if aosym == 's2':
@@ -420,79 +416,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
             else:
                 shls_slice = (bstart, bend, 0, cell.nbas)
 
-            if split_basis and mydf.split_basis_pwcntr == 1:
-                astart = aopr_loc[aosym][bstart]
-                aend = aopr_loc[aosym][bend]
-                mask_c = aopr_mask_c[aosym][astart:aend]
-                mask_d = aopr_mask_d[aosym][astart:aend]
-                ncol_c = np.sum(mask_c)
-                ncol_d = np.sum(mask_d)
-                has_c = mask_c.any()
-                has_d = mask_d.any()
-
-                for p0, p1 in lib.prange(0, ngrids, Gblksize):
-                    nG = p1 - p0
-                    if has_c:
-                        tick_ = np.asarray([time.clock(), time.time()])
-                        # long-range coulomb for cc and cd
-                        dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
-                                                     shls_slice, aosym,
-                                                     b, gxyz[p0:p1], Gvbase,
-                                                     kpt, adapted_kptjs,
-                                                     out=buf,
-                                                     bvk_kmesh=bvk_kmesh,
-                                                     shlpr_mask=shlpr_mask_fat_c)
-                        tock_ = np.asarray([time.clock(), time.time()])
-                        tspans[0] += tock_ - tick_
-                        for k, ji in enumerate(adapted_ji_idx):
-                            aoao = dat[k].reshape(nG,ncol)[:,mask_c]
-                            pqkR = np.ndarray((ncol_c,nG), buffer=pqkRbuf)
-                            pqkI = np.ndarray((ncol_c,nG), buffer=pqkIbuf)
-                            pqkR[:] = aoao.real.T
-                            pqkI[:] = aoao.imag.T
-
-                            j3c_ = np.ndarray((naux,ncol_c), buffer=jbuf)
-                            lib.dot(kLR[p0:p1].T, pqkR.T, 1, j3c_, 0)
-                            lib.dot(kLI[p0:p1].T, pqkI.T, 1, j3c_, 1)
-                            j3cR[k][:,mask_c] += j3c_
-                            if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
-                                lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3c_, 0)
-                                lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3c_, 1)
-                                j3cI[k][:,mask_c] += j3c_
-                        tick_ = np.asarray([time.clock(), time.time()])
-                        tspans[1] += tick_ - tock_
-
-                    # add full coulomb for dd
-                    if has_d:
-                        tick_ = np.asarray([time.clock(), time.time()])
-                        dat = ft_aopair_kpts_spltbas(cell_fat, cell, Gv[p0:p1],
-                                                     shls_slice, aosym,
-                                                     b, gxyz[p0:p1], Gvbase,
-                                                     kpt, adapted_kptjs,
-                                                     out=buf,
-                                                     bvk_kmesh=bvk_kmesh,
-                                                     shlpr_mask=shlpr_mask_fat_d)
-                        tock_ = np.asarray([time.clock(), time.time()])
-                        tspans[0] += tock_ - tick_
-
-                        for k, ji in enumerate(adapted_ji_idx):
-                            aoao = dat[k].reshape(nG,ncol)[:,mask_d]
-                            pqkR = np.ndarray((ncol_d,nG), buffer=pqkRbuf)
-                            pqkI = np.ndarray((ncol_d,nG), buffer=pqkIbuf)
-                            pqkR[:] = aoao.real.T
-                            pqkI[:] = aoao.imag.T
-
-                            j3c_ = np.ndarray((naux,ncol_d), buffer=jbuf)
-                            lib.dot(kLR_d[p0:p1].T, pqkR.T, 1, j3c_, 0)
-                            lib.dot(kLI_d[p0:p1].T, pqkI.T, 1, j3c_, 1)
-                            j3cR[k][:,mask_d] += j3c_
-                            if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
-                                lib.dot(kLR_d[p0:p1].T, pqkI.T, 1, j3c_, 0)
-                                lib.dot(kLI_d[p0:p1].T, pqkR.T, -1, j3c_, 1)
-                                j3cI[k][:,mask_d] += j3c_
-                        tick_ = np.asarray([time.clock(), time.time()])
-                        tspans[1] += tick_ - tock_
-            elif split_basis and mydf.split_basis_pwcntr == 2:
+            if split_basis:
                 astart = aopr_loc[aosym][bstart]
                 aend = aopr_loc[aosym][bend]
                 mask_c = aopr_mask_c[aosym][astart:aend]
@@ -719,7 +643,6 @@ class RangeSeparatedHybridDensityFitting2(df.rshdf.RSHDF):
         df.rshdf.RSHDF.__init__(self, cell, kpts=kpts)
 
         self.npw_max = 350
-        self.split_basis_pwcntr = 1 # 1 or 2
 
     def rs2_build(self):
         """ make auxcell
