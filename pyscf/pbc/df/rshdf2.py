@@ -305,27 +305,83 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     else:
         shls_slice = None
 
-    with mydf.with_range_coulomb(-omega):
+    if mydf.safe_mode:
+        # The SR coulomb integrals from libcint can be inaccurate for certain choices of omega (especially larger ones) and/or for certain orbitals (especially higher-angular momentum ones). The safe mode computes SR by full - LR. Note that it requires a larger scratch space (~3x) and runs slower (~2x).
+        # This may become innecessary in the future with a better libcint.
         if split_basis:
             rshdf_helper._aux_e2_spltbas(
                             cell, cell_fat, auxcell, fswap, 'int3c2e',
                             aosym='s2',
-                            kptij_lst=kptij_lst, dataname='j3c-junk',
+                            kptij_lst=kptij_lst, dataname='j3c-junk_full',
                             max_memory=max_memory,
                             bvk_kmesh=bvk_kmesh,
                             prescreening_type=mydf.prescreening_type,
                             prescreening_data=prescreening_data,
                             shlpr_mask_fat=shlpr_mask_fat_c,
                             shls_slice=shls_slice)
+            with mydf.with_range_coulomb(omega):
+                rshdf_helper._aux_e2_spltbas(
+                                cell, cell_fat, auxcell, fswap, 'int3c2e',
+                                aosym='s2',
+                                kptij_lst=kptij_lst, dataname='j3c-junk_lr',
+                                max_memory=max_memory,
+                                bvk_kmesh=bvk_kmesh,
+                                prescreening_type=mydf.prescreening_type,
+                                prescreening_data=prescreening_data,
+                                shlpr_mask_fat=shlpr_mask_fat_c,
+                                shls_slice=shls_slice)
         else:
             rshdf_helper._aux_e2_nospltbas(
                             cell, auxcell, fswap, 'int3c2e', aosym='s2',
-                            kptij_lst=kptij_lst, dataname='j3c-junk',
+                            kptij_lst=kptij_lst, dataname='j3c-junk_full',
                             max_memory=max_memory,
                             bvk_kmesh=bvk_kmesh,
                             prescreening_type=mydf.prescreening_type,
                             prescreening_data=prescreening_data,
                             shls_slice=shls_slice)
+            with mydf.with_range_coulomb(omega):
+                rshdf_helper._aux_e2_nospltbas(
+                                cell, auxcell, fswap, 'int3c2e', aosym='s2',
+                                kptij_lst=kptij_lst, dataname='j3c-junk_lr',
+                                max_memory=max_memory,
+                                bvk_kmesh=bvk_kmesh,
+                                prescreening_type=mydf.prescreening_type,
+                                prescreening_data=prescreening_data,
+                                shls_slice=shls_slice)
+        # The ordering here mimicks that used by _aux_e2_(no)spltbas
+        sorted_ij_idx = np.hstack([np.where(uniq_inverse == k)[0]
+                                  for k, kpt in enumerate(uniq_kpts)])
+        nseg = len(fswap['j3c-junk_lr/0'])
+        for iseg in range(nseg):
+            for ij in sorted_ij_idx:
+                psr = 'j3c-junk/%d/%d'%(ij,iseg)
+                plr = 'j3c-junk_lr/%d/%d'%(ij,iseg)
+                pfull = 'j3c-junk_full/%d/%d'%(ij,iseg)
+                fswap[psr] = fswap[pfull][()] - fswap[plr][()]
+                del fswap[pfull]
+                del fswap[plr]
+    else:
+        with mydf.with_range_coulomb(-omega):
+            if split_basis:
+                rshdf_helper._aux_e2_spltbas(
+                                cell, cell_fat, auxcell, fswap, 'int3c2e',
+                                aosym='s2',
+                                kptij_lst=kptij_lst, dataname='j3c-junk',
+                                max_memory=max_memory,
+                                bvk_kmesh=bvk_kmesh,
+                                prescreening_type=mydf.prescreening_type,
+                                prescreening_data=prescreening_data,
+                                shlpr_mask_fat=shlpr_mask_fat_c,
+                                shls_slice=shls_slice)
+            else:
+                rshdf_helper._aux_e2_nospltbas(
+                                cell, auxcell, fswap, 'int3c2e', aosym='s2',
+                                kptij_lst=kptij_lst, dataname='j3c-junk',
+                                max_memory=max_memory,
+                                bvk_kmesh=bvk_kmesh,
+                                prescreening_type=mydf.prescreening_type,
+                                prescreening_data=prescreening_data,
+                                shls_slice=shls_slice)
     t1 = log.timer_debug1('3c2e', *t1)
 
     prescreening_data = None
@@ -664,6 +720,7 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         self.prescreening_type = 3
         self.split_basis = False
         self.split_auxbasis = False
+        self.safe_mode = False  # if True, SR = Full - LR is used for j3c
 
         self.kpts = kpts
         self.kpts_band = None
@@ -706,6 +763,7 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         log.info('******** %s ********', self.__class__)
         log.info('cell num shells = %d, num cGTOs = %d, num pGTOs = %d',
                  cell.nbas, cell.nao_nr(), cell.npgto_nr())
+        log.info('safe_mode = %s', self.safe_mode)
         log.info('omega = %s', self.omega)
         log.info('ke_cutoff = %s', self.ke_cutoff)
         log.info('mesh = %s (%d PWs)', self.mesh, np.prod(self.mesh))
