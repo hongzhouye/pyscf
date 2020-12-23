@@ -129,7 +129,7 @@ def get_aopr_mask(cell, cell_fat, shlpr_mask_fat_c, shlpr_mask_fat_d):
     return aopr_mask_c, aopr_mask_d, aopr_loc
 
 
-def get_prescreening_data(mydf, cell_fat, extra_precision):
+def get_prescreening_data(mydf, cell_fat, precision=None, extra_precision=None):
     if mydf.prescreening_type == 0:
         return None
 
@@ -137,7 +137,8 @@ def get_prescreening_data(mydf, cell_fat, extra_precision):
     auxcell = mydf.auxcell
     omega = abs(mydf.omega)
     Rc_cut_mat, R12_cut_mat = rshdf_helper.estimate_Rc_R12_cut_SPLIT_batch(
-                                        cell_, auxcell, omega, extra_precision)
+                                                    cell_, auxcell, omega,
+                                                    precision, extra_precision)
     return Rc_cut_mat, R12_cut_mat
 
 # kpti == kptj: s2 symmetry
@@ -295,7 +296,8 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         extra_precision = np.minimum(1./(np.max(np.abs(j2c_inv), axis=0)+1.),
                                       extra_precision)
 
-    prescreening_data = get_prescreening_data(mydf, cell_fat, extra_precision)
+    prescreening_data = get_prescreening_data(mydf, cell_fat, mydf.precision_R,
+                                              extra_precision)
 
     t1 = log.timer_debug1('prescrn warmup', *t1)
 
@@ -834,17 +836,21 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         if self.omega is None:
             self.omega, self.ke_cutoff, self.mesh_compact = \
                                 rshdf_helper.estimate_omega_for_npw(
-                                                self.cell, self.npw_max)
+                                                self.cell, self.npw_max,
+                                                self.precision_G,
+                                                round2odd=True)
         else:
             self.ke_cutoff, self.mesh_compact = \
                                 rshdf_helper.estimate_mesh_for_omega(
                                                 self.cell, self.omega,
+                                                self.precision_G,
                                                 round2odd=True)
 
         # For each shell, using npw_max to split into c and d parts such that d shells can be well-described by a PW of size self.mesh_compact
         if self.split_basis:
             self.cell_fat = rshdf_helper._reorder_cell(self.cell, 0,
-                                                       self.npw_max)
+                                                       self.npw_max,
+                                                       self.precision_G)
             if self.cell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 from pyscf.pbc.dft import numint
                 self._numint = numint.KNumInt()

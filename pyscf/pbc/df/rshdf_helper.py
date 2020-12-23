@@ -56,12 +56,13 @@ def _binary_search(func, xlo, xhi, f0, xprec, args=None, verbose=0):
 
 """ Helper functions for initialization
 """
-def estimate_omega_for_npw(cell, npw_max, round2odd=True):
+def estimate_omega_for_npw(cell, npw_max, precision=None, round2odd=True):
+    if precision is None: precision = cell.precision
     # TODO: add extra precision for small omega ~ 2*omega / np.pi**0.5
     latvecs = cell.lattice_vectors()
     def invomega2all(invomega):
         omega = 1./invomega
-        ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(cell, omega)
+        ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(cell, omega, precision)
         mesh = pbctools.cutoff_to_mesh(latvecs, ke_cutoff)
         if round2odd:
             mesh = df.df._round_off_to_odd_mesh(mesh)
@@ -77,8 +78,9 @@ def estimate_omega_for_npw(cell, npw_max, round2odd=True):
 
     return omega, ke_cutoff, mesh
 
-def estimate_mesh_for_omega(cell, omega, round2odd=True):
-    ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(cell, omega)
+def estimate_mesh_for_omega(cell, omega, precision=None, round2odd=True):
+    if precision is None: precision = cell.precision
+    ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(cell, omega, precision)
     mesh = pbctools.cutoff_to_mesh(cell.lattice_vectors(), ke_cutoff)
     if round2odd:
         mesh = df.df._round_off_to_odd_mesh(mesh)
@@ -141,11 +143,13 @@ def _estimate_mesh_lr(cell_fat, precision, round2odd=True):
 
     return mesh_lr
 
-def _reorder_cell(cell, eta_smooth, npw_max=None, verbose=None):
+def _reorder_cell(cell, eta_smooth, npw_max=None, precision=None, verbose=None):
     """ Split each shell by eta_smooth or npw_max into diffuse (d) and compact (c). Then reorder them such that compact shells come first.
 
     This function is modified from the one under the same name in pyscf/pbc/scf/rsjk.py.
     """
+    if precision is None: precision = cell.precision
+
     from pyscf.gto import NPRIM_OF, NCTR_OF, PTR_EXP, PTR_COEFF, ATOM_OF
     log = lib.logger.new_logger(cell, verbose)
 
@@ -156,7 +160,8 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, verbose=None):
 
     if not npw_max is None:
         from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
-        meshs = _estimate_mesh_primitive(cell, cell.precision, round2odd=True)
+        meshs = _estimate_mesh_primitive(cell, precision, round2odd=True)
+        eta_safe = 10.
 
     _env = cell._env.copy()
     compact_bas = []
@@ -179,7 +184,8 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, verbose=None):
             diffuse_mask = ~compact_mask
         else:
             npws = np.prod(meshs[ib], axis=1)
-            compact_mask = npws > npw_max
+            # The "_estimate_ke_cutoff" function sometimes fails for pGTOs with very large exponents. Here we enforce all pGTOs whose exponents are greater than eta_safe to be compact.
+            compact_mask = (npws > npw_max) | (es > eta_safe)
             diffuse_mask = ~compact_mask
 
         c_compact = cs[compact_mask]
@@ -696,12 +702,17 @@ def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
     return Rc_cut_mat, R12_cut_mat
 
 
-def estimate_Rc_R12_cut_SPLIT_batch(cell, auxcell, omega, extra_precision):
+def estimate_Rc_R12_cut_SPLIT_batch(cell, auxcell, omega, precision,
+                                    extra_precision):
     aux_ao_loc = auxcell.ao_loc_nr()
     aux_nbas = auxcell.nbas
-    extra_prec = [np.min(extra_precision[range(*aux_ao_loc[i:i+2])])
-                  for i in range(aux_nbas)]
-    auxprecs = np.asarray(extra_prec) * cell.precision
+    if precision is None: precision = cell.precision
+    if extra_precision is None:
+        extra_prec = np.ones(aux_nbas)
+    else:
+        extra_prec = [np.min(extra_precision[range(*aux_ao_loc[i:i+2])])
+                      for i in range(aux_nbas)]
+    auxprecs = np.asarray(extra_prec) * precision
     return _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs)
 
 """ Helper functions for short-range j3c via real space lattice sum
