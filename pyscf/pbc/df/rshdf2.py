@@ -732,6 +732,7 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         # Both are are set to cell.precision by default and will be modified by the extra_precision determined from inverting j2c (see _make_j3c).
         self.precision_R = self.cell.precision
         self.precision_G = self.cell.precision
+        self.extra_precision_G = 1. # allows extra accuracy in splitting AOs
 
         # One of {omega, npw_max} must be provided, and the other will be deduced automatically from it. The priority when both are given is omega > npw_max.
         # The default is npw_max = 13^3 for Gamma point and 7^3 otherwise, which has been tested to be a good choice balancing accuracy and speed.
@@ -848,9 +849,10 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
 
         # For each shell, using npw_max to split into c and d parts such that d shells can be well-described by a PW of size self.mesh_compact
         if self.split_basis:
+            precision_fat = self.precision_G * self.extra_precision_G
             self.cell_fat = rshdf_helper._reorder_cell(self.cell, 0,
                                                        self.npw_max,
-                                                       self.precision_G)
+                                                       precision_fat)
             if self.cell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 from pyscf.pbc.dft import numint
                 self._numint = numint.KNumInt()
