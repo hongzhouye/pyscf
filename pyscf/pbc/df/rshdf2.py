@@ -810,10 +810,10 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
                      np.prod(self.mesh_j2c))
 
         auxcell = self.auxcell
+        log.info('auxcell num shells = %d, num cGTOs = %d, num pGTOs = %d',
+                 auxcell.nbas, auxcell.nao_nr(),
+                 auxcell.npgto_nr())
         if hasattr(auxcell, "_bas_idx"):
-            log.info('auxcell num shells = %d, num cGTOs = %d, num pGTOs = %d',
-                     auxcell.nbas, auxcell.nao_nr(),
-                     auxcell.npgto_nr())
             log.info('        num compact shells = %d, num diffuse shells = %d',
                      *auxcell._nbas_each_set)
 
