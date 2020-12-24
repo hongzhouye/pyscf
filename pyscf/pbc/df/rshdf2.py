@@ -732,7 +732,8 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         # Both are are set to cell.precision by default and will be modified by the extra_precision determined from inverting j2c (see _make_j3c).
         self.precision_R = self.cell.precision
         self.precision_G = self.cell.precision
-        self.extra_precision_G = 1. # allows extra accuracy in splitting AOs
+        # extra_precision_G allows extra precision in determining the diffuse AOs that are treated by the PW basis of size <= npw_max. Numerical tests on several simple solids (C/SiC/MgO/LiF) suggest that 1e-4 is a good choice: it stabilizes the calculation when cell.precision is low (e.g., >= 1e-8), while having virtually no effects when cell.precision is high (i.e., does not lower the performance).
+        self.extra_precision_G = 1e-4
 
         # One of {omega, npw_max} must be provided, and the other will be deduced automatically from it. The priority when both are given is omega > npw_max.
         # The default is npw_max = 13^3 for Gamma point and 7^3 otherwise, which has been tested to be a good choice balancing accuracy and speed.
