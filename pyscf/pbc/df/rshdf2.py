@@ -768,6 +768,9 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         log.info('cell num shells = %d, num cGTOs = %d, num pGTOs = %d',
                  cell.nbas, cell.nao_nr(), cell.npgto_nr())
         log.info('safe_mode = %s', self.safe_mode)
+        log.info('precision_R = %s', self.precision_R)
+        log.info('precision_G = %s', self.precision_G)
+        log.info('extra_precision_G = %s', self.extra_precision_G)
         log.info('omega = %s', self.omega)
         log.info('ke_cutoff = %s', self.ke_cutoff)
         log.info('mesh = %s (%d PWs)', self.mesh, np.prod(self.mesh))
