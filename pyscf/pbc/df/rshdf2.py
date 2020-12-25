@@ -852,8 +852,8 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
                                                 round2odd=True)
 
         # For each shell, using npw_max to split into c and d parts such that d shells can be well-described by a PW of size self.mesh_compact
+        precision_fat = self.precision_G * self.extra_precision_G
         if self.split_basis:
-            precision_fat = self.precision_G * self.extra_precision_G
             self.cell_fat = rshdf_helper._reorder_cell(self.cell, 0,
                                                        self.npw_max,
                                                        precision_fat)
@@ -866,8 +866,8 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         # As explained in __init__, if negative omega_j2c --> use omega
         if self.omega_j2c < 0: self.omega_j2c = self.omega
 
-        # build auxcell and split its basis if request
-        # Note 1) higher precision is used as explained in __init__
+        # build auxcell and split its basis if requested
+        # Note 1) higher precision is used fo determining mesh_j2c as explained in __init__, but for basis split, the same precision_fat is used as above.
         # Note 2) that unlike AOs, auxiliary basis is all primitive, so _reorder_cell won't split any shells -- just reorder them so that compact shells come first. Thus, there's no need to differentiate auxcell and auxcell_fat.
         from pyscf.df.addons import make_auxmol
         auxcell = make_auxmol(self.cell, self.auxbasis)
@@ -878,7 +878,8 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
                                 auxcell, self.omega_j2c, round2odd=True)[1]
 
         if self.split_auxbasis:
-            auxcell_fat = rshdf_helper._reorder_cell(auxcell, 0, self.npw_max)
+            auxcell_fat = rshdf_helper._reorder_cell(auxcell, 0, self.npw_max,
+                                                     precision_fat)
             if auxcell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 auxcell = auxcell_fat
 
