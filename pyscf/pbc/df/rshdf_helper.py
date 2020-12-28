@@ -512,7 +512,7 @@ def _estimate_Rc_R12_cut2(eaux, ei, ej, omega, Ls, cell_vol, precision,
     return Rc_loc, R12_cut_lst
 
 
-def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
+def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs, shlpr_mask):
 
     prec_sr = 1e-3
     ncell_sr = 2
@@ -520,6 +520,10 @@ def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
     cell_vol = cell.vol
     a0 = cell_vol**0.333333333
     r0 = a0 * (0.75/np.pi)**0.33333333333
+
+    if shlpr_mask is None:
+        nbas = cell.nbas
+        shlpr_mask = np.ones((nbas,nbas),dtype=bool)
 
     # sort Ls
     Ls = cell.get_lattice_Ls()
@@ -599,6 +603,11 @@ def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
             ci = cs[ib]
             for jb in bas_by_atom[jatm]:
                 if jb > ib: continue
+                if not shlpr_mask[ib,jb]:
+                    Rc_cut_mat[:,ib,jb] = Rc_cut_mat[:,jb,ib] = 1
+                    for ibaux_,ibaux in enumerate(auxbas_by_atom[Patm]):
+                        R12_cut_lst.append(np.arange(2))
+                    continue
 
                 ej = es[jb]
                 cj = cs[jb]
@@ -702,8 +711,213 @@ def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs):
     return Rc_cut_mat, R12_cut_mat
 
 
+def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
+                                shlpr_mask=None):
+
+    prec_sr = 1e-4
+    ncell_sr = 2
+
+    cell_vol = cell.vol
+    a0 = cell_vol**0.333333333
+    r0 = a0 * (0.75/np.pi)**0.33333333333
+
+    if shlpr_mask is None:
+        nbas = cell.nbas
+        shlpr_mask = np.ones((nbas,nbas),dtype=bool)
+
+    # sort Ls
+    Ls = cell.get_lattice_Ls()
+    dLs = np.linalg.norm(Ls,axis=1)
+    idx = np.argsort(dLs)
+    Ls_sort = Ls[idx]
+    dLs_sort = dLs[idx]
+    dLs_uniq, dLs_counts = np.unique(dLs_sort.round(2), return_counts=True)
+
+    Ls_nf = Ls_sort[:np.searchsorted(dLs_sort,a0*(ncell_sr+0.5))]
+    nL_nf = Ls_nf.shape[0]
+
+    Rnf = 2 * a0
+    delta_Rff = 1
+    dos_fac = 4*np.pi / cell.vol
+    rho0_fac = dos_fac * delta_Rff
+    rho0_fac *= 2.  # empirical correction
+    def get_Ncell(R):
+        if isinstance(R, float):
+            if R < Rnf:
+                Ncell = nL_nf
+            else:
+                Ncell = rho0_fac * (R+delta_Rff)**2.
+        elif isinstance(R, np.ndarray):
+            mask_nf = R < Rnf
+            Ncell = np.zeros_like(R)
+            Ncell[mask_nf] = nL_nf
+            Ncell[~mask_nf] = rho0_fac * (R[~mask_nf]+delta_Rff)**2.
+        else:
+            raise ValueError
+
+        return Ncell
+
+    natm = cell.natm
+    nbas = cell.nbas
+    bas_atom = np.asarray([cell.bas_atom(ib) for ib in range(nbas)])
+    bas_by_atom = [np.where(bas_atom==iatm)[0] for iatm in range(natm)]
+
+    auxnbas = auxcell.nbas
+    auxbas_atom = np.asarray([auxcell.bas_atom(ib) for ib in range(auxnbas)])
+    auxbas_by_atom = [np.where(auxbas_atom==iatm)[0] for iatm in range(natm)]
+
+    es = np.asarray([np.min(cell.bas_exp(ib)) for ib in range(nbas)])
+    auxes = np.asarray([np.min(auxcell.bas_exp(ibaux)) for ibaux in range(auxnbas)])
+
+    cs = _squarednormalize2s(es)
+    auxcs = _squarednormalize2s(auxes)
+
+    q0s = auxcs * auxes**-1.5
+
+    dosc = dos_fac * a0
+    dos12 = 12*np.pi / cell_vol * r0 # dos12*R12^2 = 4*pi/vol*((R12+r0)^3-R12^3)
+
+    def f0(R, eta1, eta2, zero_thr=1e-8):
+        """ ( erf(eta1*R) - erf(eta2*R) ) / R
+        """
+        if isinstance(R, float):
+            if R < 0:
+                raise ValueError
+            if R < zero_thr:
+                y = 2*(eta1-eta2) * np.pi**-0.5
+            else:
+                y = (scipy.special.erfc(eta2*R) -
+                     scipy.special.erfc(eta1*R)) / R
+        elif isinstance(R, np.ndarray):
+            if (R < 0).any():
+                raise ValueError
+            mask_zero = R < zero_thr
+            y = np.zeros_like(R)
+            y[mask_zero] = 2*(eta1-eta2) * np.pi**-0.5
+            y[~mask_zero] = (scipy.special.erfc(eta2*R[~mask_zero]) -
+                             scipy.special.erfc(eta1*R[~mask_zero])) / \
+                             R[~mask_zero]
+        else:
+            raise ValueError
+
+        return y
+
+    atom_coords = cell.atom_coords()
+
+    Rc_cut_mat = np.zeros([auxnbas,nbas,nbas])
+    R12_cut_lst = []
+
+    def loop_over_atoms():
+        for Patm in range(cell.natm):
+            for iatm in range(cell.natm):
+                for jatm in range(cell.natm):
+                    yield Patm, iatm, jatm
+
+    for Patm,iatm,jatm in loop_over_atoms():
+        Raux = atom_coords[Patm]
+        eauxs = auxes[auxbas_by_atom[Patm]]
+        cauxs = auxcs[auxbas_by_atom[Patm]]
+        q0s = cauxs * eauxs**-1.5
+        Ri = atom_coords[iatm] - Raux
+        Rj = atom_coords[jatm] - Raux
+        R12_00 = Rj - Ri
+
+        for ib in bas_by_atom[iatm]:
+            ei = es[ib]
+            ci = cs[ib]
+            for jb in bas_by_atom[jatm]:
+                if jb > ib: continue
+                if not shlpr_mask[ib,jb]:
+                    Rc_cut_mat[:,ib,jb] = Rc_cut_mat[:,jb,ib] = 1
+                    for ibaux_,ibaux in enumerate(auxbas_by_atom[Patm]):
+                        R12_cut_lst.append(np.arange(2))
+                    continue
+
+                ej = es[jb]
+                cj = cs[jb]
+
+                sumeij = ei + ej
+                etaij2 = ei*ej/sumeij
+
+                Rc_00 = (ei*Ri + ej*Rj) / sumeij
+
+                R12_cut = (-np.log(prec_sr)/etaij2)**0.5
+                Lhs = Ls_sort[:np.searchsorted(dLs_sort,R12_cut)+1]
+                dR12s = np.linalg.norm(R12_00 + Lhs, axis=1)
+                dR12s_uniq, dR12s_counts = np.unique(dR12s.round(3),
+                                                     return_counts=True)
+                hs = np.exp(-etaij2*dR12s_uniq**2.) * dR12s_counts
+                Sh = np.sum(hs)
+
+                # When R is too small, the 4pi/vol*R^2 approx to DOS is not good for estimating the bound for R12 below.
+                # We hence require a minR12 s.t. the error in Sh < 1
+                minR12 = dR12s_uniq[np.searchsorted(hs,0.9)-1]
+
+                eta1s = 1./eauxs + 1./sumeij
+                eta2s = (eta1s + 1./omega**2.) ** -0.5
+                eta1s **= -0.5
+                facs = (np.pi*0.25)**3. * ci*cj * sumeij**-1.5 * q0s
+
+                for ibaux_,ibaux in enumerate(auxbas_by_atom[Patm]):
+                    precision = auxprecs[ibaux]
+
+                    eaux = auxes[ibaux]
+                    caux = auxcs[ibaux]
+
+                    eta1 = eta1s[ibaux_]
+                    eta2 = eta2s[ibaux_]
+                    fac = facs[ibaux_]
+
+# determine Rc_cut
+#     fac * Sh * (4*pi/vol) * ( 1/(2*pi^0.5*eta2^3) ) *
+#         exp( -(eta2*Rc_cut)^2 ) / Rc_cut < precision
+                    fac_Rc = fac * Sh * dos_fac / (2*np.pi**0.5*eta2**3.)
+                    Rc_cut = 10 # init guess
+                    Rc_cut = np.log(fac_Rc / (precision * eta2**3. *
+                                    Rc_cut))**0.5 / eta2
+                    Rc_cut = np.log(fac_Rc / (precision * eta2**3. *
+                                    Rc_cut))**0.5 / eta2
+                    Rc_cut = _round2cell(Rc_cut, dLs_uniq)
+
+# determine R12_cut on a mesh of Rc's
+#     fac * (4*pi/vol) * ( 1/(2*etaij2) ) * Ncell(Rc) * fmax(R) *
+#         R12_cut * exp( -etaij2*R12_cut^2 ) < precision
+# where Ncell(Rc) is the number of cells in R ~ R+∆R.
+                    Rc_mesh = np.arange(0,np.ceil(Rc_cut)+0.01,1)
+                    fcmax = f0(Rc_mesh, eta1, eta2) # f0 monotonically decay
+                    Ncell = get_Ncell(Rc_mesh)
+                    fac_R12 = fac * dos_fac / (2*etaij2) * Ncell * fcmax
+                    R12_cut = np.ones_like(fac_R12) * 10    # init guess
+                    tmp = np.clip(fac_R12 * R12_cut / precision, 1.01, None)
+                    R12_cut = (np.log(tmp) / etaij2)**0.5
+                    tmp = np.clip(fac_R12 * R12_cut / precision, 1.01, None)
+                    R12_cut = (np.log(tmp) / etaij2)**0.5
+                    R12_cut = np.clip(R12_cut, minR12, None)
+
+                    Rc_cut_mat[ibaux,ib,jb] = Rc_cut_mat[ibaux,jb,ib] = R12_cut.size-1
+                    R12_cut_lst.append(R12_cut)
+
+    nc_max = np.max(Rc_cut_mat).astype(int)+1
+    R12_cut_mat = np.zeros([auxnbas,nbas,nbas,nc_max])
+    ind = 0
+    for Patm,iatm,jatm in loop_over_atoms():
+        for ib in bas_by_atom[iatm]:
+            for jb in bas_by_atom[jatm]:
+                if jb > ib: continue
+                for ibaux in auxbas_by_atom[Patm]:
+                    R12_cut_lst_ = R12_cut_lst[ind]
+                    nc_ = R12_cut_lst_.size
+                    R12_cut_mat[ibaux,ib,jb,:nc_] = R12_cut_lst_
+                    R12_cut_mat[ibaux,ib,jb,nc_:] = R12_cut_lst_[-1]
+                    R12_cut_mat[ibaux,jb,ib] = R12_cut_mat[ibaux,ib,jb]
+
+                    ind += 1
+
+    return Rc_cut_mat, R12_cut_mat
+
+
 def estimate_Rc_R12_cut_SPLIT_batch(cell, auxcell, omega, precision,
-                                    extra_precision):
+                                    extra_precision, fspltbas, shlpr_mask):
     aux_ao_loc = auxcell.ao_loc_nr()
     aux_nbas = auxcell.nbas
     if precision is None: precision = cell.precision
@@ -713,7 +927,7 @@ def estimate_Rc_R12_cut_SPLIT_batch(cell, auxcell, omega, precision,
         extra_prec = [np.min(extra_precision[range(*aux_ao_loc[i:i+2])])
                       for i in range(aux_nbas)]
     auxprecs = np.asarray(extra_prec) * precision
-    return _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs)
+    return fspltbas(cell, auxcell, omega, auxprecs, shlpr_mask)
 
 """ Helper functions for short-range j3c via real space lattice sum
     Modified from pyscf.pbc.df.outcore/incore

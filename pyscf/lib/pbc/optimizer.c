@@ -189,7 +189,8 @@ void PBCset_rcut_cond1(PBCOpt *opt, double Rc_cut, double *R12_cut_lst,
 
 /* Shellpair and aux shell specific Rc_cut and R12_cut_lst determined from the
    most diffuse AOs from the shellpair and shell. */
-int PBCrcut_screen2(int *shls, PBCOpt *opt, int *atm, int *bas, double *env)
+int PBCrcut_screen2(int *shls, PBCOpt *opt, int *atm, int *bas, double *env,
+                    const double *Lc)
 {
         if (!opt) {
                 return 1; // no screen
@@ -199,22 +200,19 @@ int PBCrcut_screen2(int *shls, PBCOpt *opt, int *atm, int *bas, double *env)
         const int ksh = shls[2];
         const int jsh0 = jsh - opt->nbas;
         const int ksh0 = ksh - 2*opt->nbas;
-        const double *ri = env + atm[bas[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
-        const double *rj = env + atm[bas[ATOM_OF+jsh*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
         const double *rk = env + atm[bas[ATOM_OF+ksh*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
-        const double ei = opt->bas_exp[ish];
-        const double ej = opt->bas_exp[jsh];
-        const double inveij = 1./(ei + ej);
         double rcij[3];
-        rcij[0] = (ri[0]*ei + rj[0]*ej)*inveij - rk[0];
-        rcij[1] = (ri[1]*ei + rj[1]*ej)*inveij - rk[1];
-        rcij[2] = (ri[2]*ei + rj[2]*ej)*inveij - rk[2];
+        rcij[0] = Lc[0] - rk[0];
+        rcij[1] = Lc[1] - rk[1];
+        rcij[2] = Lc[2] - rk[2];
         const double rcrc = SQUARE(rcij);
         const double rc_cut = opt->rc_cut[ksh0*opt->nc_shift0 +
                                           ish*opt->nc_shift1 + jsh0];
         if (rcrc > rc_cut)
             return 0;
 
+        const double *ri = env + atm[bas[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
+        const double *rj = env + atm[bas[ATOM_OF+jsh*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
         int irc = (int)sqrt(rcrc);
         double rirj[3];
         rirj[0] = ri[0] - rj[0];

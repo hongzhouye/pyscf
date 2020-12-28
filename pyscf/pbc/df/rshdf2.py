@@ -129,16 +129,24 @@ def get_aopr_mask(cell, cell_fat, shlpr_mask_fat_c, shlpr_mask_fat_d):
     return aopr_mask_c, aopr_mask_d, aopr_loc
 
 
-def get_prescreening_data(mydf, cell_fat, precision=None, extra_precision=None):
+def get_prescreening_data(mydf, cell_fat, precision=None, extra_precision=None,
+                          shlpr_mask=None):
     if mydf.prescreening_type == 0:
         return None
 
     cell_ = mydf.cell if cell_fat is None else cell_fat
     auxcell = mydf.auxcell
     omega = abs(mydf.omega)
+    if mydf.prescreening_type == 3:
+        fspltbas = rshdf_helper._estimate_Rc_R12_cut2_batch
+    elif mydf.prescreening_type == 4:
+        fspltbas = rshdf_helper._estimate_Rc_R12_cut3_batch
+    else:
+        raise ValueError
     Rc_cut_mat, R12_cut_mat = rshdf_helper.estimate_Rc_R12_cut_SPLIT_batch(
                                                     cell_, auxcell, omega,
-                                                    precision, extra_precision)
+                                                    precision, extra_precision,
+                                                    fspltbas, shlpr_mask)
     return Rc_cut_mat, R12_cut_mat
 
 # kpti == kptj: s2 symmetry
@@ -174,6 +182,8 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         aopr_mask_c, aopr_mask_d, aopr_loc = get_aopr_mask(cell, cell_fat,
                                                            shlpr_mask_fat_c,
                                                            shlpr_mask_fat_d)
+    else:
+        shlpr_mask_fat_c = shlpr_mask_fat_d = None
 
     # The ideal way to hold the temporary integrals is to store them in the
     # cderi_file and overwrite them inplace in the second pass.  The current
@@ -297,7 +307,10 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                                       extra_precision)
 
     prescreening_data = get_prescreening_data(mydf, cell_fat, mydf.precision_R,
-                                              extra_precision)
+                                              extra_precision, shlpr_mask_fat_c)
+    if not prescreening_data is None:
+        Rc_cut_max = np.max(prescreening_data[0])
+        log.debug1("Rc_cut max= %.2f  cell.rcut= %.2f", Rc_cut_max, cell.rcut)
 
     t1 = log.timer_debug1('prescrn warmup', *t1)
 
@@ -820,6 +833,11 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         if hasattr(auxcell, "_bas_idx"):
             log.info('        num compact shells = %d, num diffuse shells = %d',
                      *auxcell._nbas_each_set)
+            log.debug1('diffuse auxshls:%s', '')
+            for ib in range(auxcell._nbas_c,auxcell.nbas):
+                log.debug1('shlidx= %d, l= %d, exp= %.5g, coeff= %.5g',
+                           ib, auxcell.bas_angular(ib), auxcell.bas_exp(ib),
+                           auxcell.bas_ctr_coeff(ib))
 
         log.info('exp_to_discard = %s', self.exp_to_discard)
         if isinstance(self._cderi, str):

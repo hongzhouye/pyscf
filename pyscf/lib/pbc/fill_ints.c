@@ -294,6 +294,21 @@ static void _nr3c_fill_kk(int (*intor)(), void (*fsort)(),
         }
 }
 
+static void get_Lc(double *Lc, int *shls, PBCOpt *opt, int *atm, int *bas,
+                   double *env)
+{
+        const int ish = shls[0];
+        const int jsh = shls[1];
+        const double *ri = env + atm[bas[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
+        const double *rj = env + atm[bas[ATOM_OF+jsh*BAS_SLOTS]*ATM_SLOTS+PTR_COORD];
+        const double ei = opt->bas_exp[ish];
+        const double ej = opt->bas_exp[jsh];
+        const double inveij = 1./(ei + ej);
+        Lc[0] = (ri[0]*ei + rj[0]*ej)*inveij;
+        Lc[1] = (ri[1]*ei + rj[1]*ej)*inveij;
+        Lc[2] = (ri[2]*ei + rj[2]*ej)*inveij;
+}
+
 static void _nr3c_fill_kk_prescreen1(int (*intor)(), void (*fsort)(),
                           double complex *out, int nkpts_ij,
                           int nkpts, int comp, int nimgs, int ish, int jsh,
@@ -327,6 +342,7 @@ static void _nr3c_fill_kk_prescreen1(int (*intor)(), void (*fsort)(),
         int i, m, msh0, msh1, dijm, dijmc, dijmk, empty;
         int ksh, dk, iL0, iL, jL, iLcount;
         int shls[3];
+        double Lc[3];
         double *bufkk_r, *bufkk_i, *bufkL_r, *bufkL_i, *bufL, *pbuf, *cache;
         int (*fprescreen)();
         if (pbcopt != NULL) {
@@ -361,10 +377,11 @@ static void _nr3c_fill_kk_prescreen1(int (*intor)(), void (*fsort)(),
                                 pbuf = bufL;
         for (jL = 0; jL < nimgs; jL++) {
                 shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                get_Lc(Lc, shls, pbcopt, atm, bas, env_loc);
                 for (ksh = msh0; ksh < msh1; ksh++) {
                         shls[2] = ksh;
                         dk = ao_loc[ksh+1] - ao_loc[ksh];
-                        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc)) {
+                        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc, Lc)) {
                                 if ((*intor)(pbuf, NULL, shls, atm, natm, bas,
                                              nbas, env_loc, cintopt, cache)) {
                                         empty = 0;
@@ -572,6 +589,7 @@ static void _nr3c_bvk_kk_prescreen1(int (*intor)(), void (*fsort)(),
         int ksh, dk;
         int iL_bvk, iL0_bvk, iLcount_bvk, iL0, iL1, iL, jL_bvk, jL0, jL1, jL;
         int shls[3];
+        double Lc[3];
         double *bufkk_r, *bufkk_i, *bufkL_r, *bufkL_i, *bufL, *pbuf, *cache;
         double *buf_rs, *buf_rs0;
         int (*fprescreen)();
@@ -618,11 +636,12 @@ static void _nr3c_bvk_kk_prescreen1(int (*intor)(), void (*fsort)(),
 
         for (jL = jL0; jL < jL1; jL++) {
                 shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                get_Lc(Lc, shls, pbcopt, atm, bas, env_loc);
                 buf_rs = buf_rs0;
                 for (ksh = msh0; ksh < msh1; ksh++) {
                         shls[2] = ksh;
                         dk = ao_loc[ksh+1] - ao_loc[ksh];
-                        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc)) {
+                        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc, Lc)) {
                                 if ((*intor)(buf_rs, NULL, shls, atm, natm, bas, nbas,
                                              env_loc, cintopt, cache)) {
                                         empty = 0;
@@ -709,6 +728,7 @@ static void _nr3c_bvk_kk_prescreen1_spltbas(int (*intor)(), void (*fsort)(),
         int ksh, dk;
         int iL_bvk, iL0_bvk, iLcount_bvk, iL0, iL1, iL, jL_bvk, jL0, jL1, jL;
         int shls[3];
+        double Lc[3];
         double *bufkk_r, *bufkk_i, *bufkL_r, *bufkL_i, *bufL, *pbuf, *cache;
         double *buf_rs, *buf_rs0;
         int (*fprescreen)();
@@ -755,11 +775,12 @@ static void _nr3c_bvk_kk_prescreen1_spltbas(int (*intor)(), void (*fsort)(),
 
         for (jL = jL0; jL < jL1; jL++) {
                 shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                get_Lc(Lc, shls, pbcopt, atm, bas, env_loc);
                 buf_rs = buf_rs0;
                 for (ksh = msh0; ksh < msh1; ksh++) {
                         shls[2] = ksh;
                         dk = ao_loc[ksh+1] - ao_loc[ksh];
-                        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc)) {
+                        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc, Lc)) {
                                 if ((*intor)(buf_rs, NULL, shls, atm, natm, bas, nbas,
                                              env_loc, cintopt, cache)) {
                                         empty = 0;
@@ -1314,6 +1335,7 @@ static void _nr3c_fill_k_prescreen1(int (*intor)(), void (*fsort)(),
         size_t dijmk;
         int ksh, dk, iL, jL, jLcount;
         int shls[3];
+        double Lc[3];
         double *bufexp_r = buf;
         double *bufexp_i = bufexp_r + nimgs * nkpts;
         double *bufk_r = bufexp_i + nimgs * nkpts;
@@ -1346,11 +1368,12 @@ static void _nr3c_fill_k_prescreen1(int (*intor)(), void (*fsort)(),
                         jLcount = 0;
                         for (jL = 0; jL < nimgs; jL++) {
                                 shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                                get_Lc(Lc, shls, pbcopt, atm, bas, env_loc);
 
         jLskip = 1;
         for (ksh = msh0; ksh < msh1; ksh++) {
                 shls[2] = ksh;
-                if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc)) {
+                if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc, Lc)) {
                         jLskip = 0;
                         if ((*intor)(pbuf, NULL, shls, atm, natm, bas, nbas,
                                      env_loc, cintopt, cache)) {
@@ -1879,6 +1902,7 @@ static void _nr3c_fill_g_prescreen1(
         int i, m, msh0, msh1, dijm;
         int ksh, dk, iL, jL, dijkc;
         int shls[3];
+        double Lc[3];
 
         int dijmc = dij * dkmax * comp;
         double *bufL = buf + dijmc;
@@ -1907,13 +1931,14 @@ static void _nr3c_fill_g_prescreen1(
                         shift_bas(env_loc, env, Ls, iptrxyz, iL);
                         for (jL = 0; jL < nimgs; jL++) {
                                 shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                                get_Lc(Lc, shls, pbcopt, atm, bas, env_loc);
 
                 pbuf = bufL;
                 for (ksh = msh0; ksh < msh1; ksh++) {
                         shls[2] = ksh;
                         dk = ao_loc[ksh+1] - ao_loc[ksh];
                         dijkc = dij*dk * comp;
-                        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc)) {
+                        if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc, Lc)) {
                             if ((*intor)(buf, NULL, shls, atm, natm, bas, nbas,
                                          env_loc, cintopt, cache)) {
                                     for (i = 0; i < dijkc; i++) {
@@ -2046,6 +2071,7 @@ static void _nr3c_bvk_g_prescreen1(
         int ksh, dk, dijkc;
         int iL_bvk, iL0, iL1, iL, jL_bvk, jL0, jL1, jL;
         int shls[3];
+        double Lc[3];
 
         int dijmc = dij * dkmax * comp;
         double *bufL = buf + dijmc;
@@ -2080,13 +2106,14 @@ static void _nr3c_bvk_g_prescreen1(
                                         jL1 = cell_loc_bvk[jL_bvk+1];
                                         for (jL = jL0; jL < jL1; jL++) {
                                                 shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                                                get_Lc(Lc, shls, pbcopt, atm, bas, env_loc);
 
         pbuf = bufL;
         for (ksh = msh0; ksh < msh1; ksh++) {
                 shls[2] = ksh;
                 dk = ao_loc[ksh+1] - ao_loc[ksh];
                 dijkc = dij*dk * comp;
-                if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc)) {
+                if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc, Lc)) {
                         if ((*intor)(buf, NULL, shls, atm, natm, bas, nbas,
                                      env_loc, cintopt, cache)) {
                                 for (i = 0; i < dijkc; i++) {
@@ -2141,6 +2168,7 @@ static void _nr3c_bvk_g_prescreen1_spltbas(
         int ksh, dk, dijkc;
         int iL_bvk, iL0, iL1, iL, jL_bvk, jL0, jL1, jL;
         int shls[3];
+        double Lc[3];
 
         int dijmc = dij * dkmax * comp;
         double *bufL = buf + dijmc;
@@ -2175,13 +2203,14 @@ static void _nr3c_bvk_g_prescreen1_spltbas(
                                         jL1 = cell_loc_bvk[jL_bvk+1];
                                         for (jL = jL0; jL < jL1; jL++) {
                                                 shift_bas(env_loc, env, Ls, jptrxyz, jL);
+                                                get_Lc(Lc, shls, pbcopt, atm, bas, env_loc);
 
         pbuf = bufL;
         for (ksh = msh0; ksh < msh1; ksh++) {
                 shls[2] = ksh;
                 dk = ao_loc[ksh+1] - ao_loc[ksh];
                 dijkc = dij*dk * comp;
-                if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc)) {
+                if ((*fprescreen)(shls, pbcopt, atm, bas, env_loc, Lc)) {
                         if ((*intor)(buf, NULL, shls, atm, natm, bas, nbas,
                                      env_loc, cintopt, cache)) {
                                 for (i = 0; i < dijkc; i++) {
