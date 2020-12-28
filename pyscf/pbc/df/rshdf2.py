@@ -268,6 +268,8 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         j2c = np.asarray(fswap['j2c/%d'%uniq_kptji_id])
         j2c_negative = None
         try:
+            if mydf.j2c_eig_always:
+                raise scipy.linalg.LinAlgError
             j2c = scipy.linalg.cholesky(j2c, lower=True)
             j2ctag = 'CD'
         except scipy.linalg.LinAlgError:
@@ -278,9 +280,11 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
             #log.error(msg)
             #raise scipy.linalg.LinAlgError('\n'.join([str(e), msg]))
             w, v = scipy.linalg.eigh(j2c)
-            log.debug('DF metric linear dependency for kpt %s', uniq_kptji_id)
-            log.debug('cond = %.4g, drop %d bfns',
-                      w[-1]/w[0], np.count_nonzero(w<mydf.linear_dep_threshold))
+            ndrop = np.count_nonzero(w<mydf.linear_dep_threshold)
+            if ndrop > 0:
+                log.debug('DF metric linear dependency for kpt %s',
+                          uniq_kptji_id)
+                log.debug('cond = %.4g, drop %d bfns', w[-1]/w[0], ndrop)
             v1 = v[:,w>mydf.linear_dep_threshold].conj().T
             v1 /= np.sqrt(w[w>mydf.linear_dep_threshold]).reshape(-1,1)
             j2c = v1
@@ -763,6 +767,9 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         self.mesh_j2c = None
         self.precision_j2c = 1e-8 * self.precision_G
 
+        # set True to force calculating j2c^(-1/2) using eigenvalue decomposition (ED); otherwise, Cholesky decomposition (CD) is used first, and ED is called only if CD fails.
+        self.j2c_eig_always = False
+
         # If split_basis is True, each ao shell will be split into a diffuse (d) part and a compact (c) part based on the pGTO exponents & coeffs.
         # The criterion is such that a "d" shell must be expressed by a PW basis of size self.mesh_compact to achieve self.precision_G.
         # (C|cc), (C|cd) will be computed using range-separation
@@ -784,6 +791,7 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         log.info('precision_R = %s', self.precision_R)
         log.info('precision_G = %s', self.precision_G)
         log.info('extra_precision_G = %s', self.extra_precision_G)
+        log.info('j2c_eig_always = %s', self.j2c_eig_always)
         log.info('omega = %s', self.omega)
         log.info('ke_cutoff = %s', self.ke_cutoff)
         log.info('mesh = %s (%d PWs)', self.mesh, np.prod(self.mesh))
