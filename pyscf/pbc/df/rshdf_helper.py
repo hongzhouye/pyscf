@@ -715,7 +715,7 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
                                 shlpr_mask=None):
 
     prec_sr = 1e-4
-    ncell_sr = 2
+    ncell_sr = 3
 
     cell_vol = cell.vol
     a0 = cell_vol**0.333333333
@@ -742,18 +742,8 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
     rho0_fac = dos_fac * delta_Rff
     rho0_fac *= 2.  # empirical correction
     def get_Ncell(R):
-        if isinstance(R, float):
-            if R < Rnf:
-                Ncell = nL_nf
-            else:
-                Ncell = rho0_fac * (R+delta_Rff)**2.
-        elif isinstance(R, np.ndarray):
-            mask_nf = R < Rnf
-            Ncell = np.zeros_like(R)
-            Ncell[mask_nf] = nL_nf
-            Ncell[~mask_nf] = rho0_fac * (R[~mask_nf]+delta_Rff)**2.
-        else:
-            raise ValueError
+        Ncell = rho0_fac * (R + delta_Rff)**2.
+        Ncell = np.clip(Ncell, nL_nf, None)
 
         return Ncell
 
@@ -773,9 +763,6 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
     auxcs = _squarednormalize2s(auxes)
 
     q0s = auxcs * auxes**-1.5
-
-    dosc = dos_fac * a0
-    dos12 = 12*np.pi / cell_vol * r0 # dos12*R12^2 = 4*pi/vol*((R12+r0)^3-R12^3)
 
     def f0(R, eta1, eta2, zero_thr=1e-8):
         """ ( erf(eta1*R) - erf(eta2*R) ) / R
@@ -850,8 +837,8 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
                 Sh = np.sum(hs)
 
                 # When R is too small, the 4pi/vol*R^2 approx to DOS is not good for estimating the bound for R12 below.
-                # We hence require a minR12 s.t. the error in Sh < 1
-                minR12 = dR12s_uniq[np.searchsorted(hs,0.9)-1]
+                # We hence require a minR12 s.t. the error in Sh < 0.01
+                minR12 = dR12s_uniq[np.where(hs<0.01)[0][0]]
 
                 eta1s = 1./eauxs + 1./sumeij
                 eta2s = (eta1s + 1./omega**2.) ** -0.5
