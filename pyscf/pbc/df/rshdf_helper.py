@@ -716,6 +716,7 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
 
     prec_sr = 1e-4
     ncell_sr = 3
+    Sh_tol = 0.01
 
     cell_vol = cell.vol
     a0 = cell_vol**0.333333333
@@ -829,7 +830,8 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
                 Rc_00 = (ei*Ri + ej*Rj) / sumeij
 
                 R12_cut = (-np.log(prec_sr)/etaij2)**0.5
-                Lhs = Ls_sort[:np.searchsorted(dLs_sort,R12_cut)+1]
+                R12_cut = _round2cell(R12_cut, dLs_uniq)
+                Lhs = Ls_sort[:np.searchsorted(dLs_sort,R12_cut)]
                 dR12s = np.linalg.norm(R12_00 + Lhs, axis=1)
                 dR12s_uniq, dR12s_counts = np.unique(dR12s.round(3),
                                                      return_counts=True)
@@ -837,8 +839,11 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
                 Sh = np.sum(hs)
 
                 # When R is too small, the 4pi/vol*R^2 approx to DOS is not good for estimating the bound for R12 below.
-                # We hence require a minR12 s.t. the error in Sh < 0.01
-                minR12 = dR12s_uniq[np.where(hs<0.01)[0][0]]
+                # We hence require a minR12 s.t. the error in Sh < Sh_tol
+                if hs[-1] > Sh_tol:
+                    minR12 = dR12s_uniq[-1]+0.1
+                else:
+                    minR12 = dR12s_uniq[np.where(hs<Sh_tol)[0][0]]
 
                 eta1s = 1./eauxs + 1./sumeij
                 eta2s = (eta1s + 1./omega**2.) ** -0.5
