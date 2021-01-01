@@ -25,9 +25,9 @@ def _binary_search(func, xlo, xhi, f0, xprec, args=None, verbose=0):
     log = lib.logger.Logger(sys.stdout, verbose)
 
     if args is None:
-        f = lambda x: abs(func(x))
+        f = lambda x: func(x)
     else:
-        f = lambda x: abs(func(x, *args))
+        f = lambda x: func(x, *args)
 
     lo = f(xlo)
     hi = f(xhi)
@@ -35,9 +35,13 @@ def _binary_search(func, xlo, xhi, f0, xprec, args=None, verbose=0):
     if lo < f0:
         return xlo, lo
 
+    count = 0
     while hi > f0:
+        if count > 5:
+            raise RuntimeError("Couldn't find a valid xhi such that hi>f0.")
         xhi *= 1.5
         hi = f(xhi)
+        count += 1
 
     while True:
         log.debug2("%.10f  %.10f  %.3e  %.3e" % (xlo, xhi, lo, hi))
@@ -54,15 +58,25 @@ def _binary_search(func, xlo, xhi, f0, xprec, args=None, verbose=0):
             hi = mi
             xhi = xmi
 
-""" Helper functions for initialization
+""" Helper functions for determining omega/mesh and basis splitting
 """
-def estimate_omega_for_npw(cell, npw_max, precision=None, round2odd=True):
+def estimate_ke_cutoff_for_omega_kpt_corrected(cell, omega, precision, kmax):
+    fac = 32*np.pi**2    # Qiming
+    # fac = 4 * cell.vol / np.pi  # Hongzhou
+    ke_cutoff = -2*omega**2 * np.log(precision / (fac*omega**2))
+    ke_cutoff = ((2*ke_cutoff)**0.5 + kmax)**2. * 0.5
+    return ke_cutoff
+
+def estimate_omega_for_npw(cell, npw_max, precision=None, kmax=0,
+                           round2odd=True):
+
     if precision is None: precision = cell.precision
     # TODO: add extra precision for small omega ~ 2*omega / np.pi**0.5
     latvecs = cell.lattice_vectors()
     def invomega2all(invomega):
         omega = 1./invomega
-        ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(cell, omega, precision)
+        ke_cutoff = estimate_ke_cutoff_for_omega_kpt_corrected(cell, omega,
+                                                               precision, kmax)
         mesh = pbctools.cutoff_to_mesh(latvecs, ke_cutoff)
         if round2odd:
             mesh = df.df._round_off_to_odd_mesh(mesh)
@@ -78,9 +92,12 @@ def estimate_omega_for_npw(cell, npw_max, precision=None, round2odd=True):
 
     return omega, ke_cutoff, mesh
 
-def estimate_mesh_for_omega(cell, omega, precision=None, round2odd=True):
+def estimate_mesh_for_omega(cell, omega, precision=None, kmax=0,
+                            round2odd=True):
+
     if precision is None: precision = cell.precision
-    ke_cutoff = df.aft.estimate_ke_cutoff_for_omega(cell, omega, precision)
+    ke_cutoff = estimate_ke_cutoff_for_omega_kpt_corrected(cell, omega,
+                                                           precision, kmax)
     mesh = pbctools.cutoff_to_mesh(cell.lattice_vectors(), ke_cutoff)
     if round2odd:
         mesh = df.df._round_off_to_odd_mesh(mesh)
@@ -143,7 +160,8 @@ def _estimate_mesh_lr(cell_fat, precision, round2odd=True):
 
     return mesh_lr
 
-def _reorder_cell(cell, eta_smooth, npw_max=None, precision=None, verbose=None):
+def _reorder_cell(cell, eta_smooth, npw_max=None, precision=None,
+                  round2odd=True, verbose=None):
     """ Split each shell by eta_smooth or npw_max into diffuse (d) and compact (c). Then reorder them such that compact shells come first.
 
     This function is modified from the one under the same name in pyscf/pbc/scf/rsjk.py.
@@ -160,7 +178,7 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, precision=None, verbose=None):
 
     if not npw_max is None:
         from pyscf.pbc.dft.multigrid import _primitive_gto_cutoff
-        meshs = _estimate_mesh_primitive(cell, precision, round2odd=True)
+        meshs = _estimate_mesh_primitive(cell, precision, round2odd=round2odd)
         eta_safe = 10.
 
     _env = cell._env.copy()
@@ -734,10 +752,8 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
     dLs_sort = dLs[idx]
     dLs_uniq, dLs_counts = np.unique(dLs_sort.round(2), return_counts=True)
 
-    Ls_nf = Ls_sort[:np.searchsorted(dLs_sort,a0*(ncell_sr+0.5))]
-    nL_nf = Ls_nf.shape[0]
+    nL_nf = np.searchsorted(dLs_sort,a0*(ncell_sr+0.5))
 
-    Rnf = 2 * a0
     delta_Rff = 1
     dos_fac = 4*np.pi / cell.vol
     rho0_fac = dos_fac * delta_Rff
@@ -840,10 +856,16 @@ def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
 
                 # When R is too small, the 4pi/vol*R^2 approx to DOS is not good for estimating the bound for R12 below.
                 # We hence require a minR12 s.t. the error in Sh < Sh_tol
-                if hs[-1] > Sh_tol:
-                    minR12 = dR12s_uniq[-1]+0.1
-                else:
-                    minR12 = dR12s_uniq[np.where(hs<Sh_tol)[0][0]]
+                # if hs[-1] > Sh_tol:
+                #     minR12 = dR12s_uniq[-1]+0.1
+                # else:
+                #     minR12 = dR12s_uniq[np.where(hs<Sh_tol)[0][0]]
+
+                # The continuous approximation (4pi/vol * R12^2) for the summation over R12 breaks down for small R12. Here, we set the turning point to be minR12.
+                sumhs_ = 1./(2*etaij2) * get_Ncell(dR12s_uniq) * dR12s_uniq *\
+                                                np.exp(-etaij2*dR12s_uniq**2.)
+                sumhs = np.cumsum(hs[::-1])[::-1]
+                minR12 = dR12s_uniq[np.where(sumhs_ > sumhs)[0][0]] + 0.1
 
                 eta1s = 1./eauxs + 1./sumeij
                 eta2s = (eta1s + 1./omega**2.) ** -0.5
@@ -925,7 +947,7 @@ def estimate_Rc_R12_cut_SPLIT_batch(cell, auxcell, omega, precision,
     Modified from pyscf.pbc.df.outcore/incore
 """
 def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, erifile, intor='int3c2e',
-                      aosym='s2ij', comp=None, kptij_lst=None,
+                      aosym='s2ij', Ls=None, comp=None, kptij_lst=None,
                       dataname='eri_mo', shls_slice=None, max_memory=2000,
                       bvk_kmesh=None,
                       prescreening_type=0, prescreening_data=None,
@@ -1029,7 +1051,7 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, erifile, intor='int3c2e',
             pbcopt = _pbcintor.PBCOpt2(pcell).init_rcut_cond(pcell,
                                                              prescreening_data)
     int3c = wrap_int3c_nospltbas(cell, auxcell, shlpr_mask,
-                                 intor, aosym, comp, kptij_lst,
+                                 intor, aosym, Ls, comp, kptij_lst,
                                  bvk_kmesh=bvk_kmesh,
                                  pbcopt=pbcopt,
                                  prescreening_type=prescreening_type)
@@ -1081,8 +1103,8 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, erifile, intor='int3c2e',
         feri.close()
     return erifile
 
-def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, intor='int3c2e',
-                         aosym='s1', comp=1, kptij_lst=np.zeros((1,2,3)),
+def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, intor='int3c2e', aosym='s1',
+                         Ls=None, comp=1, kptij_lst=np.zeros((1,2,3)),
                          cintopt=None, pbcopt=None,
                          bvk_kmesh=None, prescreening_type=0):
     intor = cell._add_suffix(intor)
@@ -1096,7 +1118,7 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, intor='int3c2e',
                            dtype=np.int32)
     atm, bas, env = mol_gto.conc_env(atm, bas, env,
                                  auxcell._atm, auxcell._bas, auxcell._env)
-    Ls = cell.get_lattice_Ls()
+    if Ls is None: Ls = cell.get_lattice_Ls()
     nimgs = len(Ls)
     nbas = cell.nbas
 
@@ -1254,7 +1276,8 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, intor='int3c2e',
     return int3c
 
 def _aux_e2_spltbas(cell, cell_fat, auxcell_or_auxbasis, erifile,
-                    intor='int3c2e', aosym='s2ij', comp=None, kptij_lst=None,
+                    intor='int3c2e', aosym='s2ij', Ls=None,
+                    comp=None, kptij_lst=None,
                     dataname='eri_mo', shls_slice=None, max_memory=2000,
                     bvk_kmesh=None, shlpr_mask_fat=None,
                     prescreening_type=0, prescreening_data=None,
@@ -1362,7 +1385,7 @@ def _aux_e2_spltbas(cell, cell_fat, auxcell_or_auxbasis, erifile,
             pbcopt = _pbcintor.PBCOpt2(pcell).init_rcut_cond(pcell,
                                                              prescreening_data)
     int3c = wrap_int3c_spltbas(cell_fat, cell, auxcell, shlpr_mask_fat,
-                               intor, aosym, comp, kptij_lst,
+                               intor, aosym, Ls, comp, kptij_lst,
                                bvk_kmesh=bvk_kmesh,
                                pbcopt=pbcopt,
                                prescreening_type=prescreening_type)
@@ -1415,7 +1438,7 @@ def _aux_e2_spltbas(cell, cell_fat, auxcell_or_auxbasis, erifile,
     return erifile
 
 def wrap_int3c_spltbas(cell, cell0, auxcell, shlpr_mask, intor='int3c2e',
-                       aosym='s1', comp=1, kptij_lst=np.zeros((1,2,3)),
+                       aosym='s1', Ls=None, comp=1, kptij_lst=np.zeros((1,2,3)),
                        cintopt=None, pbcopt=None, rcut=None,
                        bvk_kmesh=None, prescreening_type=0):
     intor = cell._add_suffix(intor)
@@ -1429,7 +1452,7 @@ def wrap_int3c_spltbas(cell, cell0, auxcell, shlpr_mask, intor='int3c2e',
                            dtype=np.int32)
     atm, bas, env = mol_gto.conc_env(atm, bas, env,
                                  auxcell._atm, auxcell._bas, auxcell._env)
-    Ls = cell.get_lattice_Ls(rcut=rcut)
+    if Ls is None: Ls = cell.get_lattice_Ls(rcut=rcut)
     nimgs = len(Ls)
     nbas = cell.nbas
 

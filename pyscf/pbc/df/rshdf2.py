@@ -149,6 +149,29 @@ def get_prescreening_data(mydf, cell_fat, precision=None, extra_precision=None,
                                                     fspltbas, shlpr_mask)
     return Rc_cut_mat, R12_cut_mat
 
+def get_safe_rcut(mydf, Rc_cut_mat, R12_cut_mat, mask):
+    if not mydf.safe_rcut:
+        return mydf.cell.rcut
+
+    lenmax = R12_cut_mat.shape[-1]
+    nRcs = Rc_cut_mat[:,mask].astype(int).ravel()
+    R12s_lst = R12_cut_mat[:,mask].reshape(-1,lenmax)
+    rmax = 0
+    for nRc,R12s in zip(nRcs,R12s_lst):
+        rmax = max(rmax, R12s[nRc] + nRc)
+
+    def rcut2negrmax(rcut):
+        return -np.linalg.norm(mydf.cell.get_lattice_Ls(rcut=rcut),axis=1).max()
+
+    xlo = rmax * 0.5
+    xhi = rmax * 0.9
+    rprec = mydf.cell.vol**0.3333333333 * 0.5
+    rcut, rmax = rshdf_helper._binary_search(rcut2negrmax, xlo, xhi, -rmax,
+                                             rprec)
+    rmax *= -1
+
+    return rcut
+
 # kpti == kptj: s2 symmetry
 # kpti == kptj == 0 (gamma point): real
 def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
@@ -299,22 +322,33 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 # compute j3c
     # inverting j2c, and use it's column max to determine an extra precision for 3c2e prescreening
     extra_precision = np.ones(auxcell.nao_nr())
-    for k in range(len(uniq_kpts)):
-        j2c, j2c_negative, j2ctag = cholesky_decomposed_metric(k)
-        if j2ctag == "CD":
-            j2c_inv = np.eye(j2c.shape[0])
-            j2c_inv = scipy.linalg.solve_triangular(j2c, j2c_inv, lower=True,
-                                                    overwrite_b=True)
-        else:
-            j2c_inv = j2c
-        extra_precision = np.minimum(1./(np.max(np.abs(j2c_inv), axis=0)+1.),
-                                      extra_precision)
+    if mydf.use_extra_precision_R:
+        for k in range(len(uniq_kpts)):
+            j2c, j2c_negative, j2ctag = cholesky_decomposed_metric(k)
+            if j2ctag == "CD":
+                j2c_inv = np.eye(j2c.shape[0])
+                j2c_inv = scipy.linalg.solve_triangular(j2c, j2c_inv,
+                                                        lower=True,
+                                                        overwrite_b=True)
+            else:
+                j2c_inv = j2c
+            extra_precision = np.minimum(1./(np.max(np.abs(j2c_inv),
+                                         axis=0)+1.), extra_precision)
+        log.debug1("Smallest extra precision for j3c latsum: %.3e",
+                   np.min(extra_precision))
 
     prescreening_data = get_prescreening_data(mydf, cell_fat, mydf.precision_R,
                                               extra_precision, shlpr_mask_fat_c)
     if not prescreening_data is None:
         Rc_cut_max = np.max(prescreening_data[0])
         log.debug1("Rc_cut max= %.2f  cell.rcut= %.2f", Rc_cut_max, cell.rcut)
+        mask = shl_mask_fat_c > 0 if split_basis else np.ones((cell.nbas,)*2,
+                                                              dtype=bool)
+        rcut = get_safe_rcut(mydf, *prescreening_data, mask)
+    else:
+        rcut = cell.rcut
+    log.debug1("Use rcut= %.2f to generate Ls for j3c", rcut)
+    Ls = cell.get_lattice_Ls(rcut=rcut)
 
     t1 = log.timer_debug1('prescrn warmup', *t1)
 
@@ -330,7 +364,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
         if split_basis:
             rshdf_helper._aux_e2_spltbas(
                             cell, cell_fat, auxcell, fswap, 'int3c2e',
-                            aosym='s2',
+                            aosym='s2', Ls=Ls,
                             kptij_lst=kptij_lst, dataname='j3c-junk_full',
                             max_memory=max_memory,
                             bvk_kmesh=bvk_kmesh,
@@ -341,7 +375,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
             with mydf.with_range_coulomb(omega):
                 rshdf_helper._aux_e2_spltbas(
                                 cell, cell_fat, auxcell, fswap, 'int3c2e',
-                                aosym='s2',
+                                aosym='s2', Ls=Ls,
                                 kptij_lst=kptij_lst, dataname='j3c-junk_lr',
                                 max_memory=max_memory,
                                 bvk_kmesh=bvk_kmesh,
@@ -351,7 +385,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                                 shls_slice=shls_slice)
         else:
             rshdf_helper._aux_e2_nospltbas(
-                            cell, auxcell, fswap, 'int3c2e', aosym='s2',
+                            cell, auxcell, fswap, 'int3c2e', aosym='s2', Ls=Ls,
                             kptij_lst=kptij_lst, dataname='j3c-junk_full',
                             max_memory=max_memory,
                             bvk_kmesh=bvk_kmesh,
@@ -360,7 +394,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                             shls_slice=shls_slice)
             with mydf.with_range_coulomb(omega):
                 rshdf_helper._aux_e2_nospltbas(
-                                cell, auxcell, fswap, 'int3c2e', aosym='s2',
+                                cell, auxcell, fswap, 'int3c2e', aosym='s2', Ls=Ls,
                                 kptij_lst=kptij_lst, dataname='j3c-junk_lr',
                                 max_memory=max_memory,
                                 bvk_kmesh=bvk_kmesh,
@@ -384,7 +418,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
             if split_basis:
                 rshdf_helper._aux_e2_spltbas(
                                 cell, cell_fat, auxcell, fswap, 'int3c2e',
-                                aosym='s2',
+                                aosym='s2', Ls=Ls,
                                 kptij_lst=kptij_lst, dataname='j3c-junk',
                                 max_memory=max_memory,
                                 bvk_kmesh=bvk_kmesh,
@@ -394,13 +428,14 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
                                 shls_slice=shls_slice)
             else:
                 rshdf_helper._aux_e2_nospltbas(
-                                cell, auxcell, fswap, 'int3c2e', aosym='s2',
+                                cell, auxcell, fswap, 'int3c2e', aosym='s2', Ls=Ls,
                                 kptij_lst=kptij_lst, dataname='j3c-junk',
                                 max_memory=max_memory,
                                 bvk_kmesh=bvk_kmesh,
                                 prescreening_type=mydf.prescreening_type,
                                 prescreening_data=prescreening_data,
                                 shls_slice=shls_slice)
+    Ls = None
     t1 = log.timer_debug1('3c2e', *t1)
 
     prescreening_data = None
@@ -750,7 +785,7 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         self.precision_R = self.cell.precision
         self.precision_G = self.cell.precision
         # extra_precision_G allows extra precision in determining the diffuse AOs that are treated by the PW basis of size <= npw_max. Numerical tests on several simple solids (C/SiC/MgO/LiF) suggest that 1e-4 is a good choice: it stabilizes the calculation when cell.precision is low (e.g., >= 1e-8), while having virtually no effects when cell.precision is high (i.e., does not lower the performance).
-        self.extra_precision_G = 1e-4
+        self.extra_precision_G = 1e-2
 
         # One of {omega, npw_max} must be provided, and the other will be deduced automatically from it. The priority when both are given is omega > npw_max.
         # The default is npw_max = 13^3 for Gamma point and 7^3 otherwise, which has been tested to be a good choice balancing accuracy and speed.
@@ -778,6 +813,11 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
 
         # if AO basis is split, numint is needed for FFT evaluating (*|dd)
         self._numint = None
+
+        # For debugging and should be removed later
+        self.round2odd = False  # if True, mesh for j3c will be rounded to odd
+        self.use_extra_precision_R = True
+        self.safe_rcut = True
 
     def dump_flags(self, verbose=None):
         cell = self.cell
@@ -860,29 +900,50 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         if self.kpts_band is not None:
             log.info('len(kpts_band) = %d', len(self.kpts_band))
             log.debug1('    kpts_band = %s', self.kpts_band)
+
+        # for debugging and should be removed later
+        log.info('\ndebugging flags%s', '')
+        log.info('round2odd for j3c = %s', self.round2odd)
+        log.info('use_extra_precision_R = %s', self.use_extra_precision_R)
+        log.info('safe_rcut = %s', self.safe_rcut)
+        log.info('%s', '')
+
         return self
 
     def _rsh_build(self):
+        # find kmax
+        kpts = self.kpts if self.kpts_band is None else np.vstack([self.kpts,
+                                                                self.kpts_band])
+        b = self.cell.reciprocal_vectors()
+        scaled_kpts = np.linalg.solve(b.T, kpts.T).T
+        scaled_kpts[scaled_kpts > 0.49999999] -= 1
+        kpts = np.dot(scaled_kpts, b)
+        kmax = np.linalg.norm(kpts, axis=-1).max()
+
         # If omega is not given, estimate it from npw_max
+        r2o = self.round2odd
         if self.omega is None:
             self.omega, self.ke_cutoff, self.mesh_compact = \
                                 rshdf_helper.estimate_omega_for_npw(
                                                 self.cell, self.npw_max,
                                                 self.precision_G,
-                                                round2odd=True)
+                                                kmax=kmax,
+                                                round2odd=r2o)
         else:
             self.ke_cutoff, self.mesh_compact = \
                                 rshdf_helper.estimate_mesh_for_omega(
                                                 self.cell, self.omega,
                                                 self.precision_G,
-                                                round2odd=True)
+                                                kmax=kmax,
+                                                round2odd=r2o)
 
         # For each shell, using npw_max to split into c and d parts such that d shells can be well-described by a PW of size self.mesh_compact
         precision_fat = self.precision_G * self.extra_precision_G
         if self.split_basis:
             self.cell_fat = rshdf_helper._reorder_cell(self.cell, 0,
                                                        self.npw_max,
-                                                       precision_fat)
+                                                       precision_fat,
+                                                       round2odd=r2o)
             if self.cell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 from pyscf.pbc.dft import numint
                 self._numint = numint.KNumInt()
@@ -894,7 +955,8 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
 
         # build auxcell and split its basis if requested
         # Note 1) higher precision is used fo determining mesh_j2c as explained in __init__, but for basis split, the same precision_fat is used as above.
-        # Note 2) that unlike AOs, auxiliary basis is all primitive, so _reorder_cell won't split any shells -- just reorder them so that compact shells come first. Thus, there's no need to differentiate auxcell and auxcell_fat.
+        # Note 2) round2odd is required for j2c to conserve conjugation symmetry
+        # Note 3) unlike AOs, auxiliary basis is all primitive, so _reorder_cell won't split any shells -- just reorder them so that compact shells come first. Thus, there's no need to differentiate auxcell and auxcell_fat.
         from pyscf.df.addons import make_auxmol
         auxcell = make_auxmol(self.cell, self.auxbasis)
         auxcell.precision = self.precision_j2c
@@ -905,7 +967,8 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
 
         if self.split_auxbasis:
             auxcell_fat = rshdf_helper._reorder_cell(auxcell, 0, self.npw_max,
-                                                     precision_fat)
+                                                     precision_fat,
+                                                     round2odd=r2o)
             if auxcell_fat._nbas_each_set[1] > 0: # has diffuse shells
                 auxcell = auxcell_fat
 
@@ -964,11 +1027,11 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
             t1 = logger.timer_debug1(self, 'j3c', *t1)
 
     def build(self, j_only=None, with_j3c=True, kpts_band=None):
-        # build for range-separation hybrid
-        self._rsh_build()
-
         # formatting k-points
         self._kpts_build(kpts_band=kpts_band)
+
+        # build for range-separation hybrid
+        self._rsh_build()
 
         # dump flags before the final build
         self.check_sanity()
