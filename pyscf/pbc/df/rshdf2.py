@@ -919,6 +919,8 @@ class RangeSeparatedHybridDensityFitting2(df.df.GDF):
         scaled_kpts[scaled_kpts > 0.49999999] -= 1
         kpts = np.dot(scaled_kpts, b)
         kmax = np.linalg.norm(kpts, axis=-1).max()
+        scaled_kpts = kpts = None
+        if kmax < 1.e-3: kmax = (0.75/np.pi/self.cell.vol)**0.33333333*2*np.pi
 
         # If omega is not given, estimate it from npw_max
         r2o = self.round2odd
