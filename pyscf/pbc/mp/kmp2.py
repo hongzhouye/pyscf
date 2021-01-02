@@ -70,7 +70,8 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     else:
         t2 = None
 
-    if not mp.with_df or type(mp._scf.with_df) is not df.GDF:
+    # Use "isinstance" instead of "type" to include GDF-derived classes
+    if not mp.with_df or not isinstance(mp._scf.with_df, df.GDF):
         for ki in range(nkpts):
           for kj in range(nkpts):
             for ka in range(nkpts):
@@ -147,14 +148,14 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
 
 def _init_mp_df_eris(mp):
     """Add 3-center electron repulsion integrals, i.e. (L|pq), in `eris`,
-    where `L` denotes DF auxiliary basis functions and `p` and `q` canonical 
-    crystalline orbitals. Note that `p` and `q` contain kpt indices `kp` and `kq`, 
-    and the third kpt index `kL` is determined by the conservation of momentum.  
-    
+    where `L` denotes DF auxiliary basis functions and `p` and `q` canonical
+    crystalline orbitals. Note that `p` and `q` contain kpt indices `kp` and `kq`,
+    and the third kpt index `kL` is determined by the conservation of momentum.
+
     Arguments:
         mp {Kmp} -- A Kmp instance
         eris {_mp_ERIS} -- A _mp_ERIS instance to which we want to add 3c ints
-        
+
     Returns:
         _mp_ERIS -- A _mp_ERIS instance with 3c ints
     """
@@ -197,7 +198,7 @@ def _init_mp_df_eris(mp):
     ket_start = nmo+nocc
     ket_end = ket_start + nvir
     with h5py.File(mp._scf.with_df._cderi, 'r') as f:
-        kptij_lst = f['j3c-kptij'].value 
+        kptij_lst = f['j3c-kptij'].value
         tao = []
         ao_loc = None
         for ki, kpti in enumerate(kpts):
@@ -658,7 +659,7 @@ def make_rdm2(mp, t2=None, kind="compact"):
                     ks = mp.khelper.kconserv[kp, kq, kr]
                     result.append(dm2[kp,kq,kr][np.ix_(idx[kp],idx[kq],idx[kr],idx[ks])])
         return result
- 
+
 
 def _gamma1_intermediates(mp, t2=None):
     # Memory optimization should be here
@@ -796,4 +797,3 @@ if __name__ == '__main__':
     mymp = mp.KMP2(kmf)
     emp2, t2 = mymp.kernel()
     print(emp2 - -0.204721432828996)
-
