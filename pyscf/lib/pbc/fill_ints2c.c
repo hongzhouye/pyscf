@@ -311,87 +311,42 @@ void fill_sr2c2e_k(int (*intor)(), double complex *out,
     free(buf);
 }
 
-void fill_sr3c2e_g()
-{
+void fill_sr3c2e_g(int (*intor)(), double *out,
+                   int comp, CINTOpt *cintopt,
+                   int *ao_loc, int *ao_locsup, int *shl_loc,
+                   int *auxuniqshl_map, int nbasauxuniq,
+                   double *uniq_Rcuts, double *refexp,
+                   int *refshlprd_loc, int *refshlprdinv_lst,
+                   int *supshlpr_loc, int *supshlpr_lst, int nsupshlpr,
+                   int *atm, int natm, int *bas, int nbas, int nbasaux,
+                   double *env,
+                   int *atmsup, int natmsup, int *bassup,
+                   int nbassup, double *envsup, char safe)
 /*
-Need
-    refuniqshl_map
-    supshlpr_loc[IJsh]
-    supshlpr_lst
-
-Pseudocode
-    loop Ish
-        Get ISH
-        Get RI
-        loop Jsh
-            Get JSH
-            Get IJSH <-- tril(ISH,JSH)
-            Get RJ
-            Calc dIJ
-            Get idIJ <-- IJSH,dIJ
+    ao_loc = concatenate([ao_loc, ao_locaux])
+    ao_locsup = concatenate([ao_locsup, ao_locaux])
 */
-    for(Ish=0; Ish<nbas; ++Ish) {
-        ei = refexp[Ish];
-        ISH = refuniqshl_map[Ish];
-        Iptrxyz = atm[PTR_COORD+bas[ATOM_OF+Ish*BAS_SLOTS]*ATM_SLOTS];
-        rI = env+Iptrxyz;
-        for(Jsh=0; Jsh<=Ish; ++Jsh) {
-            ej = refexp[Jsh];
-            JSH = refuniqshl_map[Jsh];
-            IJSH = (ISH>=JSH)?(ISH*(ISH+1)/2+JSH):(JSH*(JSH+1)/2+ISH);
-
-            Jptrxyz = atm[PTR_COORD+bas[ATOM_OF+Jsh*BAS_SLOTS]*ATM_SLOTS];
-            rJ = env+Jptrxyz;
-            idIJ = (int)sqrt(get_dsqure(rI,rJ));
-
-            uniq_RcutsdIJ = uniq_Rcuts + idIJ*nbasaux;
-
-            IJsh = Ish*(Ish+1)/2 + Jsh;
-            ijsh0 = supshlpr_loc[IJsh];
-            ijsh1 = supshlpr_loc[IJsh+1];
-            for(ijsh=ijsh0; ijsh<ijsh1; ++ijsh) {
-                ish = supshlpr_i_lst[ijsh];
-                jsh = supshlpr_j_lst[ijsh];
-                shls[0] = ish;
-                shls[1] = jsh;
-
-                iptrxyz = atmsup[PTR_COORD+
-                                    bassup[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS];
-                ri = envsup+iptrxyz;
-                jptrxyz = atmsup[PTR_COORD+
-                                    bassup[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS];
-                rj = envsup+jptrxyz;
-                get_rc(rc, ri, rj, ei, ej);
-
-                for(Ksh=0; Ksh<nbasaux; ++Ksh) {
-                    ksh = Ksh + nbassup;
-                    shls[2] = ksh;
-
-                    rk = envsup + ksh;
-                    Rijk2 = get_dsqure(rc, rk);
-
-                }
-            }
-        }
-    }
-}
-
-void fill_sr3c2e_g()
 {
-/*
-    atm,bas,env,ao_loc --> ref cell + ref auxcell
-    atmsup,bassup,envsup --> supmol + ref auxcell
-    uniqd_loc
-    supuniqshlpr_loc
-    supshlprij_lst (nsupshlpr)
-    suprefshl_map
-    refexp
-    uniq_Rcuts
-*/
+    const int *supshlpr_i_lst = supshlpr_lst;
+    const int *supshlpr_j_lst = supshlpr_lst + nsupshlpr;
+    const int kshshift = nbassup - nbas;
+    const int nbasauxsup = nbassup + nbasaux;
 
-    const int dimax = max_shlsize(ao_loc, nbas);
-    const int djmax = max_shlsize(ao_loc, nbas);
-    const int dkmax = max_shlsize(ao_loc+nbas, nbasaux);
+    int Ish, Jsh, IJsh, ijsh, ijsh0, ijsh1, ish, jsh, I0, I1, J0, J1, IJstart;
+    int Katm, Ksh, Ksh0, Ksh1, ksh, K0, K1, KSH;
+    int iptrxyz, jptrxyz, kptrxyz;
+    int idij, idij0, idij1, Idij;
+    int di, dj, dk, dij, dijk, dijktot, dijkmax;
+    int dimax = max_shlsize(ao_loc, nbas);
+    int dkmax = max_shlsize(ao_loc+nbas, nbasaux);
+    int dktot = ao_loc[nbas+nbasaux] - ao_loc[nbas];
+    int i,j,jmax,k,i0, empty;
+    int nao2 = (ao_loc[nbas]-ao_loc[0])*(ao_loc[nbas]-ao_loc[0]);
+    double ei, ej, Rijk2, Rcut2;
+    double *uniq_Rcuts_K, *ri, *rj, *rk;
+    double rc[3];
+
+    int shls[3];
     int shls_slice[6];
     shls_slice[0] = 0;
     shls_slice[1] = nbas;
@@ -400,78 +355,141 @@ void fill_sr3c2e_g()
     shls_slice[4] = nbas;
     shls_slice[5] = nbas+nbasaux;
     const int cache_size = GTOmax_cache_size(intor, shls_slice, 3,
-                                             atm, natm, bas, nbas, env);
+                                             atm, natm, bas, nbas+nbasaux, env);
+// TODO: batch Ksh, which could be HUGE for big supercell.
+    const int buf_size = dimax*dimax*dktot*2;
+    const int tmp_size = dimax*dimax*dktot*2;
+    double *buf = malloc(sizeof(double)*(buf_size+tmp_size+cache_size));
+    double *buf_L, *buf_Lk, *pbuf, *pbufk, *pbuf2, *cache, *outk;
+    double omega = ABS(envsup[PTR_RANGE_OMEGA]);
 
-    for(IJSH=0; IJSH<=nuniqbas2; ++IJSH) {
-        for(idIJ=uniqd_loc[IJSH]; idIJ<uniqd_loc[IJSH+1]; ++idIJ) {
-            ijsh0 = supuniqshlpr_loc[idIJ];
-            ijsh1 = supuniqshlpr_loc[idIJ+1];
-            uniq_RcutsdIJ = uniq_Rcuts + idIJ*nbasaux;
-            for(ijsh=ijsh0; ijsh<ijsh1; ++ijsh) {
-                ish = supshlpri_lst[ijsh];
-                jsh = supshlprj_lst[ijsh];
-                shls[0] = ish;
-                shls[1] = jsh;
-                Ish = suprefshl_map[ish];
-                Jsh = suprefshl_map[jsh];
-                IJsh = (Ish>=Jsh)?(Ish*(Ish+1)/2+Jsh):(Jsh*(Jsh+1)/2+Ish);
+    for(Ish=0, IJsh=0; Ish<nbas; ++Ish) {
+        ei = refexp[Ish];
+        I0 = ao_loc[Ish];
+        I1 = ao_loc[Ish+1];
+        IJstart = I0*(I0+1)/2;
+        di = I1 - I0;
+        for(Jsh=0; Jsh<=Ish; ++Jsh, ++IJsh) {
+            ej = refexp[Jsh];
+            J0 = ao_loc[Jsh];
+            J1 = ao_loc[Jsh+1];
+            dj = J1 - J0;
+            dij = di * dj;
+            dijktot = dij * dktot;
+            dijkmax = dij * dkmax;
+            buf_L = buf;
+            pbuf = buf_L + dijktot;
+            pbuf2 = pbuf + dijktot;
+            cache = pbuf2 + dijkmax;
+            for(i=0; i<dijktot; ++i) {
+                buf_L[i] = 0;
+            }
 
-                I0 = ao_loc[Ish];
-                I1 = ao_loc[Ish+1];
-                di = I1 - I0;
-                J0 = ao_loc[Jsh];
-                J1 = ao_loc[Jsh+1];
-                dj = J1 - J0;
-                dijc = di*dj*comp;
+            idij0 = refshlprd_loc[IJsh];
+            idij1 = refshlprd_loc[IJsh+1];
+            printf("%d %d   %d %d\n", Ish, Jsh, idij0, idij1);
+            for(idij=idij0; idij<idij1; ++idij) {
+                Idij = refshlprdinv_lst[idij];
+                uniq_Rcuts_K = uniq_Rcuts + Idij * nbasauxuniq;
+                ijsh0 = supshlpr_loc[idij];
+                ijsh1 = supshlpr_loc[idij+1];
+                printf(" %d   %d %d\n", idij, ijsh0, ijsh1);
+                for(ijsh=ijsh0; ijsh<ijsh1; ++ijsh) {
+                    ish = supshlpr_i_lst[ijsh];
+                    jsh = supshlpr_j_lst[ijsh];
+                    shls[1] = ish;
+                    shls[0] = jsh;
+                    iptrxyz = atmsup[PTR_COORD+
+                                     bassup[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS];
+                    ri = envsup+iptrxyz;
+                    jptrxyz = atmsup[PTR_COORD+
+                                     bassup[ATOM_OF+jsh*BAS_SLOTS]*ATM_SLOTS];
+                    rj = envsup+jptrxyz;
+                    // printf("  %d %d   %d %d\n", ish, jsh, iptrxyz, jptrxyz);
+                    get_rc(rc, ri, rj, ei, ej);
+                    // printf("%.5f %.5f %.5f  %.5f %.5f %.5f  %.5f %.5f %.5f\n",
+                    //     ri[0],ri[1],ri[2],rj[0],rj[1],rj[2],rc[0],rc[1],rc[2]);
 
-                ei = refexp[Ish];
-                ej = refexp[Jsh];
-                iptrxyz = atmsup[PTR_COORD+
-                                    bassup[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS];
-                ri = envsup+iptrxyz;
-                jptrxyz = atmsup[PTR_COORD+
-                                    bassup[ATOM_OF+ish*BAS_SLOTS]*ATM_SLOTS];
-                rj = envsup+jptrxyz;
-                get_rc(rc, ri, rj, ei, ej);
-                for(ksh=0; ksh<nbasaux; ++ksh) {
-                    kptrxyz = atmaux[PTR_COORD+
-                                    basaux[ATOM_OF+ksh*BAS_SLOTS]*ATM_SLOTS];
-                    rk = envaux+kptrxyz;
-                    Rijk2 = get_dsqure(rc, rk);
-                    Rcut2 = uniq_RcutsdIJ[ksh]*uniq_RcutsdIJ[ksh];
-                    if(Rijk2 < Rcut2) {
-                        dijkc = dijc*(ao_locaux[ksh+1] - ao_locaux[ksh]);
-// ------------> add shift for ksh
-                        shls[2] = ksh;
-// <------------
-                        if ((*intor)(pbuf, NULL, shls, atmsup, natmsup, bassup,
-                                     nbassup, envsup, cintopt, cache)) {
-                            if(Ish == Jsh) {
-                                for(k=0; k<dk; ++k) {
-                                    for(i=0; i<di; ++i) {
-                                        for(j=0; j<dj; ++j) {
-                                            out[ksh*nbas2+IJsh] +=
-                                                            pbuf[k*dij+ij];
+                    buf_Lk = buf_L;
+                    pbufk = pbuf;
+
+                    for(Katm=natm; Katm<2*natm; ++Katm) { // first natm is ref
+                        kptrxyz = atm[PTR_COORD+Katm*ATM_SLOTS];
+                        rk = env+kptrxyz;
+                        Rijk2 = get_dsqure(rc, rk);
+                        // printf("   %d   %d   %.5f %.5f %.5f   %.5f\n", Katm, kptrxyz, rk[0],rk[1],rk[2], Rijk2);
+                        Ksh0 = shl_loc[Katm];
+                        Ksh1 = shl_loc[Katm+1];
+                        for(Ksh=Ksh0; Ksh<Ksh1; ++Ksh) {
+                            KSH = auxuniqshl_map[Ksh-nbas];
+                            Rcut2 = uniq_Rcuts_K[KSH]*uniq_Rcuts_K[KSH];
+                            K0 = ao_loc[Ksh];
+                            K1 = ao_loc[Ksh+1];
+                            dk = K1 - K0;
+                            dijk = dij * dk;
+                            // printf("    %d   %d   %d %d   %d\n", Ksh-nbas, KSH, K0, K1, dk);
+
+                            if(Rijk2<=Rcut2) {
+                                ksh = Ksh + kshshift;
+                                shls[2] = ksh;
+                                printf("   %d %d %d\n", shls[0], shls[1], shls[2]);
+                                if(safe) {
+                                    envsup[PTR_RANGE_OMEGA] = 0.;
+                                    if ((*intor)(pbufk, NULL, shls, atmsup,
+                                                 natmsup, bassup, nbasauxsup,
+                                                 envsup, cintopt, cache)) {
+                                        envsup[PTR_RANGE_OMEGA] = omega;
+                                        (*intor)(pbuf2, NULL, shls, atmsup,
+                                                 natmsup, bassup, nbassup,
+                                                 envsup, cintopt, cache);
+                                        for(j=0; j<dijk; ++j) {
+                                            pbufk[i] -= pbuf2[i];
                                         }
+                                    }
+                                } else {
+                                    if ((*intor)(pbufk, NULL, shls, atmsup,
+                                                 natmsup, bassup, nbasauxsup,
+                                                 envsup, cintopt, cache)) {
+                                        empty = 0;
                                     }
                                 }
-                            } else {
-                                for(k=0; k<dk; ++k) {
-                                    for(i=0; i<di; ++i) {
-                                        for(j=0; j<dj; ++j) {
-                                            out[ksh*nbas2+IJsh] +=
-                                                            pbuf[k*dij+ij];
-                                        }
-                                    }
+
+                                for(i=0; i<dijk; ++i) {
+                                    buf_Lk[i] += pbufk[i];
                                 }
                             }
-                        }
+
+                            buf_Lk += dijk;
+                            pbufk += dijk;
+                        } // Ksh
+                    } // Katm
+                } // ijsh
+            } // idij
+
+            buf_Lk = buf_L;
+            for(k=0; k<dk; ++k) {
+                outk = out + k*nao2;
+                buf_Lk += k*dij;
+                i0 = IJstart;
+                for(i=0; i<di; ++i) {
+                    jmax = (Ish==Jsh)?(i+1):(dj);
+                    for(j=0; j<jmax; ++j) {
+                        outk[i0+j] = buf_Lk[i*dj+j];
                     }
                 }
+                i0 += I0+i+1;
             }
-        }
+
+            IJstart += dj;
+
+        } // Jsh
+    } // Ish
+
+    if(safe) {
+        envsup[PTR_RANGE_OMEGA] = -omega;
     }
 
+    free(buf);
 }
 
 /*
