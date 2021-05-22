@@ -105,9 +105,9 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
             def fcheck(R):
                 prec = prec0 * (min(1./R,1.) if R_correct else 1.)
                 mol1._env[mol1._atm[2,mol_gto.PTR_COORD]] = R
-                I = mol1.intor("int3c2e", shls_slice=shls_slice)
-                with mol1.with_range_coulomb(abs(omega)):
-                    I -= mol1.intor("int3c2e", shls_slice=shls_slice)
+                # The SR formula may be inaccurate for high-l GTOs & big omega (e.g., omega >~ 0.5), but only for small R. Thus, using SR formula is okay for estimating Rcut.
+                with mol1.with_range_coulomb(-abs(omega)):
+                    I = mol1.intor("int3c2e", shls_slice=shls_slice)
                 I = get_norm( I )
                 return I < prec
             return binary_search(R0, R1, 1, True, fcheck)
@@ -414,8 +414,10 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
     naoaux = auxcell.nao
 
     nsupshlpr_tot = supmol.nbas*(supmol.nbas+1)//2
-    logger.debug1(cell, "nsupshlpr_tot= %d  nsupshlpr_keep= %d  ratio= %.5f",
-                  nsupshlpr_tot, nsupshlpr, nsupshlpr/nsupshlpr_tot)
+    logger.debug1(cell, "nsupshlpr_tot= %d  nsupshlpr_keep= %d  ( %.2f %% )",
+                  nsupshlpr_tot, nsupshlpr, nsupshlpr/nsupshlpr_tot*100)
+    memsp = nsupshlpr*8/1024**2.
+    logger.debug1(cell, "mem use by shlpr data %.2f MB", memsp)
 
     intor = "int3c2e"
     intor, comp = mol_gto.moleintor._get_intor_and_comp(
@@ -426,7 +428,7 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
     else:
         cintopt = lib.c_null_ptr()
 
-    cput1 = np.asarray([logger.process_clock(), logger.perf_counter()])
+    cput1 = np.asarray( logger.timer(cell, 'j3c precompute', *cput0) )
     dt0 = cput1 - cput0
 
     kptijs = np.asarray(kptijs).reshape(-1,2,3)
@@ -463,6 +465,8 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
                 ctypes.c_char(safe))
 
         nao2 = nao*(nao+1)//2
+        memj3c = naoaux*nao2*8/1024**2.
+        logger.debug1(cell, "estimated mem for 3c2e %.2f MB", memj3c)
         out = np.zeros((naoaux,nao2), dtype=np.double)
         with supmol.with_range_coulomb(-abs(omega)):
             fill_j3c(out)
@@ -515,6 +519,8 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
                 ctypes.c_char(safe))
 
         nao2 = nao*nao
+        memj3c = nkptijs*naoaux*nao2*16/1024**2.
+        logger.debug1(cell, "estimated mem for 3c2e %.2f MB", memj3c)
         out_ = np.zeros((nkptijs,naoaux,nao2), dtype=np.complex128)
         with supmol.with_range_coulomb(-abs(omega)):
             fill_j3c(out_)
@@ -532,7 +538,7 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
             out[kij] = v
         out_ = None
 
-    cput0 = np.asarray([logger.process_clock(), logger.perf_counter()])
+    cput0 = np.asarray( logger.timer(cell, 'j3c compute', *cput1) )
     dt1 = cput0 - cput1
 
     if ret_timing:
