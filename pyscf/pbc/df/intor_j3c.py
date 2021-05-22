@@ -413,6 +413,10 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
     nao = cell.nao
     naoaux = auxcell.nao
 
+    nsupshlpr_tot = supmol.nbas*(supmol.nbas+1)//2
+    logger.debug1(cell, "nsupshlpr_tot= %d  nsupshlpr_keep= %d  ratio= %.5f",
+                  nsupshlpr_tot, nsupshlpr, nsupshlpr/nsupshlpr_tot)
+
     intor = "int3c2e"
     intor, comp = mol_gto.moleintor._get_intor_and_comp(
                                             cell._add_suffix(intor), None)
