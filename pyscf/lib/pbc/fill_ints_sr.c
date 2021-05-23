@@ -366,7 +366,7 @@ void fill_sr3c2e_g(int (*intor)(), double *out,
     double omega = ABS(envsup[PTR_RANGE_OMEGA]);
 
 // >>>>>>>>
-    int count = 0, Count = 0;
+    unsigned int count = 0;
 // <<<<<<<<
 
     for(Ish=0, IJsh=0; Ish<nbas; ++Ish) {
@@ -393,7 +393,7 @@ void fill_sr3c2e_g(int (*intor)(), double *out,
 
             idij0 = refshlprd_loc[IJsh];
             idij1 = refshlprd_loc[IJsh+1];
-            printf("%d %d   %d %d\n", Ish, Jsh, idij0, idij1);
+            // printf("%d %d   %d %d\n", Ish, Jsh, idij0, idij1);
             for(idij=idij0; idij<idij1; ++idij) {
                 Idij = refshlprdinv_lst[idij];
                 uniq_Rcut2s_K = uniq_Rcut2s + Idij * nbasauxuniq;
@@ -428,9 +428,6 @@ void fill_sr3c2e_g(int (*intor)(), double *out,
                             dk = K1 - K0;
                             dijk = dij * dk;
 
-// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-                            ++Count;
-// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                             if(Rijk2<=Rcut2) {
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
                                 ++count;
@@ -506,7 +503,7 @@ void fill_sr3c2e_g(int (*intor)(), double *out,
     free(buf);
 
 // >>>>>>>>
-    printf("percent %d/%d\n", count, Count);
+    printf("num significant shlpr %d\n", count);
 // <<<<<<<<
 }
 
@@ -587,7 +584,7 @@ void fill_sr3c2e_kk(int (*intor)(), double complex *out,
     double omega = ABS(envsup[PTR_RANGE_OMEGA]);
 
 // >>>>>>>>
-    int count = 0, Count = 0;
+    unsigned int count = 0;
 // <<<<<<<<
 
     for(Ish=0, IJsh=0; Ish<nbas; ++Ish) {
@@ -609,7 +606,7 @@ void fill_sr3c2e_kk(int (*intor)(), double complex *out,
 
             idij0 = refshlprd_loc[IJsh];
             idij1 = refshlprd_loc[IJsh+1];
-            printf("%d %d   %d %d\n", Ish, Jsh, idij0, idij1);
+            // printf("%d %d   %d %d\n", Ish, Jsh, idij0, idij1);
             for(idij=idij0; idij<idij1; ++idij) {
                 Idij = refshlprdinv_lst[idij];
                 uniq_Rcut2s_K = uniq_Rcut2s + Idij * nbasauxuniq;
@@ -666,9 +663,6 @@ void fill_sr3c2e_kk(int (*intor)(), double complex *out,
                             dk = K1 - K0;
                             dijk = dij * dk;
 
-// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-                            ++Count;
-// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                             if(Rijk2<=Rcut2) {
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
                                 ++count;
@@ -790,7 +784,7 @@ void fill_sr3c2e_kk(int (*intor)(), double complex *out,
     free(buf);
 
 // >>>>>>>>
-    printf("percent %d/%d\n", count, Count);
+    printf("num significant shlpr %d\n", count);
 // <<<<<<<<
 }
 

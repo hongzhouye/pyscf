@@ -98,7 +98,6 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
 # >>>>>>>> TODO: remove me after numerical tests
         from pyscf import __config__
         safe = getattr(__config__, "INTOR_J3C_SAFE", False)
-        print(safe)
 # <<<<<<<< END
         def estimate1(ksh, R0,R1):
             mol1._env[mol1._bas[2,mol_gto.PTR_EXP]] = eks[ksh]
