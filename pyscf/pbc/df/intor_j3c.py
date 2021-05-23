@@ -95,6 +95,11 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
         mol1 = mol_gto.M(atom="H1 0 0 0; H2 0 0 0; H3 0 0 0",
                          basis={"H1": [basi], "H2": [basj], "H3": [[0,[1,1]]]},
                          spin=None)
+# >>>>>>>> TODO: remove me after numerical tests
+        from pyscf import __config__
+        safe = getattr(__config__, "INTOR_J3C_SAFE", False)
+        print(safe)
+# <<<<<<<< END
         def estimate1(ksh, R0,R1):
             mol1._env[mol1._bas[2,mol_gto.PTR_EXP]] = eks[ksh]
             mol1._bas[2,mol_gto.ANG_OF] = lks[ksh]
@@ -106,8 +111,13 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
                 prec = prec0 * (min(1./R,1.) if R_correct else 1.)
                 mol1._env[mol1._atm[2,mol_gto.PTR_COORD]] = R
                 # The SR formula may be inaccurate for high-l GTOs & big omega (e.g., omega >~ 0.5), but only for small R. Thus, using SR formula is okay for estimating Rcut.
-                with mol1.with_range_coulomb(-abs(omega)):
+                if safe:
                     I = mol1.intor("int3c2e", shls_slice=shls_slice)
+                    with mol1.with_range_coulomb(abs(omega)):
+                        I -= mol1.intor("int3c2e", shls_slice=shls_slice)
+                else:
+                    with mol1.with_range_coulomb(-abs(omega)):
+                        I = mol1.intor("int3c2e", shls_slice=shls_slice)
                 I = get_norm( I )
                 return I < prec
             return binary_search(R0, R1, 1, True, fcheck)
