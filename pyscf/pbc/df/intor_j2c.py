@@ -17,9 +17,10 @@ from pyscf.pbc.df.supmol import (suplat_by_Rcut, _build_supmol_,
                                  get_refuniq_map, binary_search)
 
 
-__CGCORRLS = np.arange(10)*0.25 + 1.5
-__CGCORRLS[0] = 1
-__CGCORRLS *= np.concatenate([[1,1], np.arange(8)*0.05+1.15])
+# __CGCORRLS = np.arange(10)*0.25 + 1.5
+# __CGCORRLS[0] = 1
+# __CGCORRLS *= np.concatenate([[1,1], np.arange(8)*0.05+1.15])
+__CGCORRLS = (np.arange(10)*2+1)**0.5
 from scipy.special import gamma, gammaincc
 def Gamma(s, x):
     return gammaincc(s,x) * gamma(s)

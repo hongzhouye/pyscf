@@ -55,7 +55,7 @@ def get_ovlp_dcut(bas_lst, precision, r0=None):
 def make_dijs_lst(dcuts, dstep):
     return [np.arange(0,dcut,dstep) for dcut in dcuts]
 
-def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
+def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
                          eta_correct=True, R_correct=True):
     """ Determine for AO shlpr (ish,jsh) separated by dij, the cutoff radius for
             2-norm( (ksh|v_SR(omega)|ish,jsh) ) < precision
@@ -121,7 +121,94 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
                 return I < prec
             return binary_search(R0, R1, 1, True, fcheck)
     else:
-        def estimate1_(e1,e2,e3,l1,l2,l3,c1,c2,c3, d, Rmin, Rmax, FAC_TYPE):
+        # def estimate1_(e1,e2,e3,l1,l2,l3,c1,c2,c3, d, Rmin, Rmax, FAC_TYPE):
+        #     e12 = e1 + e2
+        #     l12 = l1 + l2
+        #     eta12 = 1/(1/e1+1/e2)
+        #     eta1 = 1/(1/e12+1/e3)
+        #     eta2 = 1/(1/eta1+1/omega**2.)
+        #     common_fac = np.pi*0.125 * np.exp(-eta12*d**2.)/(e12**1.5) * \
+        #                 __CGCORRLS[l3]*e3**(-(l3+1.5)) * c1*c2*c3
+        #     if FAC_TYPE == "ISF":
+        #         fac = common_fac
+        #     elif FAC_TYPE == "ISFL":
+        #         fac = common_fac / e12**l12
+        #     elif FAC_TYPE == "ISFMAX":
+        #         fac = common_fac * np.max([1./e12**l for l in range(l12+1)])
+        #     elif FAC_TYPE == "1C":
+        #         fac = common_fac * d**l2 / e12**l1
+        #     elif FAC_TYPE in ["MPE0","MPE1","MPE2","MPE3"]:
+        #         n = int(FAC_TYPE[-1])
+        #         fac0 = e1**l2 * e2**l1 * (d/e12)**l12
+        #         scale = 1.
+        #         if n > 0:
+        #             scale1a = l1 / e2 if l1 > 0 else 0.
+        #             scale1b = l2 / e1 if l2 > 0 else 0.
+        #             scale1 = (scale1a+scale1b) / d
+        #             scale += scale1
+        #         if n > 1:
+        #             scale2a = l1*(l1-1)*0.5 / e2**2. if l1 > 1 else 0.
+        #             scale2b = l2*(l2-1)*0.5 / e1**2. if l2 > 1 else 0.
+        #             scale2c = l1*l2 / (e1*e2) if l1*l2 > 0 else 0.
+        #             scale2 = (scale2a+scale2b+scale2c) / d**2.
+        #             scale += scale2
+        #         if n > 2:
+        #             scale3a = l1*(l1-1)*(l1-2)*0.1667 / e2**3. if l1 > 2 else 0.
+        #             scale3b = l2*(l2-1)*(l2-2)*0.1667 / e1**3. if l2 > 2 else 0.
+        #             scale3c = l1*(l1-1)*l2*0.5 / (e1*e2**2.) if (l1-1)*l2 > 0 else 0.
+        #             scale3d = l2*(l2-1)*l1*0.5 / (e2*e1**2.) if (l2-1)*l1 > 0 else 0.
+        #             scale3 = (scale3a+scale3b+scale3c+scale3d) / d**3.
+        #             scale += scale3
+        #         fac = common_fac * fac0 * scale
+        #     else:
+        #         raise RuntimeError("Unknown fac type {}".format(fac_type))
+        #
+        #     prec0 = precision * (min(eta2,1.) if eta_correct else 1.)
+        #     def fcheck(R):
+        #         prec = prec0 * (min(1./R,1.) if R_correct else 1.)
+        #         I = fac * Gamma(l3+0.5,eta2*R**2.) / R**(l3+1)
+        #         return I < prec
+        #     return binary_search(Rmin, Rmax, 1, True, fcheck)
+
+        def get_cmpe_lst(n, d, e1, e2):
+            e12 = e1+e2
+            d1 = d * e2/e12
+            d2 = -d * e1/e12
+            fac0 = abs(d1**l1 * d2**l2)
+            cs_lst = [None] * (n+1)
+            cs_lst[0] = np.array([1.])
+            if n > 0:
+                cs_lst[1] = np.array([
+                    l1/d1 if l1 > 0 else 0.,
+                    l2/d2 if l2 > 0 else 0.
+                ])
+            if n > 1:
+                cs_lst[2] = np.array([
+                    l1*(l1+1)*0.5/d1**2 if l1 > 1 else 0.,
+                    l2*(l2+1)*0.5/d2**2 if l2 > 1 else 0.,
+                    l1*l2/(d1*d2) if l1 > 0 and l2 > 0 else 0.
+                ])
+            if n > 2:
+                cs_lst[3] = np.array([
+                    l1*(l1+1)*(l1+2)*0.1667/d1**3 if l1 > 2 else 0.,
+                    l2*(l2+1)*(l2+2)*0.1667/d2**3 if l2 > 2 else 0.,
+                    l1*(l1+1)*l2*0.5/(d1**2*d2) if l1 > 1 and l2 > 0 else 0.,
+                    l2*(l2+1)*l1*0.5/(d2**2*d1) if l2 > 1 and l1 > 0 else 0.
+                ])
+            if n > 3:
+                cs_lst[4] = np.array([
+                    l1*(l1+1)*(l1+2)*(l1+3)*0.04167/d1**4 if l1 > 3 else 0.,
+                    l2*(l2+1)*(l2+2)*(l2+3)*0.04167/d2**4 if l2 > 3 else 0.,
+                    l1*(l1+1)*(l1+2)*l2*0.1667/(d1**3*d2) if l1>2 and l2>0 else 0.,
+                    l2*(l2+1)*(l2+2)*l1*0.1667/(d2**3*d1) if l2>2 and l1>0 else 0.,
+                    l1*(l1+1)*l2*(l2+1)*0.25/(d2**2*d2**2) if l1>1 and l2>1 else 0.
+                ])
+            if n > 4:
+                raise NotImplementedError
+            for i in range(n+1):
+                cs_lst[i] *= fac0
+            return cs_lst
+        def estimate1_(e1,e2,e3,l1,l2,l3,c1,c2,c3, d, Rmin, Rmax, FAC_TYPE, Q):
             e12 = e1 + e2
             l12 = l1 + l2
             eta12 = 1/(1/e1+1/e2)
@@ -129,44 +216,43 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
             eta2 = 1/(1/eta1+1/omega**2.)
             common_fac = np.pi*0.125 * np.exp(-eta12*d**2.)/(e12**1.5) * \
                         __CGCORRLS[l3]*e3**(-(l3+1.5)) * c1*c2*c3
-            if FAC_TYPE == "ISF":
-                fac = common_fac
-            elif FAC_TYPE == "ISFL":
-                fac = common_fac / e12**l12
-            elif FAC_TYPE == "ISFMAX":
-                fac = common_fac * np.max([1./e12**l for l in range(l12+1)])
-            elif FAC_TYPE == "1C":
-                fac = common_fac * d**l2 / e12**l1
-            elif FAC_TYPE in ["MPE0","MPE1","MPE2","MPE3"]:
-                n = int(FAC_TYPE[-1])
-                fac0 = e1**l2 * e2**l1 * (d/e12)**l12
-                scale = 1.
-                if n > 0:
-                    scale1a = l1 / e2 if l1 > 0 else 0.
-                    scale1b = l2 / e1 if l2 > 0 else 0.
-                    scale1 = (scale1a+scale1b) / d
-                    scale += scale1
-                if n > 1:
-                    scale2a = l1*(l1-1)*0.5 / e2**2. if l1 > 1 else 0.
-                    scale2b = l2*(l2-1)*0.5 / e1**2. if l2 > 1 else 0.
-                    scale2c = l1*l2 / (e1*e2) if l1*l2 > 0 else 0.
-                    scale2 = (scale2a+scale2b+scale2c) / d**2.
-                    scale += scale2
-                if n > 2:
-                    scale3a = l1*(l1-1)*(l1-2)*0.1667 / e2**3. if l1 > 2 else 0.
-                    scale3b = l2*(l2-1)*(l2-2)*0.1667 / e1**3. if l2 > 2 else 0.
-                    scale3c = l1*(l1-1)*l2*0.5 / (e1*e2**2.) if (l1-1)*l2 > 0 else 0.
-                    scale3d = l2*(l2-1)*l1*0.5 / (e2*e1**2.) if (l2-1)*l1 > 0 else 0.
-                    scale3 = (scale3a+scale3b+scale3c+scale3d) / d**3.
-                    scale += scale3
-                fac = common_fac * fac0 * scale
+            if FAC_TYPE in ["ISF", "ISFQ", "MPE0", "MPE1", "MPE2", "MPE3",
+                            "MPE4"]:
+                if FAC_TYPE == "ISF":
+                    fac = common_fac
+                elif FAC_TYPE == "ISFQ":
+                    e12w = 1/(2/e12+1/omega**2.)
+                    Q2S = (0.5 * np.pi**0.5 / ((e12*0.5)**0.5 - e12w**0.5))**0.5
+                    S = Q * Q2S * 4*np.pi /(c1*c2)
+                    fac = common_fac * np.exp(eta12*d**2.) * S*(e12/np.pi)**1.5
+                elif FAC_TYPE in ["MPE0","MPE1","MPE2","MPE3","MPE4"]:
+                    n = min(int(FAC_TYPE[-1]),l12)
+                    cs_lst = get_cmpe_lst(n, d, e1, e2)
+                    fac1 = sum([abs(cs_lst[i]).sum() for i in range(n+1)])
+                    fac = common_fac * fac1
+                else:
+                    raise RuntimeError("Unknown fac type {}".format(fac_type))
+
+                feval = lambda R: fac * Gamma(l3+0.5,eta2*R**2.) / R**(l3+1)
+
+            elif FAC_TYPE in ["MPE0L", "MPE1L", "MPE2L", "MPE3L", "MPE4L"]:
+                n = min(int(FAC_TYPE[-2]),l12)
+                cs_lst = get_cmpe_lst(n, d, e1, e2)
+
+                def feval(R):
+                    I = 0.
+                    for m in range(n+1):
+                        fac = __CGCORRLS[m] / e12**m * abs(cs_lst[m]).sum()
+                        I += fac * Gamma(l3+m+0.5,eta2*R**2.) / R**(l3+m+1)
+                    I *= common_fac
+                    return I
             else:
                 raise RuntimeError("Unknown fac type {}".format(fac_type))
 
             prec0 = precision * (min(eta2,1.) if eta_correct else 1.)
             def fcheck(R):
                 prec = prec0 * (min(1./R,1.) if R_correct else 1.)
-                I = fac * Gamma(l3+0.5,eta2*R**2.) / R**(l3+1)
+                I = feval(R)
                 return I < prec
             return binary_search(Rmin, Rmax, 1, True, fcheck)
 
@@ -179,13 +265,26 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
             return l,e,c
         l1,e1,c1 = get_lec(mol, ish)
         l2,e2,c2 = get_lec(mol, jsh)
-        FAC_TYPE = "MPE3"
 
+        FAC_TYPE = fac_type.upper()
+# precompute Q
+        Q = None
+        if FAC_TYPE == "ISFQ":
+            mol12 = mol_gto.M(atom="H1 0 0 0; H2 %.10f 0 0" % (dij*BOHR),
+                              basis={"H1": [[l1,(e1,1.)]],
+                                     "H2": [[l2,(e2,1.)]]},
+                              spin=None)
+            with mol12.with_range_coulomb(-abs(omega)):
+                Q = get_norm(
+                        mol12.intor("int2e", shls_slice=(0,1,1,2,0,1,1,2))
+                    )**0.5
+# precompute binary coefficients
         def estimate1(ksh, R0,R1):
             l3 = lks[ksh]
             e3 = eks[ksh]
             c3 = cks[ksh]
-            return estimate1_(e1,e2,e3,l1,l2,l3,c1,c2,c3, dij, R0, R1, FAC_TYPE)
+            return estimate1_(e1,e2,e3,l1,l2,l3,c1,c2,c3, dij, R0, R1,
+                              FAC_TYPE, Q)
 
     Rcuts = np.zeros(nbasaux)
     R0 = 5
@@ -194,7 +293,7 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision,
         Rcuts[ksh] = estimate1(ksh, R0, R1)
 
     return Rcuts
-def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, omega, precision,
+def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, omega, precision, fac_type,
                    eta_correct=True, R_correct=True):
     """ Given a list of basis ("bas_lst") and auxiliary basis ("auxbas_lst"), determine the cutoff radius for
         2-norm( (k|v_SR(omega)|ij) ) < precision
@@ -215,7 +314,7 @@ def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, omega, precision,
             dijs = dijs_lst[ij]
             for idij,dij in enumerate(dijs):
                 Rcuts_dij = get_3c2e_Rcuts_for_d(mol, auxmol, i, j, dij,
-                                                 omega, precision,
+                                                 omega, precision, fac_type,
                                                  eta_correct=eta_correct,
                                                  R_correct=R_correct)
                 Rcuts.append(Rcuts_dij)
@@ -364,7 +463,7 @@ def get_shlpr_data(cell, supmol, dcuts, dijs_lst, refuniqshl_map,
     return refshlprd_loc, refshlprdinv_lst, supshlpr_lst, supshlpr_loc
 
 def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
-              precision=None, use_cintopt=True, safe=True,
+              precision=None, use_cintopt=True, safe=True, fac_type="MPE3",
 # +++++++ Use the default for the following unless you know what you are doing
               eta_correct=True, R_correct=True,
               dstep=1,  # unit: Angstrom
@@ -387,6 +486,7 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
     dcuts = get_ovlp_dcut(uniq_bas, precision, r0=cell.rcut)
     dijs_lst = make_dijs_lst(dcuts, dstep/BOHR)
     Rcuts = get_3c2e_Rcuts(uniq_bas, uniq_basaux, dijs_lst, omega, precision,
+                           fac_type,
                            eta_correct=eta_correct, R_correct=R_correct)
     Rcut2s = Rcuts**2.
     bas_exps = np.array([np.asarray(b[1:])[:,0].min() for b in uniq_bas])
