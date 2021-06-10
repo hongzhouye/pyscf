@@ -552,6 +552,7 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
               ret_timing=False,
               force_kcode=False,
               discard_integrals=False,  # compute j3c and discard (no store)
+              no_screening=False,   # set Rcuts to effectively infinity
 # -------
               ):
 
@@ -630,6 +631,8 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
             drv = libpbc.fill_sr3c2e_g_nosave
         else:
             drv = libpbc.fill_sr3c2e_g
+        if no_screening:
+            Rcut2s = np.clip(Rcut2s, 1e20, None)
 # <<<<<
         def fill_j3c(out):
             drv(getattr(libpbc, intor),
