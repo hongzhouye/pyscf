@@ -551,6 +551,7 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
 # +++++++ debug options
               ret_timing=False,
               force_kcode=False,
+              discard_integrals=False,  # compute j3c and discard (no store)
 # -------
               ):
 
@@ -623,7 +624,13 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
     kptijs = np.asarray(kptijs).reshape(-1,2,3)
 
     if gamma_point(kptijs) and not force_kcode:
-        drv = libpbc.fill_sr3c2e_g
+        # drv = libpbc.fill_sr3c2e_g
+# >>>>> debug block
+        if discard_integrals:
+            drv = libpbc.fill_sr3c2e_g_nosave
+        else:
+            drv = libpbc.fill_sr3c2e_g
+# <<<<<
         def fill_j3c(out):
             drv(getattr(libpbc, intor),
                 out.ctypes.data_as(ctypes.c_void_p),
@@ -656,7 +663,13 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
         nao2 = nao*(nao+1)//2
         memj3c = naoaux*nao2*8/1024**2.
         logger.debug1(cell, "estimated mem for 3c2e %.2f MB", memj3c)
-        out = np.zeros((naoaux,nao2), dtype=np.double)
+        # out = np.zeros((naoaux,nao2), dtype=np.double)
+# >>>>> debug block
+        if discard_integrals:
+            out = np.array([0], dtype=np.double)
+        else:
+            out = np.zeros((naoaux,nao2), dtype=np.double)
+# <<<<<
         with supmol.with_range_coulomb(-abs(omega)):
             fill_j3c(out)
         out = [out]
