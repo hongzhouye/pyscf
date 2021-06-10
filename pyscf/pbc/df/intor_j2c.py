@@ -18,7 +18,6 @@ from pyscf.pbc.df.supmol import (suplat_by_Rcut, _build_supmol_,
 
 
 from scipy.special import gamma, gammaincc
-__CGCORRLS = (np.arange(20)*2+1)**0.5
 def Gamma(s, x):
     return gammaincc(s,x) * gamma(s)
 def get_multipole(l, alp):
