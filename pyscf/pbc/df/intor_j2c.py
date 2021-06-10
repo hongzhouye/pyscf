@@ -17,13 +17,12 @@ from pyscf.pbc.df.supmol import (suplat_by_Rcut, _build_supmol_,
                                  get_refuniq_map, binary_search)
 
 
-# __CGCORRLS = np.arange(10)*0.25 + 1.5
-# __CGCORRLS[0] = 1
-# __CGCORRLS *= np.concatenate([[1,1], np.arange(8)*0.05+1.15])
-__CGCORRLS = (np.arange(10)*2+1)**0.5
 from scipy.special import gamma, gammaincc
+__CGCORRLS = (np.arange(20)*2+1)**0.5
 def Gamma(s, x):
     return gammaincc(s,x) * gamma(s)
+def get_multipole(l, alp):
+    return 0.5*np.pi * (2*l+1)**0.5 / alp**(l+1.5)
 def get_2c2e_Rcut(bas_lst, omega, precision, eta_correct=True, R_correct=False):
     """ Given a list of pgto by "bas_lst", determine the cutoff radii for j2c lat sum s.t. the truncation error drops below "precision". j2c is estimated as
 
@@ -49,8 +48,9 @@ def get_2c2e_Rcut(bas_lst, omega, precision, eta_correct=True, R_correct=False):
         cs[idx] = mol_gto.gto_norm(l, es[idx])
     etas = lib.pack_tril( 1/((1/es)[:,None]+1/es+1/omega**2.) )
     Ls = lib.pack_tril( ls[:,None]+ls )
-    fs = cs*__CGCORRLS[ls]/es**(ls+1.5) * np.pi**0.75*0.5
-    facs = lib.pack_tril( fs[:,None]*fs )
+    Os = get_multipole(ls, es)
+    Os *= cs
+    facs = lib.pack_tril(Os[:,None] * Os) / np.pi**0.5
 
     def estimate1(ij, R0,R1):
         l = Ls[ij]
