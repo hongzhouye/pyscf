@@ -303,6 +303,11 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
         precision (float):
             target precision.
     """
+# sanity check for estimators
+    FAC_TYPE = fac_type.upper()
+    if not FAC_TYPE in ["MPEL", "ISF", "ISFL", "ISFQL"]:
+        raise RuntimeError("Unknown estimator requested {}".format(fac_type))
+
 # get bas info
     nbasaux = auxmol.nbas
     eks = [auxmol.bas_exp(ksh)[0] for ksh in range(nbasaux)]
@@ -320,34 +325,69 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
     l2,e2,c2 = get_lec(mol, jsh)
 
 # local helper funcs
-    def init_feval(e1,e2,e3,l1,l2,l3,c1,c2,c3, d):
+    def init_feval(e1,e2,e3,l1,l2,l3,c1,c2,c3, d, Q, FAC_TYPE):
         e12 = e1+e2
         l12 = l1+l2
 
         eta1 = 1/(1/e12+1/e3)
         eta2 = 1/(1/eta1+1/omega**2.)
+        eta12 = 1/(1/e1+1/e2)
 
-        O3 = get_multipole(l3, e3)
+        fac = c1*c2*c3 * 0.5/np.pi
 
-        fac = c1*c2*c3 * O3 * 0.5/np.pi
+        if FAC_TYPE == "MPEL":
 
-        if d < 1e-3:    # concentric
-            ls = np.arange(abs(l1-l2),l12+1)
-            O12s = get_multipole(ls, e12)
-            l_facs = O12s * e12**(0.5*(ls-l12)) * (
-                            gamma(max(l12,1))/gamma(np.maximum(ls,1)))**0.5
-        else:
-            eta12 = 1/(1/e1+1/e2)
+            O3 = get_multipole(l3, e3)
+
+            if d < 1e-3:    # concentric
+                ls = np.arange(abs(l1-l2),l12+1)
+                O12s = get_multipole(ls, e12)
+                l_facs = O12s * O3 * e12**(0.5*(ls-l12)) * (
+                                gamma(max(l12,1))/gamma(np.maximum(ls,1)))**0.5
+            else:
+                fac *= np.exp(-eta12*d**2.)
+                ls = np.arange(0,l12+1)
+                O12s = get_multipole(ls, e12)
+                l_facs = O12s * O3 * abs(get_bincoeff(d,e1,e2,l1,l2))
+
+            def feval(R):
+                I = 0.
+                for l_fac,l in zip(l_facs,ls):
+                    I += l_fac * Gamma(l+l3+0.5,eta2*R**2.) / R**(l+l3+1)
+                return I * fac
+
+        elif FAC_TYPE == "ISF":
+
+            O12 = get_multipole(0, e12)
+            O3 = get_multipole(0, e3)
             fac *= np.exp(-eta12*d**2.)
-            ls = np.arange(0,l12+1)
-            O12s = get_multipole(ls, e12)
-            l_facs = O12s * abs(get_bincoeff(d,e1,e2,l1,l2))
 
-        def feval(R):
-            I = 0.
-            for l_fac,l in zip(l_facs,ls):
-                I += l_fac * Gamma(l+l3+0.5,eta2*R**2.) / R**(l+l3+1)
-            return I * fac
+            def feval(R):
+                return fac * O12 * O3 * Gamma(0.5, eta2*R**2) / R
+
+        elif FAC_TYPE == "ISFL":
+
+            O12 = get_multipole(0, e12)
+            O3 = get_multipole(l3, e3)
+            fac *= np.exp(-eta12*d**2.)
+
+            def feval(R):
+                return fac * O12 * O3 * Gamma(l3+0.5, eta2*R**2) / R**(l3+1)
+
+        elif FAC_TYPE == "ISFQL":
+
+            eta1212 = 0.5 * e12
+            eta1212w = 1/(1/eta1212+1/omega**2.)
+            e12w = 1/(2/e12+1/omega**2.)
+            Q2S = 2*np.pi**0.75/(2*((eta1212)**0.5-eta1212w**0.5))**0.5/(c1*c2)
+            O12 = Q * Q2S
+            O3 = get_multipole(l3, e3)
+
+            def feval(R):
+                return fac * O12 * O3 * Gamma(l3+0.5, eta2*R**2) / R**(l3+1)
+
+        else:
+            raise RuntimeError
 
         return feval
 
@@ -355,7 +395,7 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
         l3 = lks[ksh]
         e3 = eks[ksh]
         c3 = cks[ksh]
-        feval = init_feval(e1,e2,e3,l1,l2,l3,c1,c2,c3, dij)
+        feval = init_feval(e1,e2,e3,l1,l2,l3,c1,c2,c3, dij, Q, FAC_TYPE)
 
         eta2 = 1/(1/(e1+e2)+1/e2+1/omega**2.)
         prec0 = precision * (min(eta2,1.) if eta_correct else 1.)
@@ -364,6 +404,16 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
             I = feval(R)
             return I < prec
         return binary_search(R0, R1, 1, True, fcheck)
+
+# precompute Q if needed
+    Q = 0.
+    if FAC_TYPE == "ISFQL":
+        mol = mol_gto.M(atom="H1 0 0 0; H2 %.10f 0 0" % (dij*BOHR),
+                        basis={"H1":[[l1,(e1,1.)]], "H2":[[l2,(e2,1.)]]})
+        with mol.with_range_coulomb(-abs(omega)):
+            Q = get_norm(
+                    mol.intor("int2e", shls_slice=(0,1,1,2,0,1,1,2))
+                )**0.5
 
 # estimating Rcuts
     Rcuts = np.zeros(nbasaux)
