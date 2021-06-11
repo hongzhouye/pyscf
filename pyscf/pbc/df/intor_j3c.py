@@ -413,9 +413,14 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
         Rcuts[ksh] = estimate1(ksh, R0, R1)
 
     return Rcuts
-def get_schwartz_data(bas_lst, auxbas_lst, dijs_lst, omega):
+def get_schwartz_data(bas_lst, auxbas_lst, dijs_lst, omega, skip=False):
     """ Compute the Schwartz Q integrals for both AO pairs (on a series of dij given by dijs_lst) and aux.
+    If skip, return empty arrays of correct shape.
     """
+    if skip:
+        Qs = [np.zeros_like(dijs) for dijs in dijs_lst]
+        Qauxs = np.zeros(len(auxbas_lst))
+        return Qs, Qauxs
 
     def keep1ctr(bas_lst):
         """ For a shell consists of multiple contracted GTOs, keep only the one with the greatest weight on the most diffuse primitive GTOs (since others are likely core orbitals).
@@ -673,7 +678,9 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
 
     dcuts = get_ovlp_dcut(uniq_bas, precision, r0=cell.rcut)
     dijs_lst = make_dijs_lst(dcuts, dstep/BOHR)
-    Qs_lst, Qauxs = get_schwartz_data(uniq_bas, uniq_basaux, dijs_lst, omega)
+    skipQ = fac_type.upper() != "ISFQL"
+    Qs_lst, Qauxs = get_schwartz_data(uniq_bas, uniq_basaux, dijs_lst, omega,
+                                      skip=skipQ)
     Rcuts = get_3c2e_Rcuts(uniq_bas, uniq_basaux, dijs_lst, omega, precision,
                            fac_type, Qs_lst,
                            eta_correct=eta_correct, R_correct=R_correct)
