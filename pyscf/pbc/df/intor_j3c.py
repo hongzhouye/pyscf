@@ -23,6 +23,76 @@ from pyscf.pbc.df.supmol import (get_refuniq_map, binary_search, get_norm,
 from pyscf.pbc.df.intor_j2c import Gamma, get_multipole, make_supmol_j2c
 
 
+def fintor_sreri(mol, intor, shls_slice, omega, safe):
+    if safe:
+        I = mol.intor(intor, shls_slice=shls_slice)
+        with mol.with_range_coulomb(abs(omega)):
+            I -= mol.intor(intor, shls_slice=shls_slice)
+    else:
+        with mol.with_range_coulomb(-abs(omega)):
+            I = mol.intor(intor, shls_slice=shls_slice)
+    return I
+def get_schwartz_data(bas_lst, omega, dijs_lst=None, keep1ctr=True, safe=True):
+    """
+        if dijs_lst is None:
+            "2c"-mode:  Q = 2-norm[(a|a)]^(1/2)
+        else:
+            "4c"-mode:  Q = 2-norm[(ab|ab)]^(1/2)
+    """
+    def get1ctr(bas_lst):
+        """ For a shell consists of multiple contracted GTOs, keep only the one with the greatest weight on the most diffuse primitive GTOs (since others are likely core orbitals).
+        """
+        bas_lst_new = []
+        for bas in bas_lst:
+            nprim = len(bas) - 1
+            nctr = len(bas[1]) - 1
+            if nprim == 1 or nctr == 1:  # prim shell or ctr shell with 1 cGTO
+                bas_new = bas
+            else:
+                ecs = np.array(bas[1:])
+                es = ecs[:,0]
+                imin = es.argmin()
+                jmax = abs(ecs[imin,1:]).argmax()
+                cs = ecs[:,jmax+1]
+                bas_new = [bas[0]] + [(e,c) for e,c in zip(es,cs)]
+            bas_lst_new.append(bas_new)
+        return bas_lst_new
+    if keep1ctr:
+        bas_lst = get1ctr(bas_lst)
+    if dijs_lst is None:
+        mol = mol_gto.M(atom="H 0 0 0", basis=bas_lst, spin=None)
+        nbas = mol.nbas
+        intor = "int2c2e"
+        Qs = np.zeros(nbas)
+        for k in range(nbas):
+            shls_slice = (k,k+1,k,k+1)
+            I = fintor_sreri(mol, intor, shls_slice, omega, safe)
+            Qs[k] = get_norm( I )**0.5
+    else:
+        def compute1_(mol, dij, intor, shls_slice, omega, safe):
+            mol._env[mol._atm[1,mol_gto.PTR_COORD]] = dij
+            return get_norm(
+                        fintor_sreri(mol, intor, shls_slice, omega, safe)
+                    )**0.5
+        mol = mol_gto.M(atom="H 0 0 0; H 0 0 0", basis=bas_lst, spin=None)
+        nbas = mol.nbas//2
+        n2 = nbas*(nbas+1)//2
+        if len(dijs_lst) != n2:
+            raise RuntimeError("dijs_lst has wrong len (expecting %d; got %d)" % (n2, len(dijs_lst)))
+        intor = "int2e"
+        Qs = [None] * n2
+        ij = 0
+        for i in range(nbas):
+            for j in range(i+1):
+                j_ = j + nbas
+                shls_slice = (i,i+1,j_,j_+1,i,i+1,j_,j_+1)
+                dijs = dijs_lst[ij]
+                Qs[ij] = [compute1_(mol, dij, intor, shls_slice, omega, safe)
+                          for dij in dijs]
+                ij += 1
+
+    return Qs
+
 def get_ovlp_dcut(bas_lst, precision, r0=None):
     """ Given a list of basis, determine cutoff radius for the ovlp between each unique shell pair to drop below "precision".
 
@@ -33,12 +103,54 @@ def get_ovlp_dcut(bas_lst, precision, r0=None):
     nbas = len(bas_lst)
     n2 = nbas*(nbas+1)//2
 
+    es = np.array([mol.bas_exp(i).min() for i in range(nbas)])
+    etas = 1/(1/es[:,None] + 1/es)
+
     def estimate1(ish,jsh,R0,R1):
         shls_slice = (ish,ish+1,nbas+jsh,nbas+jsh+1)
-        prec = precision
+        prec0 = precision * min(etas[ish,jsh],1.)
         def fcheck(R):
             mol._env[mol._atm[1,mol_gto.PTR_COORD]] = R
             I = get_norm( mol.intor("int1e_ovlp", shls_slice=shls_slice) )
+            prec = prec0 * min(1./R,1.)
+            return I < prec
+        return binary_search(R0, R1, 1, True, fcheck)
+
+    if r0 is None: r0 = 30
+    R0 = r0 * 0.3
+    R1 = r0
+    dcuts = np.zeros(n2)
+    ij = 0
+    for i in range(nbas):
+        for j in range(i+1):
+            dcuts[ij] = estimate1(i,j,R0, R1)
+            ij += 1
+    return dcuts
+def get_schwartz_dcut(bas_lst, omega, precision, r0=None, safe=True):
+    """ Given a list of basis, determine cutoff radius for the Schwartz Q between each unique shell pair to drop below "precision". The Schwartz Q is define:
+        Q = 2-norm[ (ab|ab) ]^(1/2)
+
+    Return:
+        1d array of length nbas*(nbas+1)//2 with nbas=len(bas_lst).
+    """
+    mol = mol_gto.M(atom="H 0 0 0; H 0 0 0", basis=bas_lst)
+    nbas = len(bas_lst)
+    n2 = nbas*(nbas+1)//2
+
+    es = np.array([mol.bas_exp(i).min() for i in range(nbas)])
+    etas = 1/(1/es[:,None] + 1/es)
+
+    intor = "int2e"
+    def estimate1(ish,jsh,R0,R1):
+        shls_slice = (ish,ish+1,nbas+jsh,nbas+jsh+1,
+                      ish,ish+1,nbas+jsh,nbas+jsh+1)
+        prec0 = precision * min(etas[ish,jsh],1.)
+        def fcheck(R):
+            mol._env[mol._atm[1,mol_gto.PTR_COORD]] = R
+            I = get_norm(
+                    fintor_sreri(mol, intor, shls_slice, omega, safe)
+                )**0.5
+            prec = prec0 * min(1./R,1.)
             return I < prec
         return binary_search(R0, R1, 1, True, fcheck)
 
@@ -413,75 +525,6 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
         Rcuts[ksh] = estimate1(ksh, R0, R1)
 
     return Rcuts
-def get_schwartz_data(bas_lst, auxbas_lst, dijs_lst, omega, skip=False):
-    """ Compute the Schwartz Q integrals for both AO pairs (on a series of dij given by dijs_lst) and aux.
-    If skip, return empty arrays of correct shape.
-    """
-    if skip:
-        Qs = [np.zeros_like(dijs) for dijs in dijs_lst]
-        Qauxs = np.zeros(len(auxbas_lst))
-        return Qs, Qauxs
-
-    def keep1ctr(bas_lst):
-        """ For a shell consists of multiple contracted GTOs, keep only the one with the greatest weight on the most diffuse primitive GTOs (since others are likely core orbitals).
-        """
-        bas_lst_new = []
-        for bas in bas_lst:
-            nprim = len(bas) - 1
-            nctr = len(bas[1]) - 1
-            if nprim == 1 or nctr == 1:  # prim shell or ctr shell with 1 cGTO
-                bas_new = bas
-            else:
-                ecs = np.array(bas[1:])
-                es = ecs[:,0]
-                imin = es.argmin()
-                jmax = abs(ecs[imin,1:]).argmax()
-                cs = ecs[:,jmax+1]
-                bas_new = [bas[0]] + [(e,c) for e,c in zip(es,cs)]
-            bas_lst_new.append(bas_new)
-        return bas_lst_new
-    bas_lst1ctr = keep1ctr(bas_lst)
-
-    nbas = len(bas_lst1ctr)
-    n2 = nbas*(nbas+1)//2
-    nbasaux = len(auxbas_lst)
-
-    mol = mol_gto.M(atom="H 0 0 0; H 0 0 0", basis=bas_lst1ctr, spin=None)
-    auxmol = mol_gto.M(atom="H 0 0 0", basis=auxbas_lst, spin=None)
-
-# for AO
-    def compute1_(mol, d, intor, shls_slice, omega):
-        ptr = mol._atm[1,mol_gto.PTR_COORD]
-        mol._env[ptr] = d
-        I = mol.intor(intor, shls_slice=shls_slice)
-        with mol.with_range_coulomb(abs(omega)):
-            I -= mol.intor(intor, shls_slice=shls_slice)
-        Q = get_norm( I )**0.5
-        return Q
-
-    ij = 0
-    Qs = [None] * n2
-    intor = "int2e"
-    for i in range(nbas):
-        for j in range(i+1):
-            j_ = j + nbas
-            shls_slice = (i,i+1,j_,j_+1,i,i+1,j_,j_+1)
-            dijs = dijs_lst[ij]
-            Qs[ij] = [compute1_(mol, dij, intor, shls_slice, omega)
-                      for idij,dij in enumerate(dijs)]
-            ij += 1
-
-# for aux
-    intor = "int2c2e"
-    Qauxs = np.zeros(nbasaux)
-    for k in range(nbasaux):
-        shls_slice = (k,k+1,k,k+1)
-        I = auxmol.intor(intor, shls_slice=shls_slice)
-        with auxmol.with_range_coulomb(abs(omega)):
-            I -= auxmol.intor(intor, shls_slice=shls_slice)
-        Qauxs[k] = get_norm( I )
-
-    return Qs, Qauxs
 def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, omega, precision, fac_type,
                    Qijs_lst, eta_correct=True, R_correct=True):
     """ Given a list of basis ("bas_lst") and auxiliary basis ("auxbas_lst"), determine the cutoff radius for
@@ -654,7 +697,7 @@ def get_shlpr_data(cell, supmol, dcuts, dijs_lst, refuniqshl_map,
     return refshlprd_loc, refshlprdinv_lst, supshlpr_lst, supshlpr_loc
 
 def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
-              precision=None, use_cintopt=True, safe=True, fac_type="MPE3",
+              precision=None, use_cintopt=True, safe=True, fac_type="ISFQL",
 # +++++++ Use the default for the following unless you know what you are doing
               eta_correct=True, R_correct=True,
               dstep=1,  # unit: Angstrom
@@ -676,11 +719,17 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
                                                         get_refuniq_map(auxcell)
     nbasauxuniq = len(uniq_basaux)
 
-    dcuts = get_ovlp_dcut(uniq_bas, precision, r0=cell.rcut)
+    # dcuts = get_ovlp_dcut(uniq_bas, precision, r0=cell.rcut)
+    Qauxs = get_schwartz_data(uniq_basaux, omega, keep1ctr=False, safe=True)
+    dcuts = get_schwartz_dcut(uniq_bas, omega, precision/Qauxs.max(),
+                              r0=cell.rcut)
     dijs_lst = make_dijs_lst(dcuts, dstep/BOHR)
     skipQ = fac_type.upper() != "ISFQL"
-    Qs_lst, Qauxs = get_schwartz_data(uniq_bas, uniq_basaux, dijs_lst, omega,
-                                      skip=skipQ)
+    if fac_type.upper() == "ISFQL":
+        Qs_lst = get_schwartz_data(uniq_bas, omega, dijs_lst, keep1ctr=True,
+                                   safe=True)
+    else:
+        Qs_lst = [np.zeros_like(dijs) for dijs in dijs_lst]
     Rcuts = get_3c2e_Rcuts(uniq_bas, uniq_basaux, dijs_lst, omega, precision,
                            fac_type, Qs_lst,
                            eta_correct=eta_correct, R_correct=R_correct)
