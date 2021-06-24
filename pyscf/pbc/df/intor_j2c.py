@@ -22,11 +22,12 @@ def Gamma(s, x):
     return gammaincc(s,x) * gamma(s)
 def get_multipole(l, alp):
     return 0.5*np.pi * (2*l+1)**0.5 / alp**(l+1.5)
-def get_2c2e_Rcut(bas_lst, omega, precision, eta_correct=True, R_correct=False):
+def get_2c2e_Rcut(bas_lst, omega, precision, lmp=True, lasympt=True,
+                  eta_correct=True, R_correct=False):
     """ Given a list of pgto by "bas_lst", determine the cutoff radii for j2c lat sum s.t. the truncation error drops below "precision". j2c is estimated as
 
-        j12(R) ~ C1*C2/4 * (pi/(a1*a2))^1.5 * gamma_l1*gamma_l2/(a1^l1*a2^l2) *
-                    Gamma(l12+1/2, eta*R^2) / R^(l12+1)
+        j12(R) ~ C1*C2 * O1 * O2 * Gamma(l12+0.5, eta*Rc^2) /
+                    (pi^0.5 * Rc^(l12+1))
 
     where l12 = l1+l2, eta = 1/(1/a1+1/a2+1/omega^2). The error introduced by truncating at Rc is
 
@@ -35,6 +36,33 @@ def get_2c2e_Rcut(bas_lst, omega, precision, eta_correct=True, R_correct=False):
             ~ j2c(Rc) * Rc / eta
 
     Arguments "eta_correct" and "R_correct" control whether the corresponding correction is applied.
+
+    Args:
+        bas_lst:
+            A list of basis where the cutoff is estimated for all pairs.
+            Example: [[0,(0.5,1.)], [1,(10.2,-0.02),(1.7,0.5),(0.3,0.37)]]
+        omega (float):
+            Range-separation parameter (only the absolute value matters).
+        precision (float):
+            Desired precision, e.g., 1e-8.
+        lmp & lasympt (bool, default: both True):
+            The final estimator is
+                j2c ~ fmp * fasympt
+            where
+                =========================================================
+                | lmp     | fmp                                         |
+                ---------------------------------------------------------
+                | True    | O1(l1) * O2(l2)                             |
+                | False   | O1(0) * O2(0)                               |
+                ---------------------------------------------------------
+                | lasympt | fasympt                                     |
+                | True    | Gamma(l12+0.5,eta*R^2) / (pi^0.5*R^(l12+1)) |
+                | False   | erfc(eta^0.5*R) / R                         |
+                =========================================================
+        eta_correct & R_correct (bool, default: True & False):
+            if eta_correct : j2c *= max(1,1/eta)
+            if R_correct   : j2c *= min(1,R)
+            Apparently, both "corrections" will make the estimate larger, which is equivalent to using a smaller "precision" (i.e., tighter thresh).
     """
     nbas = len(bas_lst)
     n2 = nbas*(nbas+1)//2
@@ -46,8 +74,14 @@ def get_2c2e_Rcut(bas_lst, omega, precision, eta_correct=True, R_correct=False):
         idx = np.where(ls==l)[0]
         cs[idx] = mol_gto.gto_norm(l, es[idx])
     etas = lib.pack_tril( 1/((1/es)[:,None]+1/es+1/omega**2.) )
-    Ls = lib.pack_tril( ls[:,None]+ls )
-    Os = get_multipole(ls, es)
+    if lmp: # use real multipoles
+        Os = get_multipole(ls, es)
+    else:   # use charges
+        Os = get_multipole(np.zeros_like(ls), es)
+    if lasympt: # invoke angl dependence in R
+        Ls = lib.pack_tril( ls[:,None]+ls )
+    else:       # use (s|s) formula
+        Ls = np.zeros_like(etas).astype(int)
     Os *= cs
     facs = lib.pack_tril(Os[:,None] * Os) / np.pi**0.5
 
@@ -91,6 +125,7 @@ def make_supmol_j2c(cell, atom_Rcuts, uniq_atms):
 def intor_j2c(cell, omega, kpts=np.zeros((1,3)), precision=None,
               use_cintopt=True, safe=True,
 # +++++++ Use the default for the following unless you know what you are doing
+              lmp=True, lasympt=True,
               eta_correct=True, R_correct=False,
 # -------
 # +++++++ debug options
@@ -104,7 +139,7 @@ def intor_j2c(cell, omega, kpts=np.zeros((1,3)), precision=None,
     if precision is None: precision = cell.precision
 
     refuniqshl_map, uniq_atms, uniq_bas, uniq_bas_loc = get_refuniq_map(cell)
-    Rcuts = get_2c2e_Rcut(uniq_bas, omega, precision,
+    Rcuts = get_2c2e_Rcut(uniq_bas, omega, precision, lmp=lmp, lasympt=lasympt,
                           eta_correct=eta_correct, R_correct=R_correct)
     atom_Rcuts = get_atom_Rcuts(Rcuts, uniq_bas_loc)
     supmol = make_supmol_j2c(cell, atom_Rcuts, uniq_atms)
