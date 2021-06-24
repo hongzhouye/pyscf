@@ -95,6 +95,7 @@ def intor_j2c(cell, omega, kpts=np.zeros((1,3)), precision=None,
 # -------
 # +++++++ debug options
               ret_timing=False,
+              no_screening=False,   # set Rcuts to effectively infinity
 # -------
               ):
 
@@ -135,6 +136,10 @@ def intor_j2c(cell, omega, kpts=np.zeros((1,3)), precision=None,
     kpts = np.asarray(kpts).reshape(-1,3)
     if gamma_point(kpts):
         drv = libpbc.fill_sr2c2e_g
+# >>>>> debug block
+        if no_screening:
+            Rcuts = np.clip(Rcuts, 1e20, None)
+# <<<<<
         def fill_j2c(out):
             drv(getattr(libpbc, intor),
                 out.ctypes.data_as(ctypes.c_void_p),
@@ -166,6 +171,10 @@ def intor_j2c(cell, omega, kpts=np.zeros((1,3)), precision=None,
         nkpts = len(kpts)
         expLk = np.exp(1j * lib.dot(supmol._Ls, kpts.T))
         drv = libpbc.fill_sr2c2e_k
+# >>>>> debug block
+        if no_screening:
+            Rcuts = np.clip(Rcuts, 1e20, None)
+# <<<<<
         def fill_j2c(out):
             drv(getattr(libpbc, intor),
                 out.ctypes.data_as(ctypes.c_void_p),
