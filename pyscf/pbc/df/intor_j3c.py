@@ -126,7 +126,7 @@ def get_ovlp_dcut(bas_lst, precision, r0=None):
             dcuts[ij] = estimate1(i,j,R0, R1)
             ij += 1
     return dcuts
-def get_schwartz_dcut(bas_lst, omega, precision, r0=None, safe=True):
+def get_schwartz_dcut(bas_lst, cellvol, omega, precision, r0=None, safe=True):
     """ Given a list of basis, determine cutoff radius for the Schwartz Q between each unique shell pair to drop below "precision". The Schwartz Q is define:
         Q = 2-norm[ (ab|ab) ]^(1/2)
 
@@ -139,6 +139,9 @@ def get_schwartz_dcut(bas_lst, omega, precision, r0=None, safe=True):
 
     es = np.array([mol.bas_exp(i).min() for i in range(nbas)])
     etas = 1/(1/es[:,None] + 1/es)
+# >>>>>>> debug block
+    fac = 2*np.pi/cellvol
+# <<<<<<<
 
     intor = "int2e"
     def estimate1(ish,jsh,R0,R1):
@@ -150,6 +153,9 @@ def get_schwartz_dcut(bas_lst, omega, precision, r0=None, safe=True):
             I = get_norm(
                     fintor_sreri(mol, intor, shls_slice, omega, safe)
                 )**0.5
+# >>>>>>> debug block
+            I *= fac
+# <<<<<<<
             prec = prec0 * min(1./R,1.)
             return I < prec
         return binary_search(R0, R1, 1, True, fcheck)
@@ -183,8 +189,8 @@ def get_bincoeff(d,e1,e2,l1,l2):
             cl += d1**(l1-l1p)*d2**(l2-l2p) * comb(l1,l1p) * comb(l2,l2p)
         cbins[l] = cl
     return cbins
-def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
-                         Qij, eta_correct=True, R_correct=True):
+def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, cellvol, omega, precision,
+                         fac_type, Qij, eta_correct=True, R_correct=True):
     """ Determine for AO shlpr (ish,jsh) separated by dij, the cutoff radius for
             2-norm( (ksh|v_SR(omega)|ish,jsh) ) < precision
         The estimator used here is
@@ -256,6 +262,9 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
         eta12 = 1/(1/e1+1/e2)
 
         fac = c1*c2*c3 * 0.5/np.pi
+# >>>>>>>> debug block
+        fac *= 2*np.pi/cellvol
+# <<<<<<<<
 
         if FAC_TYPE == "MPEL":
 
@@ -335,8 +344,8 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, omega, precision, fac_type,
         Rcuts[ksh] = estimate1(ksh, R0, R1)
 
     return Rcuts
-def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, omega, precision, fac_type,
-                   Qijs_lst, eta_correct=True, R_correct=True):
+def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, cellvol, omega, precision,
+                   fac_type, Qijs_lst, eta_correct=True, R_correct=True):
     """ Given a list of basis ("bas_lst") and auxiliary basis ("auxbas_lst"), determine the cutoff radius for
         2-norm( (k|v_SR(omega)|ij) ) < precision
     where i and j shls are separated by d specified by "dijs_lst".
@@ -357,8 +366,8 @@ def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, omega, precision, fac_type,
             Qijs = Qijs_lst[ij]
             for dij,Qij in zip(dijs,Qijs):
                 Rcuts_dij = get_3c2e_Rcuts_for_d(mol, auxmol, i, j, dij,
-                                                 omega, precision, fac_type,
-                                                 Qij,
+                                                 cellvol, omega, precision,
+                                                 fac_type, Qij,
                                                  eta_correct=eta_correct,
                                                  R_correct=R_correct)
                 Rcuts.append(Rcuts_dij)
@@ -531,7 +540,7 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
 
     # dcuts = get_ovlp_dcut(uniq_bas, precision, r0=cell.rcut)
     Qauxs = get_schwartz_data(uniq_basaux, omega, keep1ctr=False, safe=True)
-    dcuts = get_schwartz_dcut(uniq_bas, omega, precision/Qauxs.max(),
+    dcuts = get_schwartz_dcut(uniq_bas, cell.vol, omega, precision/Qauxs.max(),
                               r0=cell.rcut)
     dijs_lst = make_dijs_lst(dcuts, dstep/BOHR)
     if fac_type.upper() == "ISFQL":
@@ -539,8 +548,8 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
                                    safe=True)
     else:
         Qs_lst = [np.zeros_like(dijs) for dijs in dijs_lst]
-    Rcuts = get_3c2e_Rcuts(uniq_bas, uniq_basaux, dijs_lst, omega, precision,
-                           fac_type, Qs_lst,
+    Rcuts = get_3c2e_Rcuts(uniq_bas, uniq_basaux, dijs_lst, cell.vol, omega,
+                           precision, fac_type, Qs_lst,
                            eta_correct=eta_correct, R_correct=R_correct)
     Rcut2s = Rcuts**2.
     bas_exps = np.array([np.asarray(b[1:])[:,0].min() for b in uniq_bas])
