@@ -23,7 +23,7 @@ def Gamma(s, x):
 def get_multipole(l, alp):
     return 0.5*np.pi * (2*l+1)**0.5 / alp**(l+1.5)
 def get_2c2e_Rcut(bas_lst, cellvol, omega, precision, lmp=True, lasympt=True,
-                  eta_correct=True, R_correct=False):
+                  eta_correct=True, R_correct=False, vol_correct=False):
     """ Given a list of pgto by "bas_lst", determine the cutoff radii for j2c lat sum s.t. the truncation error drops below "precision". j2c is estimated as
 
         j12(R) ~ C1*C2 * O1 * O2 * Gamma(l12+0.5, eta*Rc^2) /
@@ -87,7 +87,8 @@ def get_2c2e_Rcut(bas_lst, cellvol, omega, precision, lmp=True, lasympt=True,
     Os *= cs
     facs = lib.pack_tril(Os[:,None] * Os) / np.pi**0.5
 # >>>>>>> debug block
-    facs *= 2*np.pi / cellvol
+    if vol_correct:
+        facs *= 2*np.pi / cellvol
 # <<<<<<<
 
     def estimate1(ij, R0,R1):
@@ -131,7 +132,7 @@ def intor_j2c(cell, omega, kpts=np.zeros((1,3)), precision=None,
               use_cintopt=True, safe=True,
 # +++++++ Use the default for the following unless you know what you are doing
               lmp=True, lasympt=True,
-              eta_correct=True, R_correct=False,
+              eta_correct=True, R_correct=False, vol_correct=False,
 # -------
 # +++++++ debug options
               ret_timing=False,
@@ -146,7 +147,8 @@ def intor_j2c(cell, omega, kpts=np.zeros((1,3)), precision=None,
     refuniqshl_map, uniq_atms, uniq_bas, uniq_bas_loc = get_refuniq_map(cell)
     Rcuts = get_2c2e_Rcut(uniq_bas, cell.vol, omega, precision,
                           lmp=lmp, lasympt=lasympt,
-                          eta_correct=eta_correct, R_correct=R_correct)
+                          eta_correct=eta_correct, R_correct=R_correct,
+                          vol_correct=vol_correct)
     atom_Rcuts = get_atom_Rcuts(Rcuts, uniq_bas_loc)
     supmol = make_supmol_j2c(cell, atom_Rcuts, uniq_atms)
 
