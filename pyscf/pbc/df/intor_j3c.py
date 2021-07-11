@@ -194,7 +194,7 @@ def get_bincoeff(d,e1,e2,l1,l2):
         cbins[l] = cl
     return cbins
 def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, cellvol, omega, precision,
-                         fac_type, Qij,
+                         fac_type, Qij, Rprec=1,
                          vol_correct=False, eta_correct=True, R_correct=True):
     """ Determine for AO shlpr (ish,jsh) separated by dij, the cutoff radius for
             2-norm( (ksh|v_SR(omega)|ish,jsh) ) < precision
@@ -340,7 +340,7 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, cellvol, omega, precision,
             prec = prec0 * (min(1./R,1.) if R_correct else 1.)
             I = feval(R)
             return I < prec
-        return binary_search(R0, R1, 1, True, fcheck)
+        return binary_search(R0, R1, Rprec, True, fcheck)
 
 # estimating Rcuts
     Rcuts = np.zeros(nbasaux)
@@ -351,7 +351,7 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, cellvol, omega, precision,
 
     return Rcuts
 def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, cellvol, omega, precision,
-                   fac_type, Qijs_lst,
+                   fac_type, Qijs_lst, Rprec=1,
                    eta_correct=True, R_correct=True, vol_correct=False):
     """ Given a list of basis ("bas_lst") and auxiliary basis ("auxbas_lst"), determine the cutoff radius for
         2-norm( (k|v_SR(omega)|ij) ) < precision
@@ -375,6 +375,7 @@ def get_3c2e_Rcuts(bas_lst, auxbas_lst, dijs_lst, cellvol, omega, precision,
                 Rcuts_dij = get_3c2e_Rcuts_for_d(mol, auxmol, i, j, dij,
                                                  cellvol, omega, precision,
                                                  fac_type, Qij,
+                                                 Rprec=Rprec,
                                                  eta_correct=eta_correct,
                                                  R_correct=R_correct,
                                                  vol_correct=vol_correct)

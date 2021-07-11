@@ -22,7 +22,8 @@ def Gamma(s, x):
     return gammaincc(s,x) * gamma(s)
 def get_multipole(l, alp):
     return 0.5*np.pi * (2*l+1)**0.5 / alp**(l+1.5)
-def get_2c2e_Rcut(bas_lst, cellvol, omega, precision, lmp=True, lasympt=True,
+def get_2c2e_Rcut(bas_lst, cellvol, omega, precision, Rprec=1.,
+                  lmp=True, lasympt=True,
                   eta_correct=True, R_correct=False, vol_correct=False):
     """ Given a list of pgto by "bas_lst", determine the cutoff radii for j2c lat sum s.t. the truncation error drops below "precision". j2c is estimated as
 
@@ -47,6 +48,8 @@ def get_2c2e_Rcut(bas_lst, cellvol, omega, precision, lmp=True, lasympt=True,
             Range-separation parameter (only the absolute value matters).
         precision (float):
             Desired precision, e.g., 1e-8.
+        Rprec (float):
+            The precision for which the cutoff eqn is solved (default: 1 BOHR).
         lmp & lasympt (bool, default: both True):
             The final estimator is
                 j2c ~ fmp * fasympt
@@ -100,7 +103,7 @@ def get_2c2e_Rcut(bas_lst, cellvol, omega, precision, lmp=True, lasympt=True,
             prec = prec0 * (min(1./R,1.) if R_correct else 1.)
             I = fac * Gamma(l+0.5, eta*R**2.) / R**(l+1)
             return I < prec
-        return binary_search(R0, R1, 1, True, fcheck)
+        return binary_search(R0, R1, Rprec, True, fcheck)
 
     R0 = 5
     R1 = 20
