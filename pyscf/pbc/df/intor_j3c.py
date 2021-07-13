@@ -238,7 +238,7 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, cellvol, omega, precision,
     """
 # sanity check for estimators
     FAC_TYPE = fac_type.upper()
-    if not FAC_TYPE in ["MPEL", "ISF", "ISFL", "ISFQL"]:
+    if not FAC_TYPE in ["MPEL", "ISF", "ISFL", "ISFQL", "ISFQLMAX"]:
         raise RuntimeError("Unknown estimator requested {}".format(fac_type))
 
 # get bas info
@@ -271,7 +271,6 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, cellvol, omega, precision,
         if vol_correct:
             fac *= 2*np.pi/cellvol
 # <<<<<<<<
-
         if FAC_TYPE == "MPEL":
 
             O3 = get_multipole(l3, e3)
@@ -311,17 +310,54 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, cellvol, omega, precision,
             def feval(R):
                 return fac * O12 * O3 * Gamma(l3+0.5, eta2*R**2) / R**(l3+1)
 
-        elif FAC_TYPE == "ISFQL":
+        elif FAC_TYPE in ["ISFQL","ISFQLMAX"]:
+
+            # eta1212 = 0.5 * e12
+            # eta1212w = 1/(1/eta1212+1/omega**2.)
+            #
+            # if FAC_TYPE == "ISFQL":
+            #     L12 = 0
+            # else:
+            #     l12min = abs(l1-l2) if d<1e-3 else 0
+            #     ls = np.arange(l12min,l12+1)
+            #     xasympt = 3
+            #     Rasympt = eta2**-0.5 * xasympt
+            #     l_facs = (eta1212**(ls+0.5) - eta1212w**(ls+0.5))**-0.5 * \
+            #                 Gamma(ls+l3+0.5, xasympt**2.) / Rasympt**(ls+l3+1)
+            #     L12 = ls[l_facs.argmax()]
+            #
+            # e12w = 1/(2/e12+1/omega**2.)
+            # Q2S = 2*np.pi**0.75/(2*((eta1212)**(L12+0.5)-eta1212w**(L12+0.5)))**0.5/(c1*c2)
+            # O12 = Q * Q2S
+            # O3 = get_multipole(l3, e3)
+            #
+            # def feval(R):
+            #     return fac * O12 * O3 * Gamma(L12+l3+0.5, eta2*R**2) / R**(L12+l3+1)
 
             eta1212 = 0.5 * e12
             eta1212w = 1/(1/eta1212+1/omega**2.)
-            e12w = 1/(2/e12+1/omega**2.)
-            Q2S = 2*np.pi**0.75/(2*((eta1212)**0.5-eta1212w**0.5))**0.5/(c1*c2)
-            O12 = Q * Q2S
+
             O3 = get_multipole(l3, e3)
 
             def feval(R):
-                return fac * O12 * O3 * Gamma(l3+0.5, eta2*R**2) / R**(l3+1)
+
+                if FAC_TYPE == "ISFQL":
+                    L12 = 0
+                    Q2S = 2*np.pi**0.75/(2*(eta1212**0.5-eta1212w**0.5))**0.5/(c1*c2)
+                    O12 = Q * Q2S
+                    veff = Gamma(L12+l3+0.5, eta2*R**2) / R**(L12+l3+1)
+                else:
+                    l12min = abs(l1-l2) if d<1e-3 else 0
+                    ls = np.arange(l12min,l12+1)
+                    l_facs = (eta1212**(ls+0.5) - eta1212w**(ls+0.5))**-0.5
+                    veffs = Gamma(ls+l3+0.5, eta2*R**2.) / R**(ls+l3+1)
+                    ilmax = (l_facs*veffs).argmax()
+                    l_fac = l_facs[ilmax]
+                    veff = veffs[ilmax]
+                    Q2S = 2**0.5*np.pi**0.75/(c1*c2) * l_fac
+                    O12 = Q * Q2S
+
+                return fac * O12 * O3 * veff
 
         else:
             raise RuntimeError
@@ -553,7 +589,7 @@ def intor_j3c(cell, auxcell, omega, kptijs=np.zeros((1,2,3)),
     dcuts = get_schwartz_dcut(uniq_bas, cell.vol, omega, precision/Qauxs.max(),
                               r0=cell.rcut, vol_correct=vol_correct_d)
     dijs_lst = make_dijs_lst(dcuts, dstep/BOHR)
-    if fac_type.upper() == "ISFQL":
+    if fac_type.upper() in ["ISFQL","ISFQLMAX"]:
         Qs_lst = get_schwartz_data(uniq_bas, omega, dijs_lst, keep1ctr=True,
                                    safe=True)
     else:
