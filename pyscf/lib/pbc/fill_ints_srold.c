@@ -34,9 +34,20 @@
 int GTOmax_shell_dim(int *ao_loc, int *shls_slice, int ncenter);
 int GTOmax_cache_size(int (*intor)(), int *shls_slice, int ncenter,
                       int *atm, int natm, int *bas, int nbas, double *env);
-double get_dsqure(double *, double *);
-void get_rc(double *, double *, double *, double, double);
-size_t max_shlsize(int *, int);
+
+static double get_dsqure(double *ri, double *rj)
+{
+    double dx = ri[0]-rj[0];
+    double dy = ri[1]-rj[1];
+    double dz = ri[2]-rj[2];
+    return dx*dx+dy*dy+dz*dz;
+}
+static void get_rc(double *rc, double *ri, double *rj, double ei, double ej) {
+    double eij = ei+ej;
+    rc[0] = (ri[0]*ei + rj[0]*ej) / eij;
+    rc[1] = (ri[1]*ei + rj[1]*ej) / eij;
+    rc[2] = (ri[2]*ei + rj[2]*ej) / eij;
+}
 
 static int shloc_partition(int *kshloc, int *ao_loc, int ksh0, int ksh1, int dkmax)
 {
