@@ -47,7 +47,6 @@ import numpy as np
 from pyscf import gto as mol_gto
 from pyscf.gto.mole import PTR_RANGE_OMEGA
 from pyscf.pbc import df
-from pyscf.pbc.df import intor_j2c
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.df import rsdf_helper
 from pyscf.df.outcore import _guess_shell_ranges
@@ -217,7 +216,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 # compute j2c first as it informs the integral screening in computing j3c
     # short-range part of j2c ~ (-kpt_ji | kpt_ji)
     omega_j2c = abs(mydf.omega_j2c)
-    j2c = intor_j2c.intor_j2c(auxcell, omega_j2c, kpts=uniq_kpts)
+    j2c = rsdf_helper.intor_j2c(auxcell, omega_j2c, kpts=uniq_kpts)
 
     # Add (1) short-range G=0 (i.e., charge) part and (2) long-range part
     qaux2 = None
@@ -328,6 +327,7 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     with mydf.with_range_coulomb(-omega):
         if split_basis:
+            raise NotImplementedError
             rsdf_helper._aux_e2_spltbas(
                             cell, cell_fat, auxcell, omega, fswap, 'int3c2e',
                             aosym='s2',
@@ -1060,9 +1060,10 @@ if __name__ == "__main__":
 
     e_tot_ref = {1: -74.9739440120803, 2: -75.6947381701805, 3: -75.7572498388948}
     # for nk in [1,3]:
-    # for nk in [3]:
-    # for nk in [2]:
     for nk in [1]:
+    # for nk in [2]:
+    # for nk in [3]:
+    # for nk in [4]:
         kmesh = (nk,)*3
         kpts = cell.make_kpts(kmesh)
         # kpts = np.array([[0.3725, 0.21, 0.05], [0.98, 0.4, 0.32]])
@@ -1070,16 +1071,14 @@ if __name__ == "__main__":
 
         from pyscf.pbc import scf
         mydf = RSDF(cell, kpts)
-        mydf.omega = 0.9
-        mydf.split_basis = False
-        mydf.split_auxbasis = False
+        mydf.npw_max = 350
         mydf.build()
         mf = scf.KRHF(cell, kpts=kpts)
         mf.with_df = mydf
         mf.kernel()
 
-        # mf2 = scf.KRHF(cell, kpts=kpts).density_fit()
-        # mf2.kernel()
-        # print(mf.e_tot, mf2.e_tot)
+        mf2 = scf.KRHF(cell, kpts=kpts).density_fit()
+        mf2.kernel()
+        print(mf.e_tot, mf2.e_tot)
 
         assert(abs(mf.e_tot - e_tot_ref[nk]) < 1e-6)

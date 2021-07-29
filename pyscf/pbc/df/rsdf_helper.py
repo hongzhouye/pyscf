@@ -26,6 +26,8 @@ import scipy.special
 
 from pyscf import gto as mol_gto
 from pyscf.pbc import df
+from pyscf.pbc.df.intor_j2c import binary_search
+from pyscf.pbc.df.intor_j2c import get_2c2e_Rcut, get_atom_Rcuts_2c
 from pyscf.pbc.df.intor_j3c import (get_refuniq_map, get_schwartz_data,
                                     get_schwartz_dcut, make_dijs_lst,
                                     get_3c2e_Rcuts, get_atom_Rcuts_3c,
@@ -42,47 +44,6 @@ from pyscf.lib.parameters import BOHR
 libpbc = lib.load_library('libpbc')
 
 
-""" General purpose helper functions
-"""
-def _binary_search(func, xlo, xhi, f0, xprec, args=None, verbose=0):
-    """ For a monotonically decreasing 'func', Search for smallest x s.t. func(x) < f0. The search is stopped when xhi - xlo < xprec, and return xhi.
-    """
-    log = logger.Logger(sys.stdout, verbose)
-
-    if args is None:
-        f = lambda x: func(x)
-    else:
-        f = lambda x: func(x, *args)
-
-    lo = f(xlo)
-    hi = f(xhi)
-
-    if lo < f0:
-        return xlo, lo
-
-    count = 0
-    while hi > f0:
-        if count > 5:
-            raise RuntimeError("Couldn't find a valid xhi such that hi>f0.")
-        xhi *= 1.5
-        hi = f(xhi)
-        count += 1
-
-    while True:
-        log.debug2("%.10f  %.10f  %.3e  %.3e" % (xlo, xhi, lo, hi))
-        if xhi - xlo < xprec:
-            return xhi, hi
-
-        xmi = 0.5 * (xhi + xlo)
-        mi = f(xmi)
-
-        if mi > f0:
-            lo = mi
-            xlo = xmi
-        else:
-            hi = mi
-            xhi = xmi
-
 """ Helper functions for determining omega/mesh and basis splitting
 """
 def estimate_ke_cutoff_for_omega_kpt_corrected(cell, omega, precision, kmax):
@@ -98,22 +59,19 @@ def estimate_omega_for_npw(cell, npw_max, precision=None, kmax=0,
     if precision is None: precision = cell.precision
     # TODO: add extra precision for small omega ~ 2*omega / np.pi**0.5
     latvecs = cell.lattice_vectors()
-    def invomega2all(invomega):
-        omega = 1./invomega
+
+    def omega2all(omega):
         ke_cutoff = estimate_ke_cutoff_for_omega_kpt_corrected(cell, omega,
                                                                precision, kmax)
         mesh = pbctools.cutoff_to_mesh(latvecs, ke_cutoff)
         if round2odd:
             mesh = df.df._round_off_to_odd_mesh(mesh)
-        return omega, ke_cutoff, mesh
-
-    def invomega2meshsize(invomega):
-        return np.prod(invomega2all(invomega)[2])
-
-    invomega_rg = 1. / np.asarray([2,0.05])
-    invomega, npw = _binary_search(invomega2meshsize, *invomega_rg, npw_max,
-                                   0.1, verbose=cell.verbose)
-    omega, ke_cutoff, mesh = invomega2all(invomega)
+        return ke_cutoff, mesh
+    def fcheck(omega):
+        return np.prod(omega2all(omega)[1]) > npw_max
+    omega_rg = np.asarray([0.05,2])
+    omega = binary_search(*omega_rg, 0.02, False, fcheck)
+    ke_cutoff, mesh = omega2all(omega)
 
     return omega, ke_cutoff, mesh
 
@@ -268,760 +226,111 @@ def _reorder_cell(cell, eta_smooth, npw_max=None, precision=None,
 
     return cell_fat
 
-""" Helper functions for determining bounds for Rc & R12
+""" short-range j2c via screened lattice sum
 """
-def _normalize2s(es, q0=None):
-    if q0 is None: q0 = (4*np.pi)**-0.5 # half_sph_norm
-    norms = mol_gto.gaussian_int(2, es)
-
-    return q0/norms
-
-def _squarednormalize2s(es):
-    norms = mol_gto.gaussian_int(2, es*2)
-
-    return norms**-0.5
-
-def _round2cell(R, dLs_uniq):
-    if R > dLs_uniq[-2]:
-        return dLs_uniq[-1]
-
-    # idx_max = np.where(dLs_uniq <= R)[0][-1] + 1
-    idx_max = np.searchsorted(dLs_uniq, R)
-    Rnew = (dLs_uniq[idx_max] + dLs_uniq[idx_max+1]) * 0.5
-    return Rnew
-
-def _get_squared_dist(a,b):
-    a2 = np.einsum("ij,ij->i", a, a)
-    b2 = np.einsum("ij,ij->i", b, b)
-    ab = a @ b.T
-    d2 = a2[:,None] + b2 - 2. * ab
-    d2[d2 < 0.] = 0.
-    return d2
-
-def _extra_prec_angular(es, ls, cs):
-    """ extra_prec = c / c(1s with same exponent) * f**l
-        with f = 0.3 if e < 1, and 1.5 otherwise (totally empirical).
-    """
-    from pyscf import gto as mol_gto
-    extra_prec = 1.
-    for e, l, c in zip(es, ls, cs):
-        if l == 0:
-            continue
-        c1s = mol_gto.gaussian_int(2, e*2)**-0.5
-        extra_prec *= c / c1s
-        # purely empirical
-        extra_prec *= 0.3**l if e < 1. else 1.5**l
-
-    return extra_prec
-
-def _estimate_Rc_R12_cut(eaux, ei, ej, omega, Ls, cell_vol, precision,
-                         R0s=None):
-
-    es = np.asarray([eaux,ei,ej])
-    cs = _squarednormalize2s(es)
-
-    # eaux, ei, ej = es
-    # laux, li, lj = ls
-    caux, ci, cj = cs
-
-    if R0s is None:
-        R0s = np.zeros((2,3))
-
-    Ri, Rj = R0s
-
-    # sort Ls
-    dLs = np.linalg.norm(Ls,axis=1)
-    idx = np.argsort(dLs)
-    Ls_sort = Ls[idx]
-    dLs_sort = dLs[idx]
-    dLs_uniq = np.unique(dLs_sort.round(2))
-
-    a0 = cell_vol ** 0.333333333
-    # r0 = a0 * (4*np.pi**0.33333333)**-0.33333333
-
-    q0 = caux * eaux**-1.5
-
-    sumeij = ei + ej
-    etaij2 = ei * ej / sumeij
-    eta1 = (1./eaux + 1./sumeij) ** -0.5
-    eta2 = (1./eaux + 1./sumeij + 1./omega**2.) ** -0.5
-
-    fac = (np.pi*0.25)**3. * ci*cj * sumeij**-1.5 * q0
-    dos = 24*np.pi / cell_vol * a0
-
-    f0 = lambda R: np.abs(scipy.special.erfc(eta1*R) -
-                          scipy.special.erfc(eta2*R)) / R
-
-    # Determine the short-range fsum (fsr) and the effective per-cell state
-    # number (rho0) respectively using explicit double lattice sum. For fsr,
-    # the summation is taken within a sphere of radius 2*a0, beyond which
-    # the continuum approximation for the density of states, i.e.,
-    # 4pi/cell_vol * R^2, becomes a good one. For rho0, the summation is taken
-    # within a sphere so that exp(-eta*R12**2.) decays to prec_sr at the
-    # boundary.
-    prec_sr = 1e-3
-    R12_sr = (-np.log(prec_sr)/etaij2)**0.5
-    Rc_sr = a0 * 2.1
-
-    Ls_sr = Ls_sort[dLs_sort<max(R12_sr,Rc_sr)]
-    Rcs_sr_raw = _get_squared_dist(ei*(Ls_sr+Ri),
-                                  -ej*(Ls_sr+Rj))**0.5 / sumeij
-
-    idx1, idx2 = np.where(Rcs_sr_raw < a0*1.1)
-    R12s2_sr = np.linalg.norm(Ls_sr[idx1]+Ri - (Ls_sr[idx2]+Rj), axis=-1)**2.
-    rho0 = np.sum(np.exp(-etaij2 * R12s2_sr))
-
-    Rcs_sr = Rcs_sr_raw[Rcs_sr_raw < Rc_sr]
-    mask_zero = Rcs_sr < 1.e-3
-    v0 = 2*np.pi**-0.5*abs(eta1-eta2) * np.sum(mask_zero)
-    fsr = np.sum(f0(Rcs_sr[~mask_zero])) + v0
-
-    # estimate Rc_cut using its long-range behavior
-    #     ~ fac * rho0 * dos * Rc**2. * f0(Rc) < precision
-    f = lambda R: fac * rho0 * dos * R**2. * f0(R)
-
-    xlo = a0
-    xhi = np.max(dLs_uniq)
-    Rc_cut = _binary_search(f, xlo, xhi, precision, 1.)[0]
-    # Rc_cut = (np.ceil(Rc_cut / a0)+0.1) * a0
-    Rc_cut = _round2cell(Rc_cut, dLs_uniq)
-
-    # determine short-range R12_cut
-    #     ~ fac * fsr * dos * R12**2. * exp(-etaij2 * R12**2.) < precision
-    def _estimate_R12_cut(fac_, precision_):
-        def _iter1(R_):
-            tmp = precision_ / (fac_ * R12_**2.)
-            if isinstance(tmp,np.ndarray):
-                tmp[tmp > 1.] = 0.99
-            elif tmp > 1.:
-                tmp = 0.99
-
-            return (-np.log(tmp) / etaij2)**0.5
-
-        R12_ = 10   # init guess
-        R12_ = _iter1(R12_)
-        R12_ = _iter1(R12_)
-
-        minR12 = a0*1.1 # include at least the nearest neighbors
-        if isinstance(R12_,np.ndarray):
-            R12_[R12_ < minR12] = minR12
-        elif R12_ < minR12:
-            R12_ = minR12
-
-        return R12_
-
-    fac_R12 = fac * fsr * dos
-    R12_cut_sr = _estimate_R12_cut(fac_R12, precision)
-
-    # determine long-range R12_cut
-    #     ~ flr(Rc) * dos * R12**2 * exp(-etaij * R12**2.) < precision
-    # where
-    #     flr(Rc) ~ fac * dos * Rc**2. * f0(Rc)
-    if Rc_cut > Rc_sr:
-        Rcs_lr = np.arange(np.ceil(Rc_sr), np.ceil(Rc_cut)+0.1, 1.)
-        flr = fac * dos * Rcs_lr**2. * f0(Rcs_lr)
-        fac_R12 = flr * dos
-        R12_cut_lst_lr = _estimate_R12_cut(fac_R12, precision)
-
-        # combine sr and lr R12_cut
-        Rcs_sr = np.arange(0,Rcs_lr[0]-0.9,1)
-        Rc_loc = np.concatenate([Rcs_sr, Rcs_lr])
-        R12_cut_lst = np.concatenate([[R12_cut_sr]*Rcs_sr.size, R12_cut_lst_lr])
-    else:
-        Rc_loc = np.arange(0,np.ceil(Rc_cut)+0.1,1)
-        R12_cut_lst = np.ones(Rc_loc.size) * R12_cut_sr
-
-    return Rc_loc, R12_cut_lst
-
-
-def _estimate_Rc_R12_cut2(eaux, ei, ej, omega, Ls, cell_vol, precision,
-                         R0s=None):
-
-    es = np.asarray([eaux,ei,ej])
-    cs = _squarednormalize2s(es)
-
-    # eaux, ei, ej = es
-    # laux, li, lj = ls
-    caux, ci, cj = cs
-
-    if R0s is None:
-        R0s = np.zeros((2,3))
-
-    Ri, Rj = R0s
-
-    # sort Ls
-    dLs = np.linalg.norm(Ls,axis=1)
-    idx = np.argsort(dLs)
-    Ls_sort = Ls[idx]
-    dLs_sort = dLs[idx]
-    dLs_uniq = np.unique(dLs_sort.round(2))
-
-    a0 = cell_vol**0.333333333
-    r0 = a0 * (0.75/np.pi)**0.33333333333
-
-    q0 = caux * eaux**-1.5
-
-    sumeij = ei + ej
-    etaij2 = ei * ej / sumeij
-    eta1 = (1./eaux + 1./sumeij) ** -0.5
-    eta2 = (1./eaux + 1./sumeij + 1./omega**2.) ** -0.5
-
-    fac = (np.pi*0.25)**3. * ci*cj * sumeij**-1.5 * q0
-    dosc = 4*np.pi / cell_vol * a0
-    dos12 = 12*np.pi / cell_vol * r0 # dos12*R12^2 = 4*pi/vol*((R12+r0)^3-R12^3)
-
-    f0 = lambda R: np.abs(scipy.special.erfc(eta1*R) -
-                          scipy.special.erfc(eta2*R)) / R
-
-    # Determine the short-range fmax (fsrmax) and the effective per-cell state
-    # number (rho0) respectively using explicit double lattice sum. For fsr,
-    # the summation is taken within a sphere of radius 2*a0, beyond which
-    # the continuum approximation for the density of states, i.e.,
-    # 4pi/cell_vol * R^2, becomes a good one. For rho0, the summation is taken
-    # within a sphere so that exp(-eta*R12**2.) decays to prec_sr at the
-    # boundary.
-    prec_sr = 1e-3
-    R12_sr = (-np.log(prec_sr)/etaij2)**0.5
-    Rc_sr = a0 * 2.1
-
-    Ls_sr = Ls_sort[dLs_sort<max(R12_sr,Rc_sr)]
-    Rcs_sr_raw = _get_squared_dist(ei*(Ls_sr+Ri),
-                                  -ej*(Ls_sr+Rj))**0.5 / sumeij
-
-    idx1, idx2 = np.where(Rcs_sr_raw < r0*1.1)
-    R12s2_sr = np.linalg.norm(Ls_sr[idx1]+Ri - (Ls_sr[idx2]+Rj), axis=-1)**2.
-    rho0 = np.sum(np.exp(-etaij2 * R12s2_sr))
-
-    Rcs_sr = np.sort(np.unique(Rcs_sr_raw[Rcs_sr_raw < Rc_sr].round(1)))
-    Rcs_sr[abs(Rcs_sr)<1.e-10] = dLs_sort[-1]   # effectively removing zero
-    v0 = 2*np.pi**-0.5*abs(eta1-eta2)
-    fsrmax = max(np.max(f0(Rcs_sr)), v0)
-
-    # estimate Rc_cut using its long-range behavior
-    #     ~ fac * rho0 * dosc * Rc**2. * f0(Rc) < precision
-    f = lambda R: fac * rho0 * dosc * (R+0.5*a0)**2. * f0(R)
-
-    xlo = a0
-    xhi = np.max(dLs_uniq)
-    Rc_cut = _binary_search(f, xlo, xhi, precision, 1.)[0]
-    # Rc_cut = (np.ceil(Rc_cut / a0)+0.1) * a0
-    Rc_cut = _round2cell(Rc_cut, dLs_uniq)
-
-    # determine short-range R12_cut
-    #     ~ fac * fsrmax * dos12 * R12**2. * exp(-etaij2 * R12**2.) < precision
-    def _estimate_R12_cut(fac_, precision_):
-        def _iter1(R_):
-            tmp = precision_ / (fac_ * R12_**2.)
-            if isinstance(tmp,np.ndarray):
-                tmp[tmp > 1.] = 0.99
-            elif tmp > 1.:
-                tmp = 0.99
-
-            return (-np.log(tmp) / etaij2)**0.5
-
-        R12_ = 10   # init guess
-        R12_ = _iter1(R12_)
-        R12_ = _iter1(R12_)
-
-        minR12 = a0*1.1 # include at least the nearest neighbors
-        if isinstance(R12_,np.ndarray):
-            R12_[R12_ < minR12] = minR12
-        elif R12_ < minR12:
-            R12_ = minR12
-
-        return R12_
-
-    fac_R12 = fac * fsrmax * dos12
-    R12_cut_sr = _estimate_R12_cut(fac_R12, precision)
-
-    # determine long-range R12_cut
-    #     ~ flr(Rc) * dos12 * R12**2 * exp(-etaij * R12**2.) < precision
-    # where
-    #     flr(Rc) ~ fac * dosc * Rc**2. * f0(Rc)
-    if Rc_cut > Rc_sr:
-        Rcs_lr = np.arange(np.ceil(Rc_sr), np.ceil(Rc_cut)+0.1, 1.)
-        flr = fac * dosc * Rcs_lr**2. * f0(Rcs_lr)
-        fac_R12 = flr * dos12
-        R12_cut_lst_lr = _estimate_R12_cut(fac_R12, precision)
-
-        # combine sr and lr R12_cut
-        Rcs_sr = np.arange(0,Rcs_lr[0]-0.9,1)
-        Rc_loc = np.concatenate([Rcs_sr, Rcs_lr])
-        R12_cut_lst = np.concatenate([[R12_cut_sr]*Rcs_sr.size, R12_cut_lst_lr])
-    else:
-        Rc_loc = np.arange(0,np.ceil(Rc_cut)+0.1,1)
-        R12_cut_lst = np.ones(Rc_loc.size) * R12_cut_sr
-
-    return Rc_loc, R12_cut_lst
-
-
-def _estimate_Rc_R12_cut2_batch(cell, auxcell, omega, auxprecs, shlpr_mask):
-
-    prec_sr = 1e-3
-    ncell_sr = 2
-
-    cell_vol = cell.vol
-    a0 = cell_vol**0.333333333
-    r0 = a0 * (0.75/np.pi)**0.33333333333
-
-    if shlpr_mask is None:
-        nbas = cell.nbas
-        shlpr_mask = np.ones((nbas,nbas),dtype=bool)
-
-    # sort Ls
-    Ls = cell.get_lattice_Ls()
-    dLs = np.linalg.norm(Ls,axis=1)
-    idx = np.argsort(dLs)
-    Ls_sort = Ls[idx]
-    dLs_sort = dLs[idx]
-    dLs_uniq = np.unique(dLs_sort.round(2))
-
-    natm = cell.natm
-    nbas = cell.nbas
-    bas_atom = np.asarray([cell.bas_atom(ib) for ib in range(nbas)])
-    bas_by_atom = [np.where(bas_atom==iatm)[0] for iatm in range(natm)]
-
-    auxnbas = auxcell.nbas
-    auxbas_atom = np.asarray([auxcell.bas_atom(ib) for ib in range(auxnbas)])
-    auxbas_by_atom = [np.where(auxbas_atom==iatm)[0] for iatm in range(natm)]
-
-    es = np.asarray([np.min(cell.bas_exp(ib)) for ib in range(nbas)])
-    auxes = np.asarray([np.min(auxcell.bas_exp(ibaux)) for ibaux in range(auxnbas)])
-
-    cs = _squarednormalize2s(es)
-    auxcs = _squarednormalize2s(auxes)
-
-    q0s = auxcs * auxes**-1.5
-
-    dosc = 4*np.pi / cell_vol * a0
-    dos12 = 12*np.pi / cell_vol * r0 # dos12*R12^2 = 4*pi/vol*((R12+r0)^3-R12^3)
-
-    def _estimate_R12_cut(fac_, precision_, minR12=None):
-        def _iter1(R_):
-            tmp = precision_ / (fac_ * R12_**2.)
-            if isinstance(tmp,np.ndarray):
-                tmp[tmp > 1.] = 0.99
-            elif tmp > 1.:
-                tmp = 0.99
-
-            return (-np.log(tmp) / etaij2)**0.5
-
-        R12_ = 10   # init guess
-        R12_ = _iter1(R12_)
-        R12_ = _iter1(R12_)
-
-        if not minR12 is None:
-            if isinstance(R12_,np.ndarray):
-                R12_[R12_ < minR12] = minR12
-            elif R12_ < minR12:
-                R12_ = minR12
-
-        return R12_
-
-    atom_coords = cell.atom_coords()
-
-    Rc_cut_mat = np.zeros([auxnbas,nbas,nbas])
-    R12_cut_lst = []
-
-    def loop_over_atoms():
-        for Patm in range(cell.natm):
-            for iatm in range(cell.natm):
-                for jatm in range(cell.natm):
-                    yield Patm, iatm, jatm
-
-    for Patm,iatm,jatm in loop_over_atoms():
-        Raux = atom_coords[Patm]
-        eauxs = auxes[auxbas_by_atom[Patm]]
-        cauxs = auxcs[auxbas_by_atom[Patm]]
-        q0s = cauxs * eauxs**-1.5
-        Ri = atom_coords[iatm] - Raux
-        Rj = atom_coords[jatm] - Raux
-
-        # TODO: fix me for large supercell
-        # minR12 = np.linalg.norm(Ri - Rj) * 1.1
-        minR12 = a0*1.1
-
-        for ib in bas_by_atom[iatm]:
-            ei = es[ib]
-            ci = cs[ib]
-            for jb in bas_by_atom[jatm]:
-                if jb > ib: continue
-                if not shlpr_mask[ib,jb]:
-                    Rc_cut_mat[:,ib,jb] = Rc_cut_mat[:,jb,ib] = 1
-                    for ibaux_,ibaux in enumerate(auxbas_by_atom[Patm]):
-                        R12_cut_lst.append(np.arange(2))
-                    continue
-
-                ej = es[jb]
-                cj = cs[jb]
-
-                sumeij = ei + ej
-                etaij2 = ei*ej/sumeij
-
-                R12_sr = (-np.log(prec_sr)/etaij2)**0.5
-                Rc_sr = a0 * (ncell_sr + 0.1)
-                Ls_sr = Ls_sort[:np.searchsorted(
-                                dLs_sort,max(R12_sr,Rc_sr))]
-
-                Rcs0_sr_raw = _get_squared_dist(ei*Ls_sr,
-                                                -ej*Ls_sr)**0.5 / sumeij
-                Rcs_sr_raw = _get_squared_dist(ei*(Ls_sr+Ri),
-                                               -ej*(Ls_sr+Rj))**0.5 / sumeij
-
-                idx1, idx2 = np.where(Rcs0_sr_raw < r0*1.1)
-                R12s2_sr = np.linalg.norm(Ls_sr[idx1]+Ri -
-                                          (Ls_sr[idx2]+Rj), axis=-1)**2.
-                rho0 = np.sum(np.exp(-etaij2 * R12s2_sr))
-
-                Rcs_sr, nRcs_sr = np.unique(
-                                Rcs_sr_raw[Rcs0_sr_raw<Rc_sr].round(1),
-                                return_counts=True)
-                # effectively removing zero
-                Rcs_sr[Rcs_sr<1.e-3] = dLs_sort[-1]
-
-                eta1s = 1./eauxs + 1./sumeij
-                eta2s = (eta1s + 1./omega**2.) ** -0.5
-                eta1s **= -0.5
-                v0s = 2*np.pi**-0.5*abs(eta1s-eta2s)
-                facs = (np.pi*0.25)**3. * ci*cj * sumeij**-1.5 * q0s
-
-                for ibaux_,ibaux in enumerate(auxbas_by_atom[Patm]):
-                    precision = auxprecs[ibaux]
-
-                    eaux = auxes[ibaux]
-                    caux = auxcs[ibaux]
-
-                    eta1 = eta1s[ibaux_]
-                    eta2 = eta2s[ibaux_]
-                    fac = facs[ibaux_]
-                    v0 = v0s[ibaux_]
-
-                    f0 = lambda R: np.abs(scipy.special.erfc(eta1*R) -
-                                          scipy.special.erfc(eta2*R)) / R
-
-                    fsrmax = max(np.max(f0(Rcs_sr)*nRcs_sr), v0)
-
-                    # estimate Rc_cut using its long-range behavior
-                    #     ~ fac * rho0 * dosc * Rc**2. * f0(Rc) < precision
-                    f = lambda R: fac * rho0 * dosc * (R+0.5*a0)**2. * f0(R)
-
-                    xlo = a0
-                    xhi = dLs_uniq[-1]
-                    Rc_cut = _binary_search(f, xlo, xhi, precision, 1.)[0]
-                    Rc_cut = _round2cell(Rc_cut, dLs_uniq)
-
-                    # determine short-range R12_cut
-                    #     ~ fac * fsrmax * dos12 * R12**2. * exp(-etaij2 * R12**2.) < precision
-                    fac_R12 = fac * fsrmax * dos12
-                    R12_cut_sr = _estimate_R12_cut(fac_R12, precision, minR12)
-
-                    # determine long-range R12_cut
-                    #     ~ flr(Rc) * dos12 * R12**2 * exp(-etaij * R12**2.) < precision
-                    # where
-                    #     flr(Rc) ~ fac * dosc * Rc**2. * f0(Rc)
-                    nc_cut = int(np.ceil(Rc_cut))
-                    nc_sr = int(np.ceil(Rc_sr))
-                    if nc_cut > nc_sr:
-                        Rcs_lr = np.arange(nc_sr, nc_cut+0.1, 1.)
-                        flr = fac * dosc * Rcs_lr**2. * f0(Rcs_lr)
-                        fac_R12 = flr * dos12
-                        R12_cut_lst_lr = _estimate_R12_cut(fac_R12, precision, minR12)
-
-                        # combine sr and lr R12_cut
-                        R12_cut_lst_ = np.concatenate([[R12_cut_sr]*nc_sr,
-                                       R12_cut_lst_lr])
-                    else:
-                        R12_cut_lst_ = np.ones(nc_cut+1) * R12_cut_sr
-                    Rc_cut_mat[ibaux,ib,jb] = Rc_cut_mat[ibaux,jb,ib] = R12_cut_lst_.size-1
-                    R12_cut_lst.append(R12_cut_lst_)
-
-    nc_max = np.max(Rc_cut_mat).astype(int)+1
-    R12_cut_mat = np.zeros([auxnbas,nbas,nbas,nc_max])
-    ind = 0
-    for Patm,iatm,jatm in loop_over_atoms():
-        for ib in bas_by_atom[iatm]:
-            for jb in bas_by_atom[jatm]:
-                if jb > ib: continue
-                for ibaux in auxbas_by_atom[Patm]:
-                    R12_cut_lst_ = R12_cut_lst[ind]
-                    nc_ = R12_cut_lst_.size
-                    R12_cut_mat[ibaux,ib,jb,:nc_] = R12_cut_lst_
-                    R12_cut_mat[ibaux,ib,jb,nc_:] = R12_cut_lst_[-1]
-                    R12_cut_mat[ibaux,jb,ib] = R12_cut_mat[ibaux,ib,jb]
-
-                    ind += 1
-
-    return Rc_cut_mat, R12_cut_mat
-
-
-def _estimate_Rc_R12_cut3_batch(cell, auxcell, omega, auxprecs,
-                                shlpr_mask=None):
-
-    prec_sr = 1e-4
-    ncell_sr = 3
-    Sh_tol = 0.01
-
-    cell_vol = cell.vol
-    a0 = cell_vol**0.333333333
-    r0 = a0 * (0.75/np.pi)**0.33333333333
-    Rc_cut_safe = 2 * r0
-
-    if shlpr_mask is None:
-        nbas = cell.nbas
-        shlpr_mask = np.ones((nbas,nbas),dtype=bool)
-
-    # sort Ls
-    Ls = cell.get_lattice_Ls()
-    dLs = np.linalg.norm(Ls,axis=1)
-    idx = np.argsort(dLs)
-    Ls_sort = Ls[idx]
-    dLs_sort = dLs[idx]
-    dLs_uniq, dLs_counts = np.unique(dLs_sort.round(2), return_counts=True)
-
-    nL_nf = np.searchsorted(dLs_sort,a0*(ncell_sr+0.5))
-
-    delta_Rff = 1
-    dos_fac = 4*np.pi / cell.vol
-    rho0_fac = dos_fac * delta_Rff
-    rho0_fac *= 2.  # empirical correction
-    def get_Ncell(R):
-        Ncell = rho0_fac * (R + delta_Rff)**2.
-        Ncell = np.clip(Ncell, nL_nf, None)
-
-        return Ncell
-
-    natm = cell.natm
-    nbas = cell.nbas
-    bas_atom = np.asarray([cell.bas_atom(ib) for ib in range(nbas)])
-    bas_by_atom = [np.where(bas_atom==iatm)[0] for iatm in range(natm)]
-
-    auxnbas = auxcell.nbas
-    auxbas_atom = np.asarray([auxcell.bas_atom(ib) for ib in range(auxnbas)])
-    auxbas_by_atom = [np.where(auxbas_atom==iatm)[0] for iatm in range(natm)]
-
-    es = np.asarray([np.min(cell.bas_exp(ib)) for ib in range(nbas)])
-    auxes = np.asarray([np.min(auxcell.bas_exp(ibaux)) for ibaux in range(auxnbas)])
-
-    cs = _squarednormalize2s(es)
-    auxcs = _squarednormalize2s(auxes)
-
-    q0s = auxcs * auxes**-1.5
-
-    def f0(R, eta1, eta2, zero_thr=1e-8):
-        """ ( erf(eta1*R) - erf(eta2*R) ) / R
-        """
-        if isinstance(R, float):
-            if R < 0:
-                raise ValueError
-            if R < zero_thr:
-                y = 2*(eta1-eta2) * np.pi**-0.5
-            else:
-                y = (scipy.special.erfc(eta2*R) -
-                     scipy.special.erfc(eta1*R)) / R
-        elif isinstance(R, np.ndarray):
-            if (R < 0).any():
-                raise ValueError
-            mask_zero = R < zero_thr
-            y = np.zeros_like(R)
-            y[mask_zero] = 2*(eta1-eta2) * np.pi**-0.5
-            y[~mask_zero] = (scipy.special.erfc(eta2*R[~mask_zero]) -
-                             scipy.special.erfc(eta1*R[~mask_zero])) / \
-                             R[~mask_zero]
-        else:
-            raise ValueError
-
-        return y
-
-    atom_coords = cell.atom_coords()
-
-    Rc_cut_mat = np.zeros([auxnbas,nbas,nbas])
-    R12_cut_lst = []
-
-    def loop_over_atoms():
-        for Patm in range(cell.natm):
-            for iatm in range(cell.natm):
-                for jatm in range(cell.natm):
-                    yield Patm, iatm, jatm
-
-    for Patm,iatm,jatm in loop_over_atoms():
-        Raux = atom_coords[Patm]
-        eauxs = auxes[auxbas_by_atom[Patm]]
-        cauxs = auxcs[auxbas_by_atom[Patm]]
-        q0s = cauxs * eauxs**-1.5
-        Ri = atom_coords[iatm] - Raux
-        Rj = atom_coords[jatm] - Raux
-        R12_00 = Rj - Ri
-
-        for ib in bas_by_atom[iatm]:
-            ei = es[ib]
-            ci = cs[ib]
-            for jb in bas_by_atom[jatm]:
-                if jb > ib: continue
-                if not shlpr_mask[ib,jb]:
-                    Rc_cut_mat[:,ib,jb] = Rc_cut_mat[:,jb,ib] = 1
-                    for ibaux_,ibaux in enumerate(auxbas_by_atom[Patm]):
-                        R12_cut_lst.append(np.arange(2))
-                    continue
-
-                ej = es[jb]
-                cj = cs[jb]
-
-                sumeij = ei + ej
-                etaij2 = ei*ej/sumeij
-
-                Rc_00 = (ei*Ri + ej*Rj) / sumeij
-
-                R12_cut = (-np.log(prec_sr)/etaij2)**0.5
-                R12_cut = _round2cell(R12_cut, dLs_uniq)
-                Lhs = Ls_sort[:np.searchsorted(dLs_sort,R12_cut)]
-                dR12s = np.linalg.norm(R12_00 + Lhs, axis=1)
-                dR12s_uniq, dR12s_counts = np.unique(dR12s.round(3),
-                                                     return_counts=True)
-                hs = np.exp(-etaij2*dR12s_uniq**2.) * dR12s_counts
-                Sh = np.sum(hs)
-
-                # When R is too small, the 4pi/vol*R^2 approx to DOS is not good for estimating the bound for R12 below.
-                # We hence require a minR12 s.t. the error in Sh < Sh_tol
-                # if hs[-1] > Sh_tol:
-                #     minR12 = dR12s_uniq[-1]+0.1
-                # else:
-                #     minR12 = dR12s_uniq[np.where(hs<Sh_tol)[0][0]]
-
-                # The continuous approximation (4pi/vol * R12^2) for the summation over R12 breaks down for small R12. Here, we set the turning point to be minR12.
-                sumhs_ = 1./(2*etaij2) * get_Ncell(dR12s_uniq) * dR12s_uniq *\
-                                                np.exp(-etaij2*dR12s_uniq**2.)
-                sumhs = np.cumsum(hs[::-1])[::-1]
-                minR12 = dR12s_uniq[np.where(sumhs_ > sumhs)[0][0]] + 0.1
-
-                eta1s = 1./eauxs + 1./sumeij
-                eta2s = (eta1s + 1./omega**2.) ** -0.5
-                eta1s **= -0.5
-                facs = (np.pi*0.25)**3. * ci*cj * sumeij**-1.5 * q0s
-
-                for ibaux_,ibaux in enumerate(auxbas_by_atom[Patm]):
-                    precision = auxprecs[ibaux]
-
-                    eaux = auxes[ibaux]
-                    caux = auxcs[ibaux]
-
-                    eta1 = eta1s[ibaux_]
-                    eta2 = eta2s[ibaux_]
-                    fac = facs[ibaux_]
-
-# determine Rc_cut
-#     fac * Sh * (4*pi/vol) * ( 1/(2*pi^0.5*eta2^3) ) *
-#         exp( -(eta2*Rc_cut)^2 ) / Rc_cut < precision
-                    fac_Rc = fac * Sh * dos_fac / (2*np.pi**0.5*eta2**3.)
-                    Rc_cut = 10 # init guess
-                    Rc_cut = np.log(fac_Rc / (precision * eta2**3. *
-                                    Rc_cut))**0.5 / eta2
-                    Rc_cut = np.log(fac_Rc / (precision * eta2**3. *
-                                    Rc_cut))**0.5 / eta2
-                    if np.isnan(Rc_cut):
-                        Rc_cut = Rc_cut_safe
-                    Rc_cut = _round2cell(Rc_cut, dLs_uniq)
-
-# determine R12_cut on a mesh of Rc's
-#     fac * (4*pi/vol) * ( 1/(2*etaij2) ) * Ncell(Rc) * fmax(R) *
-#         R12_cut * exp( -etaij2*R12_cut^2 ) < precision
-# where Ncell(Rc) is the number of cells in R ~ R+∆R.
-                    Rc_mesh = np.arange(0,np.ceil(Rc_cut)+0.01,1)
-                    fcmax = f0(Rc_mesh, eta1, eta2) # f0 monotonically decay
-                    Ncell = get_Ncell(Rc_mesh)
-                    fac_R12 = fac * dos_fac / (2*etaij2) * Ncell * fcmax
-                    R12_cut = np.ones_like(fac_R12) * 10    # init guess
-                    tmp = np.clip(fac_R12 * R12_cut / precision, 1.01, None)
-                    R12_cut = (np.log(tmp) / etaij2)**0.5
-                    tmp = np.clip(fac_R12 * R12_cut / precision, 1.01, None)
-                    R12_cut = (np.log(tmp) / etaij2)**0.5
-                    R12_cut = np.clip(R12_cut, minR12, None)
-
-                    Rc_cut_mat[ibaux,ib,jb] = Rc_cut_mat[ibaux,jb,ib] = R12_cut.size-1
-                    R12_cut_lst.append(R12_cut)
-
-    nc_max = np.max(Rc_cut_mat).astype(int)+1
-    R12_cut_mat = np.zeros([auxnbas,nbas,nbas,nc_max])
-    ind = 0
-    for Patm,iatm,jatm in loop_over_atoms():
-        for ib in bas_by_atom[iatm]:
-            for jb in bas_by_atom[jatm]:
-                if jb > ib: continue
-                for ibaux in auxbas_by_atom[Patm]:
-                    R12_cut_lst_ = R12_cut_lst[ind]
-                    nc_ = R12_cut_lst_.size
-                    R12_cut_mat[ibaux,ib,jb,:nc_] = R12_cut_lst_
-                    R12_cut_mat[ibaux,ib,jb,nc_:] = R12_cut_lst_[-1]
-                    R12_cut_mat[ibaux,jb,ib] = R12_cut_mat[ibaux,ib,jb]
-
-                    ind += 1
-
-    return Rc_cut_mat, R12_cut_mat
-
-
-def estimate_Rc_R12_cut_SPLIT_batch(cell, auxcell, omega, precision,
-                                    extra_precision, fspltbas, shlpr_mask):
-    aux_ao_loc = auxcell.ao_loc_nr()
-    aux_nbas = auxcell.nbas
+def intor_j2c(cell, omega, precision=None, kpts=None, hermi=1, shls_slice=None,
+# +++++++ Use the default for the following unless you know what you are doing
+              lmp=True, lasympt=True,
+              eta_correct=True, R_correct=False, vol_correct=False,
+# -------
+# +++++++ debug options
+              no_screening=False,   # set Rcuts to effectively infinity
+# -------
+            ):
+    log = logger.Logger(cell.stdout, cell.verbose)
+
+    t1 = np.asarray([logger.process_clock(), logger.perf_counter()])
+
+    intor = "int2c2e"
+    intor, comp = mol_gto.moleintor._get_intor_and_comp(
+                                            cell._add_suffix(intor), None)
+    assert(comp == 1)
+
+# prescreening data
     if precision is None: precision = cell.precision
-    if extra_precision is None:
-        extra_prec = np.ones(aux_nbas)
+
+    refuniqshl_map, uniq_atms, uniq_bas, uniq_bas_loc = get_refuniq_map(cell)
+    Rcuts = get_2c2e_Rcut(uniq_bas, cell.vol, omega, precision,
+                          lmp=lmp, lasympt=lasympt,
+                          eta_correct=eta_correct, R_correct=R_correct,
+                          vol_correct=vol_correct)
+    Rcut2s = np.ones(Rcuts)*1e20 if no_screening else Rcuts**2.
+    atom_Rcuts = get_atom_Rcuts_2c(Rcuts, uniq_bas_loc)
+    cell_rcut = atom_Rcuts.max()
+    Ls = get_Lsmin(cell, atom_Rcuts, uniq_atms)
+    log.debug1("j2c prescreening: cell rcut %.2f Bohr  keep %d imgs",
+               cell_rcut, Ls.shape[0])
+    t1 = log.timer_debug1('prescrn warmup', *t1)
+# end prescreening data
+
+    if kpts is None:
+        kpts_lst = np.zeros((1,3))
     else:
-        extra_prec = [np.min(extra_precision[range(*aux_ao_loc[i:i+2])])
-                      for i in range(aux_nbas)]
-    auxprecs = np.asarray(extra_prec) * precision
-    return fspltbas(cell, auxcell, omega, auxprecs, shlpr_mask)
+        kpts_lst = np.reshape(kpts, (-1,3))
+    nkpts = len(kpts_lst)
+
+    if hermi == 0:
+        aosym = 's1'
+    else:
+        aosym = 's2'
+    fill = getattr(libpbc, 'PBCnr_2c2e_fill_k'+aosym)
+    fintor = getattr(mol_gto.moleintor.libcgto, intor)
+    cintopt = lib.c_null_ptr()
+
+    pcell = copy.copy(cell)
+    pcell.precision = min(cell.precision, cell.precision)
+    pcell._atm, pcell._bas, pcell._env = \
+            atm, bas, env = mol_gto.conc_env(cell._atm, cell._bas, cell._env,
+                                             cell._atm, cell._bas, cell._env)
+    env[mol_gto.PTR_RANGE_OMEGA] = -abs(omega)
+    if shls_slice is None:
+        shls_slice = (0, cell.nbas, 0, cell.nbas)
+    i0, i1, j0, j1 = shls_slice[:4]
+    j0 += cell.nbas
+    j1 += cell.nbas
+    ao_loc = mol_gto.moleintor.make_loc(bas, intor)
+    ni = ao_loc[i1] - ao_loc[i0]
+    nj = ao_loc[j1] - ao_loc[j0]
+
+    out = np.empty((nkpts,comp,ni,nj), dtype=np.complex128)
+
+    expkL = np.asarray(np.exp(1j*np.dot(kpts_lst, Ls.T)), order='C')
+    drv = libpbc.PBCnr_2c2e_k_drv
+
+    drv(fintor, fill, out.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(nkpts), ctypes.c_int(comp), ctypes.c_int(len(Ls)),
+        Ls.ctypes.data_as(ctypes.c_void_p),
+        expkL.ctypes.data_as(ctypes.c_void_p),
+        (ctypes.c_int*4)(i0, i1, j0, j1),
+        ao_loc.ctypes.data_as(ctypes.c_void_p), cintopt,
+        refuniqshl_map.ctypes.data_as(ctypes.c_void_p),
+        Rcut2s.ctypes.data_as(ctypes.c_void_p),
+        atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(pcell.natm),
+        bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(pcell.nbas),
+        env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
+
+    mat = []
+    for k, kpt in enumerate(kpts_lst):
+        v = out[k]
+        if hermi != 0:
+            for ic in range(comp):
+                lib.hermi_triu(v[ic], hermi=hermi, inplace=True)
+        if comp == 1:
+            v = v[0]
+        if abs(kpt).sum() < 1e-9:  # gamma_point
+            v = v.real
+        mat.append(v)
+
+    if kpts is None or np.shape(kpts) == (3,):  # A single k-point
+        mat = mat[0]
+
+    t1 = log.timer_debug1('j2c latsum', *t1)
+
+    return mat
 
 """ Helper functions for short-range j3c via real space lattice sum
     Modified from pyscf.pbc.df.outcore/incore
 """
-class _CPBCOpt_RSDF(ctypes.Structure):
-    _fields_ = [('rc_cut', ctypes.c_void_p),
-                ('r12_cut', ctypes.c_void_p),
-                ('bas_exp', ctypes.c_void_p),
-                ('fprescreen', ctypes.c_void_p)]
-
-class PBCOpt_RSDF(_pbcintor.PBCOpt):  # R12Rc_max
-    def __init__(self, cell):
-        self._this = ctypes.POINTER(_CPBCOpt_RSDF)()
-        natm = ctypes.c_int(cell._atm.shape[0])
-        nbas = ctypes.c_int(cell._bas.shape[0])
-        libpbc.PBCinit_optimizer_RSDF(ctypes.byref(self._this),
-                                      cell._atm.ctypes.data_as(ctypes.c_void_p),
-                                      natm,
-                                      cell._bas.ctypes.data_as(ctypes.c_void_p),
-                                      nbas,
-                                      cell._env.ctypes.data_as(ctypes.c_void_p))
-
-    def init_rcut_cond(self, cell, prescreening_data, precision=None):
-        if precision is None: precision = cell.precision
-        rcut = np.array([cell.bas_rcut(ib, precision)
-                            for ib in range(cell.nbas)])
-        natm = ctypes.c_int(cell._atm.shape[0])
-        nbas = ctypes.c_int(cell._bas.shape[0])
-        Rc_cut_mat, R12_cut_mat = prescreening_data
-        Rc_cut_mat = np.asarray(Rc_cut_mat, order="C")
-        R12_cut_mat = np.asarray(R12_cut_mat, order="C")
-        nbas_auxchg = ctypes.c_int(Rc_cut_mat.shape[0])
-        nc_max = ctypes.c_int(R12_cut_mat.shape[-1])
-        bas_exp = np.asarray([np.min(cell.bas_exp(ib))
-                                for ib in range(cell.nbas)])
-        libpbc.PBCset_rcut_cond_RSDF(
-                                 self._this,
-                                 nbas_auxchg, nc_max,
-                                 Rc_cut_mat.ctypes.data_as(ctypes.c_void_p),
-                                 R12_cut_mat.ctypes.data_as(ctypes.c_void_p),
-                                 bas_exp.ctypes.data_as(ctypes.c_void_p),
-                                 cell._atm.ctypes.data_as(ctypes.c_void_p), natm,
-                                 cell._bas.ctypes.data_as(ctypes.c_void_p), nbas,
-                                 cell._env.ctypes.data_as(ctypes.c_void_p))
-        return self
-
-    def __del__(self):
-        try:
-            libpbc.PBCdel_optimizer_RSDF(ctypes.byref(self._this))
-        except AttributeError:
-            pass
-
 def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
                       intor='int3c2e',
                       aosym='s2ij', Ls=None, comp=None, kptij_lst=None,
@@ -1085,7 +394,8 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
     Ls = get_Lsmin(cell, atom_Rcuts, uniq_atms)
     prescreening_data = (refuniqshl_map, auxuniqshl_map, nbasauxuniq, uniqexp,
                          dcut2s, dstep_BOHR, Rcut2s, dijs_loc, Ls)
-    log.debug("cell rcut %.2f Bohr  keep %d imgs", cell_rcut, Ls.shape[0])
+    log.debug("j3c prescreening: cell rcut %.2f Bohr  keep %d imgs",
+              cell_rcut, Ls.shape[0])
     t1 = log.timer_debug1('prescrn warmup', *t1)
 # prescreening data ends here
 
@@ -1347,54 +657,6 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
                     env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size)
                     )
                 return out
-
-
-    # if bvk_kmesh is None:
-    #     def int3c(shls_slice, out):
-    #         shls_slice = (shls_slice[0], shls_slice[1],
-    #                       nbas+shls_slice[2], nbas+shls_slice[3],
-    #                       nbas*2+shls_slice[4], nbas*2+shls_slice[5])
-    #         # for some (unknown) reason, this line is needed for the c code to use pbcopt->fprescreen
-    #         _ = pbcopt._this == lib.c_null_ptr()
-    #         drv(getattr(libpbc, intor), getattr(libpbc, fill),
-    #             out.ctypes.data_as(ctypes.c_void_p),
-    #             ctypes.c_int(nkptij), ctypes.c_int(nkpts),
-    #             ctypes.c_int(comp), ctypes.c_int(nimgs),
-    #             Ls.ctypes.data_as(ctypes.c_void_p),
-    #             expkL.ctypes.data_as(ctypes.c_void_p),
-    #             kptij_idx.ctypes.data_as(ctypes.c_void_p),
-    #             (ctypes.c_int*6)(*shls_slice),
-    #             ao_loc.ctypes.data_as(ctypes.c_void_p), cintopt, cpbcopt,
-    #             atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
-    #             bas.ctypes.data_as(ctypes.c_void_p),
-    #             ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
-    #             env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
-    #         return out
-    # else:
-    #     def int3c(shls_slice, out):
-    #         shls_slice = (shls_slice[0], shls_slice[1],
-    #                       nbas+shls_slice[2], nbas+shls_slice[3],
-    #                       nbas*2+shls_slice[4], nbas*2+shls_slice[5])
-    #         # for some (unknown) reason, this line is needed for the c code to use pbcopt->fprescreen
-    #         _ = pbcopt._this == lib.c_null_ptr()
-    #         drv(getattr(libpbc, intor), getattr(libpbc, fill),
-    #             out.ctypes.data_as(ctypes.c_void_p),
-    #             ctypes.c_int(nkptij), ctypes.c_int(nkpts),
-    #             ctypes.c_int(comp), ctypes.c_int(nimgs),
-    #             ctypes.c_int(bvk_nimgs),   # bvk_nimgs
-    #             Ls.ctypes.data_as(ctypes.c_void_p),
-    #             expkL.ctypes.data_as(ctypes.c_void_p),
-    #             kptij_idx.ctypes.data_as(ctypes.c_void_p),
-    #             (ctypes.c_int*6)(*shls_slice),
-    #             ao_loc.ctypes.data_as(ctypes.c_void_p),
-    #             cell_loc_bvk.ctypes.data_as(ctypes.c_void_p),   # cell_loc_bvk
-    #             shlpr_mask.ctypes.data_as(ctypes.c_void_p),  # shlpr_mask
-    #             cintopt, cpbcopt,
-    #             atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
-    #             bas.ctypes.data_as(ctypes.c_void_p),
-    #             ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
-    #             env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
-    #         return out
 
     return int3c
 
