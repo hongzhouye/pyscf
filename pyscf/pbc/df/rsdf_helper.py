@@ -273,7 +273,7 @@ def intor_j2c(cell, omega, precision=None, kpts=None, hermi=1, shls_slice=None,
         aosym = 's1'
     else:
         aosym = 's2'
-    fill = getattr(libpbc, 'PBCnr_2c2e_fill_k'+aosym)
+    fill = getattr(libpbc, 'PBCsr2c_fill_k'+aosym)
     fintor = getattr(mol_gto.moleintor.libcgto, intor)
     cintopt = lib.c_null_ptr()
 
@@ -295,7 +295,7 @@ def intor_j2c(cell, omega, precision=None, kpts=None, hermi=1, shls_slice=None,
     out = np.empty((nkpts,comp,ni,nj), dtype=np.complex128)
 
     expkL = np.asarray(np.exp(1j*np.dot(kpts_lst, Ls.T)), order='C')
-    drv = libpbc.PBCnr_2c2e_k_drv
+    drv = libpbc.PBCsr2c_k_drv
 
     drv(fintor, fill, out.ctypes.data_as(ctypes.c_void_p),
         ctypes.c_int(nkpts), ctypes.c_int(comp), ctypes.c_int(len(Ls)),
@@ -462,8 +462,9 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
     if bufmem > max_memory * 0.5:
         raise RuntimeError("Computing 3c2e integrals requires %.2f MB memory, which exceeds the given maximum memory %.2f MB. Try giving PySCF more memory." % (bufmem*2., max_memory))
 
-    int3c = wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
-                                 intor, aosym, comp, kptij_lst,
+    int3c = wrap_int3c_nospltbas(cell, auxcell, omega, shlpr_mask,
+                                 prescreening_data, intor, aosym, comp,
+                                 kptij_lst,
                                  bvk_kmesh=bvk_kmesh)
 
     kptis = kptij_lst[:,0]
@@ -513,7 +514,7 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
         feri.close()
     return erifile
 
-def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
+def wrap_int3c_nospltbas(cell, auxcell, omega, shlpr_mask, prescreening_data,
                          intor='int3c2e', aosym='s1',
                          comp=1, kptij_lst=np.zeros((1,2,3)),
                          cintopt=None, bvk_kmesh=None):
@@ -526,13 +527,14 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
     pcell = copy.copy(cell)
     pcell._atm, pcell._bas, pcell._env = \
     atm, bas, env = mol_gto.conc_env(cell._atm, cell._bas, cell._env,
-                                 cell._atm, cell._bas, cell._env)
+                                     cell._atm, cell._bas, cell._env)
     ao_loc = mol_gto.moleintor.make_loc(bas, intor)
     aux_loc = auxcell.ao_loc_nr(auxcell.cart or 'ssc' in intor)
     ao_loc = np.asarray(np.hstack([ao_loc, ao_loc[-1]+aux_loc[1:]]),
-                           dtype=np.int32)
+                        dtype=np.int32)
     atm, bas, env = mol_gto.conc_env(atm, bas, env,
-                                 auxcell._atm, auxcell._bas, auxcell._env)
+                                     auxcell._atm, auxcell._bas, auxcell._env)
+    env[mol_gto.PTR_RANGE_OMEGA] = -abs(omega)
     nimgs = len(Ls)
     nbas = cell.nbas
 
@@ -581,7 +583,7 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
         if intor[:3] != 'ECP':
             libpbc.CINTdel_pairdata_optimizer(cintopt)
 
-    cfunc_prefix = "PBCnr3c"
+    cfunc_prefix = "PBCsr3c"
     if not (gamma_point(kptij_lst) or bvk_kmesh is None):
         cfunc_prefix += "_bvk"
     fill = "%s_%s%s" % (cfunc_prefix, kk_type, aosym[:2])
@@ -612,7 +614,7 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
                 dijs_loc.ctypes.data_as(ctypes.c_void_p),
                 atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
                 bas.ctypes.data_as(ctypes.c_void_p),
-                ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
+                ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
                 env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size)
                 )
             return out
@@ -620,7 +622,35 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
     elif is_zero(kpti-kptj):  # j_only
 
         if bvk_kmesh is None:
-            raise NotImplementedError
+            def int3c(shls_slice, out):
+                shls_slice = (shls_slice[0], shls_slice[1],
+                              nbas+shls_slice[2], nbas+shls_slice[3],
+                              nbas*2+shls_slice[4], nbas*2+shls_slice[5])
+                drv(getattr(libpbc, intor), getattr(libpbc, fill),
+                    out.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_int(nkptij), ctypes.c_int(nkpts),
+                    ctypes.c_int(comp), ctypes.c_int(nimgs),
+                    Ls.ctypes.data_as(ctypes.c_void_p),
+                    expkL.ctypes.data_as(ctypes.c_void_p),
+                    kptij_idx.ctypes.data_as(ctypes.c_void_p),
+                    (ctypes.c_int*6)(*shls_slice),
+                    ao_loc.ctypes.data_as(ctypes.c_void_p),
+                    cintopt,
+                    shlpr_mask.ctypes.data_as(ctypes.c_void_p),  # shlpr_mask
+                    refuniqshl_map.ctypes.data_as(ctypes.c_void_p),
+                    auxuniqshl_map.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_int(nbasauxuniq),
+                    uniqexp.ctypes.data_as(ctypes.c_void_p),
+                    dcut2s.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_double(dstep_BOHR),
+                    Rcut2s.ctypes.data_as(ctypes.c_void_p),
+                    dijs_loc.ctypes.data_as(ctypes.c_void_p),
+                    atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
+                    bas.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
+                    env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size)
+                    )
+                return out
         else:
             def int3c(shls_slice, out):
                 shls_slice = (shls_slice[0], shls_slice[1],
@@ -649,7 +679,7 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
                     dijs_loc.ctypes.data_as(ctypes.c_void_p),
                     atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
                     bas.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
+                    ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
                     env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size)
                     )
                 return out
@@ -686,7 +716,7 @@ def wrap_int3c_nospltbas(cell, auxcell, shlpr_mask, prescreening_data,
                     dijs_loc.ctypes.data_as(ctypes.c_void_p),
                     atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
                     bas.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
+                    ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
                     env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size)
                     )
                 return out
@@ -972,8 +1002,8 @@ def wrap_int3c_spltbas(cell, cell0, auxcell, shlpr_mask, prescreening_data,
             libpbc.CINTdel_pairdata_optimizer(cintopt)
 
     if gamma_point(kptij_lst):
-        fill = 'PBCnr3c_gs2_spltbas'
-        drv = libpbc.PBCnr3c_g_spltbas_drv
+        fill = 'PBCsr3c_gs2_spltbas'
+        drv = libpbc.PBCsr3c_g_spltbas_drv
 
         log.debug("Using %s to evaluate SR integrals", fill)
 
@@ -1003,7 +1033,7 @@ def wrap_int3c_spltbas(cell, cell0, auxcell, shlpr_mask, prescreening_data,
                 dijs_loc.ctypes.data_as(ctypes.c_void_p),
                 atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
                 bas.ctypes.data_as(ctypes.c_void_p),
-                ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
+                ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
                 env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size),
                 bas0.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(nbas0),
                 env0.ctypes.data_as(ctypes.c_void_p)
@@ -1012,11 +1042,11 @@ def wrap_int3c_spltbas(cell, cell0, auxcell, shlpr_mask, prescreening_data,
 
     else:
         if bvk_kmesh is None:
-            fill = 'PBCnr3c_%s%s' % (kk_type, aosym[:2])
-            drv = libpbc.PBCnr3c_drv
+            fill = 'PBCsr3c_%s%s' % (kk_type, aosym[:2])
+            drv = libpbc.PBCsr3c_drv
         else:
-            fill = 'PBCnr3c_bvk_%s%s' % (kk_type, aosym[:2])
-            drv = libpbc.PBCnr3c_bvk_drv
+            fill = 'PBCsr3c_bvk_%s%s' % (kk_type, aosym[:2])
+            drv = libpbc.PBCsr3c_bvk_drv
 
         log.debug("Using %s to evaluate SR integrals", fill)
 
@@ -1052,7 +1082,7 @@ def wrap_int3c_spltbas(cell, cell0, auxcell, shlpr_mask, prescreening_data,
     #             cintopt, cpbcopt,
     #             atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
     #             bas.ctypes.data_as(ctypes.c_void_p),
-    #             ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCnr3c_drv
+    #             ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
     #             env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size),
     #             bas0.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(nbas0),
     #             env0.ctypes.data_as(ctypes.c_void_p))

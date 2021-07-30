@@ -57,6 +57,19 @@ from pyscf import lib
 from pyscf.lib import logger
 
 
+def kpts_to_kmesh(cell, kpts):
+    """ Check if kpt mesh includes the Gamma point. Generate the bvk kmesh only if it does.
+    """
+    scaled_k = cell.get_scaled_kpts(kpts).round(8)
+    if np.any(abs(scaled_k).sum(axis=1) < KPT_DIFF_TOL):
+        kmesh = (len(np.unique(scaled_k[:,0])),
+                 len(np.unique(scaled_k[:,1])),
+                 len(np.unique(scaled_k[:,2])))
+    else:
+        kmesh = None
+    return kmesh
+
+
 def weighted_coulG(cell, omega, kpt=np.zeros(3), exx=False, mesh=None):
     if cell.omega != 0:
         raise RuntimeError('RSGDF cannot be used '
@@ -159,8 +172,12 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
 
     omega = abs(mydf.omega)
 
-    if mydf.use_bvkcell and not gamma_point(kptij_lst):
-        bvk_kmesh = pbctools.k2gamma.kpts_to_kmesh(cell, mydf.kpts)
+    if mydf.use_bvk:
+        bvk_kmesh = kpts_to_kmesh(cell, mydf.kpts)
+        if bvk_kmesh is None:
+            log.debug("Non-Gamma-inclusive kmesh is found. bvk kmesh is not used.")
+        else:
+            log.debug("Using bvk kmesh= [%d %d %d]", *bvk_kmesh)
     else:
         bvk_kmesh = None
 
@@ -325,26 +342,25 @@ def _make_j3c(mydf, cell, auxcell, cell_fat, kptij_lst, cderi_file):
     else:
         shls_slice = None
 
-    with mydf.with_range_coulomb(-omega):
-        if split_basis:
-            raise NotImplementedError
-            rsdf_helper._aux_e2_spltbas(
-                            cell, cell_fat, auxcell, omega, fswap, 'int3c2e',
-                            aosym='s2',
-                            kptij_lst=kptij_lst, dataname='j3c-junk',
-                            max_memory=max_memory,
-                            bvk_kmesh=bvk_kmesh,
-                            shlpr_mask_fat=shlpr_mask_fat_c,
-                            shls_slice=shls_slice,
-                            precision=mydf.precision_R)
-        else:
-            rsdf_helper._aux_e2_nospltbas(
-                            cell, auxcell, omega, fswap, 'int3c2e', aosym='s2',
-                            kptij_lst=kptij_lst, dataname='j3c-junk',
-                            max_memory=max_memory,
-                            bvk_kmesh=bvk_kmesh,
-                            shls_slice=shls_slice,
-                            precision=mydf.precision_R)
+    if split_basis:
+        raise NotImplementedError
+        rsdf_helper._aux_e2_spltbas(
+                        cell, cell_fat, auxcell, omega, fswap, 'int3c2e',
+                        aosym='s2',
+                        kptij_lst=kptij_lst, dataname='j3c-junk',
+                        max_memory=max_memory,
+                        bvk_kmesh=bvk_kmesh,
+                        shlpr_mask_fat=shlpr_mask_fat_c,
+                        shls_slice=shls_slice,
+                        precision=mydf.precision_R)
+    else:
+        rsdf_helper._aux_e2_nospltbas(
+                        cell, auxcell, omega, fswap, 'int3c2e', aosym='s2',
+                        kptij_lst=kptij_lst, dataname='j3c-junk',
+                        max_memory=max_memory,
+                        bvk_kmesh=bvk_kmesh,
+                        shls_slice=shls_slice,
+                        precision=mydf.precision_R)
     t1 = log.timer_debug1('3c2e', *t1)
 
     prescreening_data = None
@@ -685,7 +701,7 @@ class RSGDF(df.df.GDF):
     def __init__(self, cell, kpts=np.zeros((1,3))):
         df.df.GDF.__init__(self, cell, kpts=kpts)
 
-        self.use_bvkcell = True # if True, use k-folding for SR-j3c and AFT
+        self.use_bvk = True # if True, use k-folding for SR-j3c and AFT
         self.prescreening_type = 4
         # turned off for now!
         # self.split_basis = True
@@ -738,7 +754,7 @@ class RSGDF(df.df.GDF):
         log.info('******** %s ********', self.__class__)
         log.info('cell num shells = %d, num cGTOs = %d, num pGTOs = %d',
                  cell.nbas, cell.nao_nr(), cell.npgto_nr())
-        log.info('use_bvkcell = %s', self.use_bvkcell)
+        log.info('use_bvk = %s', self.use_bvk)
         log.info('prescreening_type = %d', self.prescreening_type)
         log.info('split_basis = %s', self.split_basis)
         log.info('split_auxbasis = %s', self.split_auxbasis)
@@ -887,7 +903,7 @@ class RSGDF(df.df.GDF):
         self.mesh_j2c = rsdf_helper.estimate_mesh_for_omega(
                                 auxcell, self.omega_j2c, round2odd=True)[1]
         ibas_d_j2c = [i for i in range(auxcell.nbas)
-                      if auxcell.bas_exp(i) < self.omega_j2c**2.]
+                      if auxcell.bas_exp(i).max() < self.omega_j2c**2.]
         aux_loc = auxcell.ao_loc
         if len(ibas_d_j2c) > 0:
             self.idx_d_j2c = np.concatenate([range(aux_loc[i],aux_loc[i+1])
@@ -1056,29 +1072,43 @@ if __name__ == "__main__":
     cell.verbose = 6
 
     # from pyscf.pbc.tools import super_cell
-    # cell = super_cell(cell, [2,2,2])
+    # cell = super_cell(cell, [4,4,4])
 
     e_tot_ref = {1: -74.9739440120803, 2: -75.6947381701805, 3: -75.7572498388948}
     # for nk in [1,3]:
-    for nk in [1]:
-    # for nk in [2]:
+    # for nk in [1]:
+    for nk in [2]:
     # for nk in [3]:
     # for nk in [4]:
         kmesh = (nk,)*3
-        kpts = cell.make_kpts(kmesh)
+        # kpts = cell.make_kpts(kmesh)
+        kpts = cell.make_kpts(kmesh, scaled_center=[0.125,0.23,0.762])
         # kpts = np.array([[0.3725, 0.21, 0.05], [0.98, 0.4, 0.32]])
         # kpts = np.zeros((1,3))
 
-        from pyscf.pbc import scf
+        from pyscf.pbc import scf, mp, cc
         mydf = RSDF(cell, kpts)
-        mydf.npw_max = 350
-        mydf.build()
-        mf = scf.KRHF(cell, kpts=kpts)
+        # mydf.npw_max = 350
+        # mydf.use_bvk = False
+        # mydf.build()
+        mydf.build(j_only=True)
+        # mf = scf.KRHF(cell, kpts=kpts)
+        mf = scf.KRKS(cell, kpts=kpts).density_fit()
+        mf.xc = "pbe"
         mf.with_df = mydf
         mf.kernel()
 
-        mf2 = scf.KRHF(cell, kpts=kpts).density_fit()
+        # mf2 = scf.KRHF(cell, kpts=kpts).density_fit()
+        mf2 = scf.KRKS(cell, kpts=kpts).density_fit()
+        mf2.xc = "pbe"
         mf2.kernel()
         print(mf.e_tot, mf2.e_tot)
+
+
+        mc = cc.KCCSD(mf)
+        mc.kernel()
+        mc2 = cc.KCCSD(mf2)
+        mc2.kernel()
+        print(mc.e_corr, mc2.e_corr)
 
         assert(abs(mf.e_tot - e_tot_ref[nk]) < 1e-6)
