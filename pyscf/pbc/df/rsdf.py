@@ -717,9 +717,11 @@ class RSGDF(df.df.GDF):
         self.extra_precision_G = 1e-2
 
         # One of {omega, npw_max} must be provided, and the other will be deduced automatically from it. The priority when both are given is omega > npw_max.
-        # The default is npw_max = 13^3 for Gamma point and 7^3 otherwise, which has been tested to be a good choice balancing accuracy and speed.
+        # If omega deduced from npw_max is smaller than self._omega_min, omega = omega_min is used.
+        # The default is npw_max = 350 ~ 7x7x7 PWs for 3D isotropic systems.
         # Once omega is determined, mesh_compact is determined for (L|g^lr|pq) to achieve given accuracy, where L = C and pq = cc/cd.
-        self.npw_max = 2250 if is_zero(kpts) else 350
+        self.npw_max = 350
+        self._omega_min = 0.1
         self.omega = None
         self.ke_cutoff = None
         self.mesh_compact = None
@@ -860,6 +862,14 @@ class RSGDF(df.df.GDF):
                                                 self.precision_G,
                                                 kmax=kmax,
                                                 round2odd=r2o)
+            if self.omega < self._omega_min:
+                self.omega = self._omega_min
+                self.ke_cutoff, self.mesh_compact = \
+                                    rsdf_helper.estimate_mesh_for_omega(
+                                                    self.cell, self.omega,
+                                                    self.precision_G,
+                                                    kmax=kmax,
+                                                    round2odd=r2o)
         else:
             self.ke_cutoff, self.mesh_compact = \
                                 rsdf_helper.estimate_mesh_for_omega(
@@ -1048,14 +1058,14 @@ if __name__ == "__main__":
         return atom, a
 
     from pyscf.pbc import gto
-    cell = gto.Cell(
-        atom="C 0 0 0; C 0.89169994, 0.89169994, 0.89169994",
-        a=np.asarray(
-            [[0., 1.78339987, 1.78339987],
-            [1.78339987, 0., 1.78339987],
-            [1.78339987, 1.78339987, 0.]]),
-        basis="cc-pvdz",
-    )
+    # cell = gto.Cell(
+    #     atom="C 0 0 0; C 0.89169994, 0.89169994, 0.89169994",
+    #     a=np.asarray(
+    #         [[0., 1.78339987, 1.78339987],
+    #         [1.78339987, 0., 1.78339987],
+    #         [1.78339987, 1.78339987, 0.]]),
+    #     basis="cc-pvdz",
+    # )
     # atom, a = get_lattice_sc40("LiF")
     # cell = gto.Cell(
     #     atom=atom,
@@ -1063,11 +1073,11 @@ if __name__ == "__main__":
     #     basis="gth-dzvp",
     #     pseudo="gth-pade",
     # )
-    # cell = gto.Cell(
-    #     atom="H 0 0 0; H 0.75 0 0",
-    #     a = np.eye(3)*2.5,
-    #     basis={"H": [[0,(0.5,1.)],[1,(0.3,1.)]]},
-    # )
+    cell = gto.Cell(
+        atom="H 0 0 0; H 0.75 0 0",
+        a = np.eye(3)*2.5,
+        basis={"H": [[0,(0.5,1.)],[1,(0.3,1.)]]},
+    )
     cell.build()
     cell.verbose = 6
 
@@ -1090,17 +1100,17 @@ if __name__ == "__main__":
         mydf = RSDF(cell, kpts)
         # mydf.npw_max = 350
         # mydf.use_bvk = False
-        # mydf.build()
-        mydf.build(j_only=True)
-        # mf = scf.KRHF(cell, kpts=kpts)
-        mf = scf.KRKS(cell, kpts=kpts).density_fit()
-        mf.xc = "pbe"
+        mydf.build()
+        # mydf.build(j_only=True)
+        mf = scf.KRHF(cell, kpts=kpts)
+        # mf = scf.KRKS(cell, kpts=kpts).density_fit()
+        # mf.xc = "pbe"
         mf.with_df = mydf
         mf.kernel()
 
-        # mf2 = scf.KRHF(cell, kpts=kpts).density_fit()
-        mf2 = scf.KRKS(cell, kpts=kpts).density_fit()
-        mf2.xc = "pbe"
+        mf2 = scf.KRHF(cell, kpts=kpts).density_fit()
+        # mf2 = scf.KRKS(cell, kpts=kpts).density_fit()
+        # mf2.xc = "pbe"
         mf2.kernel()
         print(mf.e_tot, mf2.e_tot)
 

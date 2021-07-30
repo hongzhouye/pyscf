@@ -619,75 +619,38 @@ def wrap_int3c_nospltbas(cell, auxcell, omega, shlpr_mask, prescreening_data,
                 )
             return out
 
-    elif is_zero(kpti-kptj):  # j_only
-
-        if bvk_kmesh is None:
-            def int3c(shls_slice, out):
-                shls_slice = (shls_slice[0], shls_slice[1],
-                              nbas+shls_slice[2], nbas+shls_slice[3],
-                              nbas*2+shls_slice[4], nbas*2+shls_slice[5])
-                drv(getattr(libpbc, intor), getattr(libpbc, fill),
-                    out.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_int(nkptij), ctypes.c_int(nkpts),
-                    ctypes.c_int(comp), ctypes.c_int(nimgs),
-                    Ls.ctypes.data_as(ctypes.c_void_p),
-                    expkL.ctypes.data_as(ctypes.c_void_p),
-                    kptij_idx.ctypes.data_as(ctypes.c_void_p),
-                    (ctypes.c_int*6)(*shls_slice),
-                    ao_loc.ctypes.data_as(ctypes.c_void_p),
-                    cintopt,
-                    shlpr_mask.ctypes.data_as(ctypes.c_void_p),  # shlpr_mask
-                    refuniqshl_map.ctypes.data_as(ctypes.c_void_p),
-                    auxuniqshl_map.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_int(nbasauxuniq),
-                    uniqexp.ctypes.data_as(ctypes.c_void_p),
-                    dcut2s.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_double(dstep_BOHR),
-                    Rcut2s.ctypes.data_as(ctypes.c_void_p),
-                    dijs_loc.ctypes.data_as(ctypes.c_void_p),
-                    atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
-                    bas.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
-                    env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size)
-                    )
-                return out
-        else:
-            def int3c(shls_slice, out):
-                shls_slice = (shls_slice[0], shls_slice[1],
-                              nbas+shls_slice[2], nbas+shls_slice[3],
-                              nbas*2+shls_slice[4], nbas*2+shls_slice[5])
-                drv(getattr(libpbc, intor), getattr(libpbc, fill),
-                    out.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_int(nkptij), ctypes.c_int(nkpts),
-                    ctypes.c_int(comp), ctypes.c_int(nimgs),
-                    ctypes.c_int(bvk_nimgs),
-                    Ls.ctypes.data_as(ctypes.c_void_p),
-                    expkL.ctypes.data_as(ctypes.c_void_p),
-                    kptij_idx.ctypes.data_as(ctypes.c_void_p),
-                    (ctypes.c_int*6)(*shls_slice),
-                    ao_loc.ctypes.data_as(ctypes.c_void_p),
-                    cintopt,
-                    cell_loc_bvk.ctypes.data_as(ctypes.c_void_p),   # cell_loc_bvk
-                    shlpr_mask.ctypes.data_as(ctypes.c_void_p),  # shlpr_mask
-                    refuniqshl_map.ctypes.data_as(ctypes.c_void_p),
-                    auxuniqshl_map.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_int(nbasauxuniq),
-                    uniqexp.ctypes.data_as(ctypes.c_void_p),
-                    dcut2s.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_double(dstep_BOHR),
-                    Rcut2s.ctypes.data_as(ctypes.c_void_p),
-                    dijs_loc.ctypes.data_as(ctypes.c_void_p),
-                    atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
-                    bas.ctypes.data_as(ctypes.c_void_p),
-                    ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
-                    env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size)
-                    )
-                return out
-
     else:
 
         if bvk_kmesh is None:
-            raise NotImplementedError
+            def int3c(shls_slice, out):
+                shls_slice = (shls_slice[0], shls_slice[1],
+                              nbas+shls_slice[2], nbas+shls_slice[3],
+                              nbas*2+shls_slice[4], nbas*2+shls_slice[5])
+                drv(getattr(libpbc, intor), getattr(libpbc, fill),
+                    out.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_int(nkptij), ctypes.c_int(nkpts),
+                    ctypes.c_int(comp), ctypes.c_int(nimgs),
+                    Ls.ctypes.data_as(ctypes.c_void_p),
+                    expkL.ctypes.data_as(ctypes.c_void_p),
+                    kptij_idx.ctypes.data_as(ctypes.c_void_p),
+                    (ctypes.c_int*6)(*shls_slice),
+                    ao_loc.ctypes.data_as(ctypes.c_void_p),
+                    cintopt,
+                    shlpr_mask.ctypes.data_as(ctypes.c_void_p),  # shlpr_mask
+                    refuniqshl_map.ctypes.data_as(ctypes.c_void_p),
+                    auxuniqshl_map.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_int(nbasauxuniq),
+                    uniqexp.ctypes.data_as(ctypes.c_void_p),
+                    dcut2s.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_double(dstep_BOHR),
+                    Rcut2s.ctypes.data_as(ctypes.c_void_p),
+                    dijs_loc.ctypes.data_as(ctypes.c_void_p),
+                    atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.natm),
+                    bas.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_int(nbas),  # need to pass cell.nbas to libpbc.PBCsr3c_drv
+                    env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size)
+                    )
+                return out
         else:
             def int3c(shls_slice, out):
                 shls_slice = (shls_slice[0], shls_slice[1],
