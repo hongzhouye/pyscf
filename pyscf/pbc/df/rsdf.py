@@ -470,7 +470,7 @@ class RSGDF(df.df.GDF):
 
     def __init__(self, cell, kpts=np.zeros((1,3))):
         if cell.dimension < 3:
-            raise NotImplementedError("RSGDF for low-dimensional systems are not available yet.")
+            raise NotImplementedError("RSGDF for low-dimensional systems are not available yet. We recommend using cell.dimension=3 with large vacuum.")
 
         df.df.GDF.__init__(self, cell, kpts=kpts)
 
