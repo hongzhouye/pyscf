@@ -40,12 +40,9 @@ import h5py
 import scipy
 import scipy.linalg
 import tempfile
-import threading
-import contextlib
 import numpy as np
 
 from pyscf import gto as mol_gto
-from pyscf.gto.mole import PTR_RANGE_OMEGA
 from pyscf.pbc import df
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.df import rsdf_helper
@@ -462,7 +459,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
 
 
 class RSGDF(df.df.GDF):
-    '''Range Separated Hybrid Density Fitting
+    '''Range Separated Gaussian Density Fitting
     '''
 
     # class methods defined outside the class

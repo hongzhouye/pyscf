@@ -20,7 +20,6 @@ import sys
 import ctypes
 import copy
 import h5py
-import time
 import numpy as np
 from scipy.special import gamma, gammaincc, comb
 
@@ -29,7 +28,6 @@ from pyscf.pbc import df
 from pyscf.pbc.lib.kpts_helper import is_zero, gamma_point, unique, KPT_DIFF_TOL
 from pyscf.pbc import tools as pbctools
 from pyscf.scf import _vhf
-from pyscf.pbc.gto import _pbcintor
 from pyscf.pbc.tools import k2gamma
 from pyscf import lib
 from pyscf.lib import logger
