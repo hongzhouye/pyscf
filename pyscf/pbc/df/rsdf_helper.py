@@ -1155,6 +1155,8 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
                                  kptij_lst,
                                  bvk_kmesh=bvk_kmesh)
 
+    tspans = np.zeros((2,2))     # cmpt, cmpt+save
+    tspannames = ["cmpt", "cmpt+save"]
     def process(aux_range):
         sh0, sh1, nrow = aux_range
         sub_slice = (shls_slice[0], shls_slice[1],
@@ -1163,7 +1165,10 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
         mat = np.ndarray((nkptij,comp,nao_pair,nrow), dtype=dtype,
                          buffer=bufs[0])
         bufs[:] = bufs[1], bufs[0]
+        tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
         int3c(sub_slice, mat)
+        tock_ = np.asarray((logger.process_clock(), logger.perf_counter()))
+        tspans[0] += tock_ - tick_
         return mat
 
     kptis = kptij_lst[:,0]
@@ -1181,6 +1186,7 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
     tril_idx = np.tril_indices(ni)
     tril_idx = tril_idx[0] * ni + tril_idx[1]
 
+    tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
     for istep, mat in enumerate(lib.map_with_prefetch(process, auxranges)):
         for k in sorted_ij_idx:
             v = mat[k]
@@ -1190,6 +1196,13 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
                 v = v[:,tril_idx]
             feri['%s/%d/%d' % (dataname,k,istep)] = v
         mat = None
+    tock_ = np.asarray((logger.process_clock(), logger.perf_counter()))
+    tspans[1] += tock_ - tick_
+
+    for tspan, tspanname in zip(tspans, tspannames):
+        log.debug1("    CPU time for %10s %9.2f sec, wall time %9.2f sec",
+                   "%10s"%tspanname, *tspan)
+    log.debug1("%s", "")
 
     if not isinstance(erifile, h5py.Group):
         feri.close()

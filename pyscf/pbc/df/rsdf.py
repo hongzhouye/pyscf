@@ -269,8 +269,8 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
     ngrids = gxyz.shape[0]
 
     # Add (1) short-range G=0 (i.e., charge) part and (2) long-range part
-    tspans = np.zeros((2,2))    # lr, df_solv
-    tspannames = ["ftaop+pw", "df_solv"]
+    tspans = np.zeros((3,2))    # lr, j2c_inv, j2c_cntr
+    tspannames = ["ftaop+pw", "j2c_inv", "j2c_cntr"]
     feri = h5py.File(cderi_file, 'w')
     feri['j3c-kptij'] = kptij_lst
     nsegs = len(fswap['j3c-junk/0'])
@@ -392,7 +392,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
                     feri['j3c-/%d/%d'%(ji,istep)] = lib.dot(j2c_negative, v)
             j3cR = j3cI = None
             tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
-            tspans[1] += tick_ - tock_
+            tspans[2] += tick_ - tock_
 
         for ji in adapted_ji_idx:
             del(fswap['j3c-junk/%d'%ji])
@@ -426,7 +426,10 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
             continue
 
         log.debug1('Cholesky decomposition for j2c at kpt %s', k)
+        tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
         cholesky_j2c = cholesky_decomposed_metric(k)
+        tock_ = np.asarray((logger.process_clock(), logger.perf_counter()))
+        tspans[1] += tock_ - tick_
 
         # The k-point k' which has (k - k') * a = 2n pi. Metric integrals have the
         # symmetry S = S
