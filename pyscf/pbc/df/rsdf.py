@@ -269,8 +269,8 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
     ngrids = gxyz.shape[0]
 
     # Add (1) short-range G=0 (i.e., charge) part and (2) long-range part
-    tspans = np.zeros((5,2))    # ft_aop, pw_cntr, j2c_cntr, write, read
-    tspannames = ["ft_aop", "pw_cntr", "j2c_cntr", "write", "read"]
+    tspans = np.zeros((2,2))    # lr, df_solv
+    tspannames = ["ftaop+pw", "df_solv"]
     feri = h5py.File(cderi_file, 'w')
     feri['j3c-kptij'] = kptij_lst
     nsegs = len(fswap['j3c-junk/0'])
@@ -308,8 +308,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
         log.debug2('memory = %s', mem_now)
         max_memory = max(2000, mydf.max_memory-mem_now)
         # nkptj for 3c-coulomb arrays plus 1 Lpq array
-        buflen = min(max(int(max_memory*.38e6/16/naux/(nkptj+1)), 1),
-                     nao_pair)
+        buflen = min(max(int(max_memory*.38e6/16/naux/(nkptj+1)), 1), nao_pair)
         shranges = _guess_shell_ranges(cell, buflen, aosym)
         buflen = max([x[2] for x in shranges])
         # +1 for a pqkbuf
@@ -318,25 +317,49 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
         else:
             Gblksize = max(16, int(max_memory*.2e6/16/buflen/(nkptj+1)))
         Gblksize = min(Gblksize, ngrids, 16384)
+
+        def load(aux_slice):
+            col0, col1 = aux_slice
+            j3cR = []
+            j3cI = []
+            for k, idx in enumerate(adapted_ji_idx):
+                v = np.vstack([fswap['j3c-junk/%d/%d'%(idx,i)][0,col0:col1].T
+                               for i in range(nsegs)])
+                # vbar is the interaction between the background charge
+                # and the auxiliary basis.  0D, 1D, 2D do not have vbar.
+                if is_zero(kpt) and cell.dimension == 3:
+                    for i in np.where(vbar != 0)[0]:
+                        v[i] -= vbar[i] * ovlp[k][col0:col1]
+                j3cR.append(np.asarray(v.real, order='C'))
+                if is_zero(kpt) and gamma_point(adapted_kptjs[k]):
+                    j3cI.append(None)
+                else:
+                    j3cI.append(np.asarray(v.imag, order='C'))
+                v = None
+            return j3cR, j3cI
+
         pqkRbuf = np.empty(buflen*Gblksize)
         pqkIbuf = np.empty(buflen*Gblksize)
         # buf for ft_aopair
         buf = np.empty(nkptj*buflen*Gblksize, dtype=np.complex128)
-        def pw_contract(istep, sh_range, j3cR, j3cI):
-            bstart, bend, ncol = sh_range
+        cols = [sh_range[2] for sh_range in shranges]
+        locs = np.append(0, np.cumsum(cols))
+        tasks = zip(locs[:-1], locs[1:])
+        for istep, (j3cR, j3cI) in enumerate(lib.map_with_prefetch(load, tasks)):
+            bstart, bend, ncol = shranges[istep]
+            log.debug1('int3c2e [%d/%d], AO [%d:%d], ncol = %d',
+                       istep+1, len(shranges), bstart, bend, ncol)
             if aosym == 's2':
                 shls_slice = (bstart, bend, 0, bend)
             else:
                 shls_slice = (bstart, bend, 0, cell.nbas)
 
+            tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
             for p0, p1 in lib.prange(0, ngrids, Gblksize):
-                tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
-                dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice,
-                                           aosym, b, gxyz[p0:p1], Gvbase,
-                                           kpt, adapted_kptjs, out=buf,
+                dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice, aosym,
+                                           b, gxyz[p0:p1], Gvbase, kpt,
+                                           adapted_kptjs, out=buf,
                                            bvk_kmesh=bvk_kmesh)
-                tock_ = np.asarray((logger.process_clock(), logger.perf_counter()))
-                tspans[0] += tock_ - tick_
                 nG = p1 - p0
                 for k, ji in enumerate(adapted_ji_idx):
                     aoao = dat[k].reshape(nG,ncol)
@@ -350,56 +373,27 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
                     if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
                         lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3cI[k][:], 1)
                         lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3cI[k][:], 1)
-                tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
-                tspans[1] += tick_ - tock_
+            tock_ = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[0] += tock_ - tick_
 
             for k, ji in enumerate(adapted_ji_idx):
-                tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
                 if is_zero(kpt) and gamma_point(adapted_kptjs[k]):
                     v = j3cR[k]
                 else:
                     v = j3cR[k] + j3cI[k] * 1j
                 if j2ctag == 'CD':
-                    feri['j3c/%d/%d'%(ji,istep)] = \
-                            scipy.linalg.solve_triangular(j2c, v,
-                                                          lower=True,
-                                                          overwrite_b=True)
+                    v = scipy.linalg.solve_triangular(j2c, v, lower=True, overwrite_b=True)
+                    feri['j3c/%d/%d'%(ji,istep)] = v
                 else:
                     feri['j3c/%d/%d'%(ji,istep)] = lib.dot(j2c, v)
-                tock_ = np.asarray((logger.process_clock(), logger.perf_counter()))
-                tspans[2] += tock_ - tick_
 
                 # low-dimension systems
                 if j2c_negative is not None:
                     feri['j3c-/%d/%d'%(ji,istep)] = lib.dot(j2c_negative, v)
+            j3cR = j3cI = None
+            tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[1] += tick_ - tock_
 
-        with lib.call_in_background(pw_contract) as compute:
-            col1 = 0
-            for istep, sh_range in enumerate(shranges):
-                log.debug1('int3c2e [%d/%d], AO [%d:%d], ncol = %d',
-                           istep+1, len(shranges), *sh_range)
-                bstart, bend, ncol = sh_range
-                col0, col1 = col1, col1+ncol
-                j3cR = []
-                j3cI = []
-                tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
-                for k, idx in enumerate(adapted_ji_idx):
-                    v = np.vstack([fswap['j3c-junk/%d/%d'%(idx,i)][0,col0:col1].T
-                                      for i in range(nsegs)])
-                    # vbar is the interaction between the background charge
-                    # and the auxiliary basis.  0D, 1D, 2D do not have vbar.
-                    if is_zero(kpt) and cell.dimension == 3:
-                        for i in np.where(vbar != 0)[0]:
-                            v[i] -= vbar[i] * ovlp[k][col0:col1]
-                    j3cR.append(np.asarray(v.real, order='C'))
-                    if is_zero(kpt) and gamma_point(adapted_kptjs[k]):
-                        j3cI.append(None)
-                    else:
-                        j3cI.append(np.asarray(v.imag, order='C'))
-                v = None
-                tock_ = np.asarray((logger.process_clock(), logger.perf_counter()))
-                tspans[4] += tock_ - tick_
-                compute(istep, sh_range, j3cR, j3cI)
         for ji in adapted_ji_idx:
             del(fswap['j3c-junk/%d'%ji])
 
