@@ -541,9 +541,7 @@ def get_3c2e_Rcuts_for_d(mol, auxmol, ish, jsh, dij, cellvol, omega, precision,
                 l_facs = O12s * O3 * abs(get_bincoeff(d,e1,e2,l1,l2))
 
             def feval(R):
-                I = 0.
-                for l_fac,l in zip(l_facs,ls):
-                    I += l_fac * Gamma(l+l3+0.5,eta2*R**2.) / R**(l+l3+1)
+                I = (l_facs * Gamma(ls+l3+0.5,eta2*R**2.) / R**(ls+l3+1)).sum()
                 return I * fac
 
         elif FAC_TYPE == "ISF0":
