@@ -23,13 +23,14 @@ ref.:
 [1] For the RSGDF method:
     Hong-Zhou Ye and Timothy C. Berkelbach, J. Chem. Phys. 154, 131104 (2021).
 [2] For the SR lattice sum integral screening:
-    Hong-Zhou Ye and Timothy C. Berkelbach, to be published.
+    Hong-Zhou Ye and Timothy C. Berkelbach, arXiv:2107.09704.
 
-In GDF, the computational bottleneck is to compute the three-center Coulomb integrals VPmunu^k1k2 = (chi_P^k12 | g(r_12) | rho_{munu}^{k1k2}). In RSGDF, the Coulomb kernel is range-separated into two parts,
-    g(r_12) = g^SR(r_12) + g^LR(r_12)
-where
-    g^SR(r_12) = erfc(omega r_12) / r_12
-    g^LR(r_12) = erf(omega r_12) / r_12
+In RSGDF, the two-center and three-center Coulomb integrals are calculated in two pars:
+    j2c = j2c_SR(omega) + j2c_LR(omega)
+    j3c = j3c_SR(omega) + j3c_LR(omega)
+where the SR and LR integrals correpond to using the following potentials
+    g_SR(r_12;omega) = erfc(omega * r_12) / r_12
+    g_LR(r_12;omega) = erf(omega * r_12) / r_12
 The SR integrals are evaluated in real space using a lattice summation, while the LR integrals are evaluated in reciprocal space with a plane wave basis.
 '''
 
@@ -480,7 +481,7 @@ class RSGDF(df.df.GDF):
         # One of {omega, npw_max} must be provided, and the other will be deduced automatically from it. The priority when both are given is omega > npw_max.
         # If omega deduced from npw_max is smaller than self._omega_min, omega = omega_min is used.
         # The default is npw_max = 350 ~ 7x7x7 PWs for 3D isotropic systems.
-        # Once omega is determined, mesh_compact is determined for (L|g^lr|pq) to achieve given accuracy, where L = C and pq = cc/cd.
+        # Once omega is determined, mesh_compact is determined for (L|g^lr|pq) to achieve given accuracy.
         self.npw_max = 350
         self._omega_min = 0.1
         self.omega = None
