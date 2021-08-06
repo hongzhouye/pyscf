@@ -321,7 +321,7 @@ def _make_j3c(mydf, cell, auxcell, kptij_lst, cderi_file):
             j3cR = []
             j3cI = []
             for k, idx in enumerate(adapted_ji_idx):
-                v = np.vstack([fswap['j3c-junk/%d/%d'%(idx,i)][0,col0:col1].T
+                v = np.vstack([fswap['j3c-junk/%d/%d'%(idx,i)][0,:,col0:col1]
                                for i in range(nsegs)])
                 # vbar is the interaction between the background charge
                 # and the auxiliary basis.  0D, 1D, 2D do not have vbar.

@@ -1158,7 +1158,7 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
         sub_slice = (shls_slice[0], shls_slice[1],
                      shls_slice[2], shls_slice[3],
                      shls_slice[4]+sh0, shls_slice[4]+sh1)
-        mat = np.ndarray((nkptij,comp,nao_pair,nrow), dtype=dtype,
+        mat = np.ndarray((nkptij,comp,nrow,nao_pair), dtype=dtype,
                          buffer=bufs[0])
         bufs[:] = bufs[1], bufs[0]
         tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
@@ -1184,12 +1184,13 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
 
     tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
     for istep, mat in enumerate(lib.map_with_prefetch(process, auxranges)):
+        print(istep)
         for k in sorted_ij_idx:
             v = mat[k]
             if gamma_point(kptij_lst[k]):
                 v = v.real
             if aosym_ks2[k] and nao_pair == ni**2:
-                v = v[:,tril_idx]
+                v = v[:,:,tril_idx]
             feri['%s/%d/%d' % (dataname,k,istep)] = v
         mat = None
     tock_ = np.asarray((logger.process_clock(), logger.perf_counter()))

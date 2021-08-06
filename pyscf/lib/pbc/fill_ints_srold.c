@@ -311,25 +311,28 @@ static void sort3c_gs2_igtj(double *out, double *in, int *shls_slice,
     const int dj = ao_loc[jsh+1] - ao_loc[jsh];
     const int dij = di * dj;
     const int jp = ao_loc[jsh] - ao_loc[jsh0];
-    out += (ao_loc[ish]*(ao_loc[ish]+1)/2-off0 + jp) * naok;
+    out += ao_loc[ish]*(ao_loc[ish]+1)/2-off0 + jp;
 
     int i, j, k, ij, ksh, ic, dk, dijk;
-    double *pin, *pout;
+    double *pin, *pout, *ppout;
 
     for (ksh = msh0; ksh < msh1; ksh++) {
         dk = ao_loc[ksh+1] - ao_loc[ksh];
         dijk = dij * dk;
         for (ic = 0; ic < comp; ic++) {
-            pout = out + nijk * ic + ao_loc[ksh]-ao_loc[ksh0];
+            pout = out + nijk * ic + (ao_loc[ksh]-ao_loc[ksh0]) * nij;
             pin = in + dijk * ic;
-            for (i = 0; i < di; i++) {
-                for (j = 0; j < dj; j++) {
-                    ij = j * di + i;
-                    for (k = 0; k < dk; k++) {
-                        pout[j*naok+k] = pin[k*dij+ij];
+            for (k = 0; k < dk; k++) {
+                ppout = pout;
+                for (i = 0; i < di; i++) {
+                    for (j = 0; j < dj; j++) {
+                        ij = j * di + i;
+                        ppout[j] = pin[ij];
                     }
+                    ppout += i+ao_loc[ish]+1;
                 }
-                pout += (i+ao_loc[ish]+1) * naok;
+                pin += dij;
+                pout += nij;
             }
         }
         in += dijk * comp;
@@ -352,25 +355,28 @@ static void sort3c_gs2_ieqj(double *out, double *in, int *shls_slice,
     const int di = ao_loc[ish+1] - ao_loc[ish];
     const int dij = di * di;
     const int jp = ao_loc[jsh] - ao_loc[jsh0];
-    out += (ao_loc[ish]*(ao_loc[ish]+1)/2-off0 + jp) * naok;
+    out += ao_loc[ish]*(ao_loc[ish]+1)/2-off0 + jp;
 
     int i, j, k, ij, ksh, ic, dk, dijk;
-    double *pin, *pout;
+    double *pin, *pout, *ppout;
 
     for (ksh = msh0; ksh < msh1; ksh++) {
         dk = ao_loc[ksh+1] - ao_loc[ksh];
         dijk = dij * dk;
         for (ic = 0; ic < comp; ic++) {
-            pout = out + nijk * ic + ao_loc[ksh]-ao_loc[ksh0];
+            pout = out + nijk * ic + (ao_loc[ksh]-ao_loc[ksh0]) * nij;
             pin = in + dijk * ic;
-            for (i = 0; i < di; i++) {
-                for (j = 0; j <= i; j++) {
-                    ij = j * di + i;
-                    for (k = 0; k < dk; k++) {
-                        pout[j*naok+k] = pin[k*dij+ij];
+            for (k = 0; k < dk; k++) {
+                ppout = pout;
+                for (i = 0; i < di; i++) {
+                    for (j = 0; j <= i; j++) {
+                        ij = j * di + i;
+                        ppout[j] = pin[ij];
                     }
+                    ppout += i+ao_loc[ish]+1;
                 }
-                pout += (i+ao_loc[ish]+1) * naok;
+                pin += dij;
+                pout += nij;
             }
         }
         in += dijk * comp;
@@ -601,6 +607,7 @@ static void sort3c_ks1(double complex *out, double *bufr, double *bufi,
     const size_t naok = ao_loc[ksh1] - ao_loc[ksh0];
     const size_t njk = naoj * naok;
     const size_t nijk = njk * naoi;
+    const size_t nij = naoi * naoj;
 
     const int di = ao_loc[ish+1] - ao_loc[ish];
     const int dj = ao_loc[jsh+1] - ao_loc[jsh];
@@ -609,12 +616,12 @@ static void sort3c_ks1(double complex *out, double *bufr, double *bufi,
     const int dij = di * dj;
     const int dkmax = ao_loc[msh1] - ao_loc[msh0];
     const size_t dijmc = dij * dkmax * comp;
-    out += (ip * naoj + jp) * naok;
+    out += ip * naoj + jp;
 
-    int i, j, k, kk, ksh, ic, dk, dijk;
+    int i, j, ij, k, kk, ksh, ic, dk, dijk;
     size_t off;
     double *pbr, *pbi;
-    double complex *pout;
+    double complex *pout, *ppout;
 
     for (kk = 0; kk < nkpts; kk++) {
         off = kk * dijmc;
@@ -622,18 +629,21 @@ static void sort3c_ks1(double complex *out, double *bufr, double *bufi,
             dk = ao_loc[ksh+1] - ao_loc[ksh];
             dijk = dij * dk;
             for (ic = 0; ic < comp; ic++) {
-                pout = out + nijk*ic + ao_loc[ksh]-ao_loc[ksh0];
+                pout = out + nijk*ic + (ao_loc[ksh]-ao_loc[ksh0]) * nij;
                 pbr = bufr + off + dijk*ic;
                 pbi = bufi + off + dijk*ic;
-                for (j = 0; j < dj; j++) {
-                    for (k = 0; k < dk; k++) {
-                        for (i = 0; i < di; i++) {
-                            pout[i*njk+k] = pbr[k*dij+i] + pbi[k*dij+i]*_Complex_I;
+                for (k = 0; k < dk; k++) {
+                    ppout = pout;
+                    for (i = 0; i < di; i++) {
+                        for (j = 0; j < dj; j++) {
+                            ij = j * di + i;
+                            ppout[j] = pbr[ij] + pbi[ij]*_Complex_I;
                         }
+                        ppout += naoj;
                     }
-                    pout += naok;
-                    pbr += di;
-                    pbi += di;
+                    pbr += dij;
+                    pbi += dij;
+                    pout += nij;
                 }
             }
             off += dijk * comp;
@@ -661,12 +671,12 @@ static void sort3c_ks2_igtj(double complex *out, double *bufr, double *bufi,
     const int dkmax = ao_loc[msh1] - ao_loc[msh0];
     const size_t dijmc = dij * dkmax * comp;
     const int jp = ao_loc[jsh] - ao_loc[jsh0];
-    out += (((size_t)ao_loc[ish])*(ao_loc[ish]+1)/2-off0 + jp) * naok;
+    out += ((size_t)ao_loc[ish])*(ao_loc[ish]+1)/2-off0 + jp;
 
     int i, j, k, ij, kk, ksh, ic, dk, dijk;
     size_t off;
     double *pbr, *pbi;
-    double complex *pout;
+    double complex *pout, *ppout;
 
     for (kk = 0; kk < nkpts; kk++) {
         off = kk * dijmc;
@@ -674,17 +684,21 @@ static void sort3c_ks2_igtj(double complex *out, double *bufr, double *bufi,
             dk = ao_loc[ksh+1] - ao_loc[ksh];
             dijk = dij * dk;
             for (ic = 0; ic < comp; ic++) {
-                pout = out + nijk*ic + ao_loc[ksh]-ao_loc[ksh0];
+                pout = out + nijk*ic + (ao_loc[ksh]-ao_loc[ksh0]) * nij;
                 pbr = bufr + off + dijk*ic;
                 pbi = bufi + off + dijk*ic;
-                for (i = 0; i < di; i++) {
-                    for (j = 0; j < dj; j++) {
-                        ij = j * di + i;
-                        for (k = 0; k < dk; k++) {
-                            pout[j*naok+k] = pbr[k*dij+ij] + pbi[k*dij+ij]*_Complex_I;
+                for (k = 0; k < dk; k++) {
+                    ppout = pout;
+                    for (i = 0; i < di; i++) {
+                        for (j = 0; j < dj; j++) {
+                            ij = j * di + i;
+                            ppout[j] = pbr[ij] + pbi[ij]*_Complex_I;
                         }
+                        ppout += i+ao_loc[ish]+1;
                     }
-                    pout += (i+ao_loc[ish]+1) * naok;
+                    pbr += dij;
+                    pbi += dij;
+                    pout += nij;
                 }
             }
             off += dijk * comp;
@@ -712,12 +726,12 @@ static void sort3c_ks2_ieqj(double complex *out, double *bufr, double *bufi,
     const int dkmax = ao_loc[msh1] - ao_loc[msh0];
     const size_t dijmc = dij * dkmax * comp;
     const int jp = ao_loc[jsh] - ao_loc[jsh0];
-    out += (((size_t)ao_loc[ish])*(ao_loc[ish]+1)/2-off0 + jp) * naok;
+    out += ((size_t)ao_loc[ish])*(ao_loc[ish]+1)/2-off0 + jp;
 
     int i, j, k, ij, kk, ksh, ic, dk, dijk;
     size_t off;
     double *pbr, *pbi;
-    double complex *pout;
+    double complex *pout, *ppout;
 
     for (kk = 0; kk < nkpts; kk++) {
         off = kk * dijmc;
@@ -725,17 +739,21 @@ static void sort3c_ks2_ieqj(double complex *out, double *bufr, double *bufi,
             dk = ao_loc[ksh+1] - ao_loc[ksh];
             dijk = dij * dk;
             for (ic = 0; ic < comp; ic++) {
-                pout = out + nijk*ic + ao_loc[ksh]-ao_loc[ksh0];
+                pout = out + nijk*ic + (ao_loc[ksh]-ao_loc[ksh0]) * nij;
                 pbr = bufr + off + dijk*ic;
                 pbi = bufi + off + dijk*ic;
-                for (i = 0; i < di; i++) {
-                    for (j = 0; j <= i; j++) {
-                        ij = j * di + i;
-                        for (k = 0; k < dk; k++) {
-                            pout[j*naok+k] = pbr[k*dij+ij] + pbi[k*dij+ij]*_Complex_I;
+                for (k = 0; k < dk; k++) {
+                    ppout = pout;
+                    for (i = 0; i < di; i++) {
+                        for (j = 0; j <= i; j++) {
+                            ij = j * di + i;
+                            ppout[j] = pbr[ij] + pbi[ij]*_Complex_I;
                         }
+                        ppout += i+ao_loc[ish]+1;
                     }
-                    pout += (i+ao_loc[ish]+1) * naok;
+                    pbr += dij;
+                    pbi += dij;
+                    pout += nij;
                 }
             }
             off += dijk * comp;
@@ -1321,6 +1339,7 @@ static void sort3c_kks1(double complex *out, double *bufr, double *bufi,
     const size_t naok = ao_loc[ksh1] - ao_loc[ksh0];
     const size_t njk = naoj * naok;
     const size_t nijk = njk * naoi;
+    const size_t nij = naoi * naoj;
 
     const int di = ao_loc[ish+1] - ao_loc[ish];
     const int dj = ao_loc[jsh+1] - ao_loc[jsh];
@@ -1329,12 +1348,12 @@ static void sort3c_kks1(double complex *out, double *bufr, double *bufi,
     const int dij = di * dj;
     const int dkmax = ao_loc[msh1] - ao_loc[msh0];
     const size_t dijmc = dij * dkmax * comp;
-    out += (ip * naoj + jp) * naok;
+    out += ip * naoj + jp;
 
-    int i, j, k, kk, ik, jk, ksh, ic, dk, dijk;
+    int i, j, ij, k, kk, ik, jk, ksh, ic, dk, dijk;
     size_t off;
     double *pbr, *pbi;
-    double complex *pout;
+    double complex *pout, *ppout;
 
     for (kk = 0; kk < nkpts_ij; kk++) {
         ik = kptij_idx[kk] / nkpts;
@@ -1345,19 +1364,21 @@ static void sort3c_kks1(double complex *out, double *bufr, double *bufi,
             dk = ao_loc[ksh+1] - ao_loc[ksh];
             dijk = dij * dk;
             for (ic = 0; ic < comp; ic++) {
-                pout = out + nijk*ic + ao_loc[ksh]-ao_loc[ksh0];
+                pout = out + nijk*ic + (ao_loc[ksh]-ao_loc[ksh0])*nij;
                 pbr = bufr + off + dijk*ic;
                 pbi = bufi + off + dijk*ic;
-                for (j = 0; j < dj; j++) {
-                    for (k = 0; k < dk; k++) {
-                        for (i = 0; i < di; i++) {
-                            pout[i*njk+k] = pbr[k*dij+i] +
-                                            pbi[k*dij+i]*_Complex_I;
+                for (k = 0; k < dk; k++) {
+                    ppout = pout;
+                    for (i = 0; i < di; i++) {
+                        for (j = 0; j < dj; j++) {
+                            ij = j * di + i;
+                            ppout[j] = pbr[ij] + pbi[ij]*_Complex_I;
                         }
+                        ppout += naoj;
                     }
-                    pout += naok;
-                    pbr += di;
-                    pbi += di;
+                    pout += nij;
+                    pbr += dij;
+                    pbi += dij;
                 }
             }
             off += dijk * comp;
@@ -1382,6 +1403,7 @@ static void sort3c_kks2_igtj(double complex *out, double *bufr, double *bufi,
     assert(naoi == naoj);
     const size_t njk = naoj * naok;
     const size_t nijk = njk * naoi;
+    const size_t nij = naoi * naoj;
 
     const int di = ao_loc[ish+1] - ao_loc[ish];
     const int dj = ao_loc[jsh+1] - ao_loc[jsh];
@@ -1390,13 +1412,13 @@ static void sort3c_kks2_igtj(double complex *out, double *bufr, double *bufi,
     const int dij = di * dj;
     const int dkmax = ao_loc[msh1] - ao_loc[msh0];
     const size_t dijmc = dij * dkmax * comp;
-    double complex *outij = out + (ip * naoj + jp) * naok;
-    double complex *outji = out + (jp * naoj + ip) * naok;
+    double complex *outij = out + ip * naoj + jp;
+    double complex *outji = out + jp * naoj + ip;
 
-    int i, j, k, kk, ik, jk, ksh, ic, dk, dijk;
+    int i, j, ij, k, kk, ik, jk, ksh, ic, dk, dijk;
     size_t offij, offji;
     double *pbij_r, *pbij_i, *pbji_r, *pbji_i;
-    double complex *poutij, *poutji;
+    double complex *poutij, *poutji, *ppoutij, *ppoutji;
 
     for (kk = 0; kk < nkpts_ij; kk++) {
         ik = kptij_idx[kk] / nkpts;
@@ -1408,26 +1430,35 @@ static void sort3c_kks2_igtj(double complex *out, double *bufr, double *bufi,
             dk = ao_loc[ksh+1] - ao_loc[ksh];
             dijk = dij * dk;
             for (ic = 0; ic < comp; ic++) {
-                poutij = outij + nijk*ic + ao_loc[ksh]-ao_loc[ksh0];
-                poutji = outji + nijk*ic + ao_loc[ksh]-ao_loc[ksh0];
+                poutij = outij + nijk*ic + (ao_loc[ksh]-ao_loc[ksh0])*nij;
+                poutji = outji + nijk*ic + (ao_loc[ksh]-ao_loc[ksh0])*nij;
                 pbij_r = bufr + offij + dijk*ic;
                 pbij_i = bufi + offij + dijk*ic;
                 pbji_r = bufr + offji + dijk*ic;
                 pbji_i = bufi + offji + dijk*ic;
 
-                for (j = 0; j < dj; j++) {
-                    for (k = 0; k < dk; k++) {
-                        for (i = 0; i < di; i++) {
-                            poutij[i*njk +k] = pbij_r[k*dij+i] + pbij_i[k*dij+i]*_Complex_I;
-                            poutji[i*naok+k] = pbji_r[k*dij+i] - pbji_i[k*dij+i]*_Complex_I;
+                for (k = 0; k < dk; k++) {
+                    ppoutij = poutij;
+                    for (i = 0; i < di; i++) {
+                        for (j = 0; j < dj; j++) {
+                            ij = j * di + i;
+                            ppoutij[j] = pbij_r[ij] + pbij_i[ij]*_Complex_I;
                         }
+                        ppoutij += naoj;
                     }
-                    poutij += naok;
-                    poutji += njk;
-                    pbij_r += di;
-                    pbij_i += di;
-                    pbji_r += di;
-                    pbji_i += di;
+                    ppoutji = poutji;
+                    for (j = 0, ij = 0; j < dj; j++) {
+                        for (i = 0; i < di; i++, ij++) {
+                            ppoutji[i] = pbji_r[ij] - pbji_i[ij]*_Complex_I;
+                        }
+                        ppoutji += naoj;
+                    }
+                    poutij += nij;
+                    poutji += nij;
+                    pbij_r += dij;
+                    pbij_i += dij;
+                    pbji_r += dij;
+                    pbji_i += dij;
                 }
             }
             offij += dijk * comp;
