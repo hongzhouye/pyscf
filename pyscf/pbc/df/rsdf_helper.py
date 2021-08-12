@@ -1015,38 +1015,13 @@ def intor_j2c(cell, omega, precision=None, kpts=None, hermi=1, shls_slice=None,
 """ Helper functions for short-range j3c via real space lattice sum
     Modified from pyscf.pbc.df.outcore/incore
 """
-def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
-                      intor='int3c2e',
-                      aosym='s2ij', Ls=None, comp=None, kptij_lst=None,
-                      dataname='eri_mo', shls_slice=None, max_memory=2000,
-                      bvk_kmesh=None,
-                      precision=None,
-                      fac_type="ME",
-                      eta_correct=True, R_correct=True,
-                      vol_correct_d=False, vol_correct_R=False,
-                      dstep=1,  # unit: Angstrom
-                      verbose=0):
-    r'''3-center AO integrals (ij|L) with double lattice sum:
-    \sum_{lm} (i[l]j[m]|L[0]), where L is the auxiliary basis.
-    Three-index integral tensor (kptij_idx, nao_pair, naux) or four-index
-    integral tensor (kptij_idx, comp, nao_pair, naux) are stored on disk.
-
-    **This function should be only used by RSGDF initialization function
-    _make_j3c**
-
-    Args:
-        kptij_lst : (*,2,3) array
-            A list of (kpti, kptj)
-    '''
+def get_prescreening_data(cell, auxcell, omega, precision=None, fac_type="ME",
+                          eta_correct=True, R_correct=True,
+                          vol_correct_d=False, vol_correct_R=False,
+                          dstep=1,  # unit: Angstrom
+                          ):
     log = logger.Logger(cell.stdout, cell.verbose)
 
-    if isinstance(auxcell_or_auxbasis, mol_gto.Mole):
-        auxcell = auxcell_or_auxbasis
-    else:
-        auxcell = make_auxcell(cell, auxcell_or_auxbasis)
-
-# prescreening data
-    t1 = (logger.process_clock(), logger.perf_counter())
     if precision is None: precision = cell.precision
     refuniqshl_map, uniq_atms, uniq_bas, uniq_bas_loc = get_refuniq_map(cell)
     auxuniqshl_map, uniq_atms, uniq_basaux, uniq_basaux_loc = \
@@ -1080,6 +1055,46 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
                          dcut2s, dstep_BOHR, Rcut2s, dijs_loc, Ls)
     log.debug("j3c prescreening: cell rcut %.2f Bohr  keep %d imgs",
               cell_rcut, Ls.shape[0])
+    return prescreening_data
+def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
+                      intor='int3c2e',
+                      aosym='s2ij', Ls=None, comp=None, kptij_lst=None,
+                      dataname='eri_mo', shls_slice=None, max_memory=2000,
+                      bvk_kmesh=None,
+                      precision=None,
+                      fac_type="ME",
+                      eta_correct=True, R_correct=True,
+                      vol_correct_d=False, vol_correct_R=False,
+                      dstep=1,  # unit: Angstrom
+                      verbose=0):
+    r'''3-center AO integrals (ij|L) with double lattice sum:
+    \sum_{lm} (i[l]j[m]|L[0]), where L is the auxiliary basis.
+    Three-index integral tensor (kptij_idx, nao_pair, naux) or four-index
+    integral tensor (kptij_idx, comp, nao_pair, naux) are stored on disk.
+
+    **This function should be only used by RSGDF initialization function
+    _make_j3c**
+
+    Args:
+        kptij_lst : (*,2,3) array
+            A list of (kpti, kptj)
+    '''
+    log = logger.Logger(cell.stdout, cell.verbose)
+
+    if isinstance(auxcell_or_auxbasis, mol_gto.Mole):
+        auxcell = auxcell_or_auxbasis
+    else:
+        auxcell = make_auxcell(cell, auxcell_or_auxbasis)
+
+# prescreening data
+    t1 = (logger.process_clock(), logger.perf_counter())
+    prescreening_data = get_prescreening_data(cell, auxcell, omega,
+                                              precision=precision,
+                                              fac_type=fac_type,
+                                              eta_correct=eta_correct,
+                                              R_correct=R_correct,
+                                              vol_correct_d=vol_correct_d, vol_correct_R=vol_correct_R,
+                                              dstep=dstep)
     t1 = log.timer_debug1('prescrn warmup', *t1)
 # prescreening data ends here
 
@@ -1184,7 +1199,6 @@ def _aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, erifile,
 
     tick_ = np.asarray((logger.process_clock(), logger.perf_counter()))
     for istep, mat in enumerate(lib.map_with_prefetch(process, auxranges)):
-        print(istep)
         for k in sorted_ij_idx:
             v = mat[k]
             if gamma_point(kptij_lst[k]):

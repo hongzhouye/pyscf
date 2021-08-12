@@ -51,6 +51,9 @@ from pyscf.df.outcore import _guess_shell_ranges
 from pyscf.pbc import tools as pbctools
 from pyscf.pbc.lib.kpts_helper import (is_zero, gamma_point, member, unique,
                                        KPT_DIFF_TOL)
+# from pyscf.pbc.scf.rsjk import _LongRangeAFT
+from pyscf.pbc.df.df_jk import _format_dms, _format_kpts_band, _format_jks
+from pyscf.pbc.df import rsdf_jk
 from pyscf import lib
 from pyscf.lib import logger
 
@@ -666,6 +669,263 @@ class RSGDF(df.df.GDF):
         return self
 
 RSDF = RSGDF
+
+# integral-direct implementation
+
+class RSGDF_direct(RSGDF):
+    def __init__(self, cell, kpts=None):
+        if kpts is None:
+            raise RuntimeError
+
+        RSGDF.__init__(self, cell, kpts)
+
+        self.lr_aft = None
+
+    def build(self):
+        # build for range-separation hybrid
+        self._rsh_build()
+        # dump flags before the final build
+        self.check_sanity()
+        self.dump_flags()
+
+        cell = self.cell
+        cell._nbas_each_set = [cell.nbas, 0, 0]
+        self.lr_aft = _LongRangeAFT(cell, kpts=self.kpts, omega=self.omega)
+        self.lr_aft.mesh = self.mesh_compact
+
+        self.prescreening_data = self.get_prescreening_data()
+
+    def get_prescreening_data(self):
+        self.prescreening_data = rsdf_helper.get_prescreening_data(
+                                        self.cell, self.auxcell, self.omega,
+                                        precision=self.precision_R)
+        return self.prescreening_data
+
+    def get_bvk_kmesh(self, kpts=None):
+        if self.use_bvk:
+            if kpts is None: kpts = self.kpts
+            bvk_kmesh = kpts_to_kmesh(self.cell, kpts)
+        else:
+            bvk_kmesh = None
+        return bvk_kmesh
+    def sr_loop(self, kptij_lst=None, max_memory=2000, compact=True,
+                blksize=None, shls_slice=None, aosym="s2",
+                intor="int3c2e", comp=None, bvk_kmesh=None):
+        cell = self.cell
+        auxcell = self.auxcell
+        omega = self.omega
+        if self.prescreening_data is None:
+            self.prescreening_data = self.get_prescreening_data()
+        prescreening_data = self.prescreening_data
+
+        log = logger.Logger(cell.stdout, cell.verbose)
+
+        intor, comp = mol_gto.moleintor._get_intor_and_comp(
+                                                cell._add_suffix(intor), comp)
+
+        if kptij_lst is None:
+            kptij_lst = np.zeros((1,2,3))
+
+        if shls_slice is None:
+            shls_slice = (0, cell.nbas, 0, cell.nbas, 0, auxcell.nbas)
+
+        shlpr_mask = np.ones((shls_slice[1]-shls_slice[0],
+                              shls_slice[3]-shls_slice[2]),
+                              dtype=np.int8, order="C")
+
+        ao_loc = cell.ao_loc_nr()
+        aux_loc = auxcell.ao_loc_nr(auxcell.cart or
+                                    'ssc' in intor)[:shls_slice[5]+1]
+        ni = ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]]
+        nj = ao_loc[shls_slice[3]] - ao_loc[shls_slice[2]]
+        nkptij = len(kptij_lst)
+
+        nii = (ao_loc[shls_slice[1]]*(ao_loc[shls_slice[1]]+1)//2 -
+               ao_loc[shls_slice[0]]*(ao_loc[shls_slice[0]]+1)//2)
+        nij = ni * nj
+
+        kpti = kptij_lst[:,0]
+        kptj = kptij_lst[:,1]
+        aosym_ks2 = abs(kpti-kptj).sum(axis=1) < KPT_DIFF_TOL
+        j_only = np.all(aosym_ks2)
+        #aosym_ks2 &= (aosym[:2] == 's2' and shls_slice[:2] == shls_slice[2:4])
+        aosym_ks2 &= aosym[:2] == 's2'
+
+        if j_only and aosym[:2] == 's2':
+            assert(shls_slice[2] == 0)
+            nao_pair = nii
+        else:
+            nao_pair = nij
+
+        if gamma_point(kptij_lst):
+            dtype = np.double
+        else:
+            dtype = np.complex128
+
+        buflen = max(8, int(max_memory*.95e6/16/(nkptij*ni*nj*comp)))
+        auxdims = aux_loc[shls_slice[4]+1:shls_slice[5]+1] - aux_loc[shls_slice[4]:shls_slice[5]]
+        from pyscf.ao2mo.outcore import balance_segs
+        auxranges = balance_segs(auxdims, buflen)
+        buflen = max([x[2] for x in auxranges])
+        buf = np.empty(nkptij*comp*ni*nj*buflen, dtype=dtype)
+        bufmem = buf.size*16/1024**2.
+        if bufmem > max_memory:
+            raise RuntimeError("Computing 3c2e integrals requires %.2f MB memory, which exceeds the given maximum memory %.2f MB. Try giving PySCF more memory." % (bufmem, max_memory))
+
+        int3c = rsdf_helper.wrap_int3c_nospltbas(cell, auxcell, omega,
+                                                 shlpr_mask, prescreening_data,
+                                                 intor, aosym, comp, kptij_lst,
+                                                 bvk_kmesh=bvk_kmesh)
+
+        tril_idx = np.tril_indices(ni)
+        tril_idx = tril_idx[0] * ni + tril_idx[1]
+
+        def process(aux_range):
+            sh0, sh1, nrow = aux_range
+            sub_slice = (shls_slice[0], shls_slice[1],
+                         shls_slice[2], shls_slice[3],
+                         shls_slice[4]+sh0, shls_slice[4]+sh1)
+            mat = np.ndarray((nkptij,comp,nrow,nao_pair), dtype=dtype,
+                             buffer=buf)
+            int3c(sub_slice, mat)
+
+            return mat
+
+        for istep, auxrange in enumerate(auxranges):
+            mat = process(auxrange)
+            for k in range(nkptij):
+
+                kpti, kptj = kptij_lst[k]
+                unpack = is_zero(kpti-kptj) and not compact
+                is_real = is_zero(kptij_lst[k])
+
+                # [TODO] support comp != 1
+                is_real = gamma_point(kptij_lst[k])
+                if is_real:
+                    Lpq = np.asarray(mat[k][0].real)
+                    if compact and nao_pair == ni**2:
+                        LpqR = np.asarray(Lpq[:,tril_idx], order="C")
+                    elif not compact and nao_pair != ni**2:
+                        LpqR = lib.unpack_tril(Lpq).reshape(-1,ni**2)
+                    else:
+                        LpqR = Lpq
+                    LpqI = None
+                    Lpq = None
+                else:
+                    Lpq = np.asarray(mat[k][0])
+                    LpqR = np.asarray(Lpq.real, order='C')
+                    LpqI = np.asarray(Lpq.imag, order='C')
+                    Lpq = None
+                    if unpack:
+                        LpqR = lib.unpack_tril(LpqR).reshape(-1,ni**2)
+                        LpqI = lib.unpack_tril(LpqI, lib.ANTIHERMI).reshape(-1,ni**2)
+
+                sign = 1
+                yield istep, k, LpqR, LpqI, sign
+
+            mat = None
+
+    def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
+               with_j=True, with_k=True, omega=None, exxdiv=None):
+        if omega is not None:  # J/K for RSH functionals
+            raise NotImplementedError
+
+        if kpts is None:
+            if np.all(self.kpts == 0):
+                # Gamma-point calculation by default
+                kpts = np.zeros(3)
+            else:
+                kpts = self.kpts
+        kpts = np.asarray(kpts)
+
+        bvk_kmesh = self.get_bvk_kmesh(kpts=kpts)
+
+        if kpts.shape == (3,):
+            raise NotImplementedError
+            return rsdf_jk.get_jk(self, dm, hermi, kpts, kpts_band, with_j,
+                                with_k, exxdiv)
+
+        vj = vk = None
+        if with_k:
+            raise NotImplementedError
+            vk = rsdf_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv)
+        if with_j:
+            vj = rsdf_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band, bvk_kmesh=bvk_kmesh)
+            self.lr_aft.bvk_kmesh = bvk_kmesh
+            vj += self.lr_aft.get_j_kpts(dm, kpts=kpts, bvk_kmesh=bvk_kmesh)
+        return vj, vk
+
+RSDF_direct = RSGDF_direct
+
+
+class _LongRangeAFT(df.aft.AFTDF):
+    def __init__(self, cell, kpts=np.zeros((1,3)), omega=None, bvk_kmesh=None):
+        self.omega = abs(omega)
+        self.bvk_kmesh = bvk_kmesh
+        df.aft.AFTDF.__init__(self, cell, kpts)
+
+    def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh=None):
+        return weighted_coulG(self.cell, self.omega, kpt=kpt,
+                              exx=exx, mesh=mesh)
+
+    def get_j_kpts(self, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, bvk_kmesh=None):
+        if kpts_band is not None:
+            raise NotImplementedError
+            return get_j_for_bands(self, dm_kpts, hermi, kpts, kpts_band)
+
+        cell = self.cell
+
+        aosym = "s2" if hermi==1 and not bvk_kmesh is None else "s1"
+
+        dm_kpts = lib.asarray(dm_kpts, order='C')
+        dms = _format_dms(dm_kpts, kpts)
+        n_dm, nkpts, nao = dms.shape[:3]
+        vj_kpts = np.zeros((n_dm,nkpts,nao,nao), dtype=np.complex128)
+        kpt_allow = np.zeros(3)
+        mesh = self.mesh
+        coulG = self.weighted_coulG(kpt_allow, False, mesh)
+        max_memory = (self.max_memory - lib.current_memory()[0]) * .8
+        weight = 1./len(kpts)
+        for aoaoks, p0, p1 in self.ft_loop(mesh, kpt_allow, kpts, max_memory=max_memory, bvk_kmesh=bvk_kmesh, aosym=aosym):
+            _update_vj_(vj_kpts, aoaoks, dms, coulG[p0:p1], weight)
+        aoaoks = p0 = p1 = None
+
+        # G=0 contribution, associated to 2e integrals in real-space
+        if cell.dimension >= 2:
+            ovlp = np.asarray(cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts))
+            kws = cell.get_Gv_weights(mesh)[2]
+            G0_weight = kws[0] if isinstance(kws, np.ndarray) else kws
+            vj_G0 = lib.einsum('kpq,nkqp,lrs->nlrs', ovlp, dms, ovlp)
+            vj_kpts -= np.pi/self.omega**2 * weight * G0_weight * vj_G0
+
+        if gamma_point(kpts):
+            vj_kpts = vj_kpts.real.copy()
+        return _format_jks(vj_kpts, dm_kpts, kpts_band, kpts)
+
+def _update_vj_(vj_kpts, aoaoks, dms, coulG, weight):
+    n_dm = vj_kpts.shape[0]
+    nao = vj_kpts.shape[-1]
+    nao_pair = nao*(nao+1)//2
+    vG = [0] * n_dm
+    for k, aoao in enumerate(aoaoks):
+        if aoao.ndim == 2 and aoao.shape[-1] != nao**2:
+            aoao = lib.unpack_tril(aoao.real) + 1j * lib.unpack_tril(aoao.imag)
+        else:
+            aoao = aoao.reshape(-1,nao,nao)
+        for i in range(n_dm):
+            # einsum('ij,Lji->L', dms[i,k], aoao.conj())
+            # = einsum('ij,Lji->L', dms[i,k].conj(), aoao).conj()
+            rho = np.einsum('ij,Lji->L', dms[i,k], aoao).conj()
+            vG[i] += rho * coulG
+    for i in range(n_dm):
+        vG[i] *= weight
+    for k, aoao in enumerate(aoaoks):
+        if aoao.ndim == 2 and aoao.shape[-1] != nao**2:
+            aoao = lib.unpack_tril(aoao.real) + 1j * lib.unpack_tril(aoao.imag)
+        else:
+            aoao = aoao.reshape(-1,nao,nao)
+        for i in range(n_dm):
+            vj_kpts[i,k] += np.einsum('L,Lij->ij', vG[i], aoao)
 
 
 if __name__ == "__main__":

@@ -690,7 +690,8 @@ class _LongRangeAFT(aft.AFTDF):
                 ovlp[:,nao_compact:,nao_compact:] = 0
             kws = cell.get_Gv_weights(mesh)[2]
             G0_weight = kws[0] if isinstance(kws, np.ndarray) else kws
-            vj_G0 = lib.einsum('kpq,nkqp,lrs->nlrs', ovlp, dm_kpts, ovlp)
+            # vj_G0 = lib.einsum('kpq,nkqp,lrs->nlrs', ovlp, dm_kpts, ovlp)
+            vj_G0 = lib.einsum('kpq,nkqp,lrs->nlrs', ovlp, dms, ovlp)
             vj_kpts -= np.pi/self.omega**2 * weight * G0_weight * vj_G0
 
         if gamma_point(kpts):
