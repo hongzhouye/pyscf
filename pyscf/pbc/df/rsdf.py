@@ -681,7 +681,7 @@ class RSGDF_direct(RSGDF):
 
         self.lr_aft = None
 
-    def build(self):
+    def build(self, j_only=False):
         # build for range-separation hybrid
         self._rsh_build()
         # dump flags before the final build
