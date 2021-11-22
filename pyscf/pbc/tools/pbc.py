@@ -279,6 +279,13 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         if cell.dimension < 3:
             raise NotImplementedError
 
+    elif exxdiv == 'vsr_erfc':  # Short-range potential via erfc
+        Rc = (3*Nk*cell.vol/(4*np.pi))**(1./3)
+        omegac = 2**-0.5 / Rc
+        with np.errstate(divide='ignore',invalid='ignore'):
+            coulG = 4*np.pi/absG2*(1.0 - np.exp(-absG2*0.25/omegac**2.))
+        coulG[absG2==0] = np.pi/omegac**2.
+
     elif exxdiv == 'vcut_ws':  # PRB 87, 165122
         assert(cell.dimension == 3)
         if not getattr(mf, '_ws_exx', None):
