@@ -80,7 +80,6 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
 
     kconserv = mp.khelper.kconserv
     emp2 = 0.
-    oovv_ij = np.zeros((2,nocc,nocc,nvir,nvir), dtype=mo_coeff[0].dtype)
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -95,24 +94,51 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
         n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
         eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
         return eia
-    def contract1(kijab, oovv_ijab, oovv_ijba):
+    def _contract1(kijab, i, eia, ejb, gdi, gxi):
+        t2i = gdi.conj() / lib.direct_sum('a+jb->jab', eia[i], ejb)
+        emp2_this = einsum('jab,jab->', t2i, gdi) * 2.
+        emp2_this -= einsum('jab,jba->', t2i, gxi)
+        if with_t2:
+            ki,kj,ka = kijab[:3]
+            t2[ki,kj,ka,i] = t2i
+        return emp2_this
+    def contract1(eris, kijab):
         ki,kj,ka,kb = kijab
+        kijba = (ki,kj,kb,ka)
+        swap_ab = ka != kb
         eia = get_eia(ki,ka)
         ejb = get_eia(kj,kb)
+        if swap_ab:
+            eja = get_eia(kj,ka)
+            eib = get_eia(ki,kb)
+        if mp.less_mem:
+            def get_oovv_i(i, kind):
+                if kind == 'd':
+                    return eris.get_oovv_i(i, kijab)
+                else:
+                    return eris.get_oovv_i(i, kijba)
+        else:
+            # caching ijab and ijba
+            oovv_ijab = eris.get_oovv(kijab)
+            oovv_ijba = eris.get_oovv(kijba) if swap_ab else oovv_ijab
+            def get_oovv_i(i, kind):
+                if kind == 'd':
+                    return oovv_ijab[i]
+                else:
+                    return oovv_ijba[i]
         emp2_this = 0.
         for i in range(nocc):
-            gdi = oovv_ijab[i]
-            gxi = oovv_ijba[i]
-
-            t2i = gdi.conj() / lib.direct_sum('a+jb->jab', eia[i], ejb)
-            emp2_this += einsum('jab,jab->', t2i, gdi) * 2.
-            emp2_this -= einsum('jab,jba->', t2i, gxi)
-
-            if with_t2:
-                t2[ki,kj,ka,i] = t2i
-
+            gdi = get_oovv_i(i, 'd')
+            if swap_ab:
+                gxi = get_oovv_i(i, 'x')
+                emp2_this += _contract1(kijab, i, eia, ejb, gdi, gxi)
+                emp2_this += _contract1(kijba, i, eib, eja, gxi, gdi)
+            else:
+                gxi = gdi
+                emp2_this += _contract1(kijab, i, eia, ejb, gdi, gxi)
         return emp2_this.real
 
+    # compute
     for ki in range(nkpts):
         for kj in range(nkpts):
             kblist = [kconserv[ki,ka,kj] for ka in range(nkpts)]
@@ -121,13 +147,8 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
                 kb = kblist[ka]
                 if done[(ka,kb)] and done[(kb,ka)]:
                     continue
-                # (ia|jb)
-                oovv_ij[0] = eris.get_oovv((ki,kj,ka,kb))
-                oovv_ij[1] = oovv_ij[0] if ka == kb else eris.get_oovv((ki,kj,kb,ka))
-                # contract
-                emp2 += contract1((ki,kj,ka,kb), oovv_ij[0], oovv_ij[1])
-                if ka != kb:
-                    emp2 += contract1((ki,kj,kb,ka), oovv_ij[1], oovv_ij[0])
+
+                emp2 += contract1(eris, (ki,kj,ka,kb))
 
                 done[(ka,kb)] = done[(kb,ka)] = True
 
@@ -679,6 +700,15 @@ def _gamma1_intermediates(mp, t2=None):
 
 
 class KMP2(mp2.MP2):
+    '''
+    Attributes:
+        less_mem (bool):
+            This attr controls the algorithm for handling oovv-type ERIs
+            if mf.with_df is FFTDF and is ignored otherwise. If set True,
+            the 2*o^2*v^2 of memory for caching oovv-type ERIs is avoided,
+            with the price of increasing CPU time. Default is False.
+    '''
+
     def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
 
         if mo_coeff is None: mo_coeff = mf.mo_coeff
@@ -695,6 +725,8 @@ class KMP2(mp2.MP2):
             self.with_df_ints = True
         else:
             self.with_df_ints = False
+
+        self.less_mem = False
 
 ##################################################
 # don't modify the following attributes, they are not input options
@@ -724,6 +756,7 @@ class KMP2(mp2.MP2):
         logger.info(self, "nocc = %d", self.nocc)
         logger.info(self, "nmo = %d", self.nmo)
         logger.info(self, "with_df_ints = %s", self.with_df_ints)
+        logger.info(self, "less_mem = %r", self.less_mem)
 
         if self.frozen is not None:
             logger.info(self, "frozen orbitals = %s", self.frozen)
@@ -764,9 +797,11 @@ class KMP2(mp2.MP2):
         nkpts = len(self.kpts)
 
         mem_avail = self.max_memory - lib.current_memory()[0]
-        # 2*o^2*v^2 for (ia|jb) and (ib|ja) needed by exchange
         # 2*o*v^2 for intermediates ejab and t2i in contraction
-        mem_usage = (2*(nocc*nvir)**2 + 2*nocc*nvir**2) * 16 / 1e6
+        mem_usage = 2*nocc*nvir**2
+        if not (isinstance(self._scf.with_df, df.GDF) or self.less_mem):
+            # 2*o^2*v^2 for (ia|jb) and (ib|ja) needed by exchange
+            mem_usage += (2*(nocc*nvir)**2) * 16 / 1e6
         if with_df_ints:
             mydf = self._scf.with_df
             if mydf.auxcell is None:
@@ -820,6 +855,19 @@ class _MP2ERIS_INCORE:
         return self.fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
                            (kpts[ki],kpts[ka],kpts[kj],kpts[kb]))
 
+    def get_oovv_i(self, i, kijab):
+        ki,kj,ka,kb = kijab
+        kpts = self.kpts
+        mo_coeff = self.mo_coeff
+        nocc = self.nocc
+
+        orbo_i = mo_coeff[ki][:,i:i+1]
+        orbo_j = mo_coeff[kj][:,:nocc]
+        orbv_a = mo_coeff[ka][:,nocc:]
+        orbv_b = mo_coeff[kb][:,nocc:]
+        return self.fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
+                           (kpts[ki],kpts[ka],kpts[kj],kpts[kb]))[0]
+
 class _DFMP2ERIS_INCORE(_MP2ERIS_INCORE):
 
     def _common_init_(self, mp, mo_coeff=None):
@@ -832,6 +880,12 @@ class _DFMP2ERIS_INCORE(_MP2ERIS_INCORE):
         nkpts = len(self.kpts)
         return einsum("Lia,Ljb->iajb", self.Lov[ki, ka],
                       self.Lov[kj, kb]).transpose(0,2,1,3) / nkpts
+
+    def get_oovv_i(self, i, kijab):
+        ki,kj,ka,kb = kijab
+        nkpts = len(self.kpts)
+        return einsum("La,Ljb->ajb", self.Lov[ki, ka][:,i],
+                      self.Lov[kj, kb]).transpose(1,0,2) / nkpts
 
 def _make_eris_incore(mp, mo_coeff=None):
     eris = _MP2ERIS_INCORE()._common_init_(mp, mo_coeff=mo_coeff)
@@ -865,9 +919,9 @@ if __name__ == '__main__':
     3.370137329, 0.000000000, 3.370137329
     3.370137329, 3.370137329, 0.000000000'''
     cell.unit = 'B'
-    cell.verbose = 7
     cell.mesh = [15,15,15]  # small PW mesh to save cost
     cell.build()
+    cell.verbose = 7
 
     # Running HF and MP2 with 1x1x2 Monkhorst-Pack k-point mesh
     kmf = scf.KRHF(cell, kpts=cell.make_kpts([1,1,2]), exxdiv=None)

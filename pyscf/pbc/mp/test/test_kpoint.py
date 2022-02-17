@@ -57,21 +57,21 @@ def build_h_cell():
     cell.build()
     return cell
 
-def run_kcell(cell, nk):
+def run_kcell(cell, nk, **kwargs):
     abs_kpts = cell.make_kpts(nk, wrap_around=True)
     kmf = pbcscf.KRHF(cell, abs_kpts)
     kmf.conv_tol = 1e-12
     ekpt = kmf.scf()
-    mp = pyscf.pbc.mp.kmp2.KMP2(kmf).run()
+    mp = pyscf.pbc.mp.kmp2.KMP2(kmf).set(**kwargs).run()
     return ekpt, mp.e_corr
 
-def run_kcell_complex(cell, nk):
+def run_kcell_complex(cell, nk, **kwargs):
     abs_kpts = cell.make_kpts(nk, wrap_around=True)
     kmf = pbcscf.KRHF(cell, abs_kpts)
     kmf.conv_tol = 1e-12
     ekpt = kmf.scf()
     kmf.mo_coeff = [kmf.mo_coeff[i].astype(np.complex128) for i in range(np.prod(nk))]
-    mp = pyscf.pbc.mp.kmp2.KMP2(kmf).run()
+    mp = pyscf.pbc.mp.kmp2.KMP2(kmf).set(**kwargs).run()
     return ekpt, mp.e_corr
 
 class KnownValues(unittest.TestCase):
@@ -81,6 +81,14 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(escf, -1.2061049658473704, 9)
         self.assertAlmostEqual(emp, -5.44597932944397e-06, 9)
         escf, emp = run_kcell_complex(cell,nk)
+        self.assertAlmostEqual(emp, -5.44597932944397e-06, 9)
+
+    def test_111_less_mem(self):
+        nk = (1, 1, 1)
+        escf, emp = run_kcell(cell,nk, less_mem=True)
+        self.assertAlmostEqual(escf, -1.2061049658473704, 9)
+        self.assertAlmostEqual(emp, -5.44597932944397e-06, 9)
+        escf, emp = run_kcell_complex(cell,nk, less_mem=True)
         self.assertAlmostEqual(emp, -5.44597932944397e-06, 9)
 
     def test_311_high_cost(self):
@@ -178,7 +186,7 @@ class KnownValues(unittest.TestCase):
         kmf2.conv_tol = 1e-12
         kmf2.with_df._cderi = kmf.with_df._cderi
         ekpt2 = kmf2.scf()
-        mp = pyscf.pbc.mp.kmp2.KMP2(kmf2).run()        
+        mp = pyscf.pbc.mp.kmp2.KMP2(kmf2).run()
 
         self.assertAlmostEqual(ekpt2, -1.2053666821021261, 9)
         self.assertAlmostEqual(mp.e_corr, -6.9881475423322723e-06, 9)
@@ -187,4 +195,3 @@ class KnownValues(unittest.TestCase):
 if __name__ == '__main__':
     print("Full kpoint test")
     unittest.main()
-
