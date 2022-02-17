@@ -67,7 +67,8 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     with_df_ints = mp.with_df_ints and isinstance(mp._scf.with_df, df.GDF)
 
     mem_avail = mp.max_memory - lib.current_memory()[0]
-    mem_usage = (nkpts * (nocc * nvir)**2) * 16 / 1e6
+    # 2 from exchange needing oovv from 2 kpts; 0.5 from eijab; 1 from woovv; 1 from t2
+    mem_usage = (4.5 * (nocc * nvir)**2) * 16 / 1e6
     if with_df_ints:
         mydf = mp._scf.with_df
         if mydf.auxcell is None:
@@ -80,8 +81,8 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     if with_t2:
         mem_usage += (nkpts**3 * (nocc * nvir)**2) * 16 / 1e6
     if mem_usage > mem_avail:
-        raise MemoryError('Insufficient memory! MP2 memory usage %d MB (currently available %d MB)'
-                          % (mem_usage, mem_avail))
+        raise MemoryError('Insufficient memory! MP2 memory usage %d MB (currently '
+                          'available %d MB)' % (mem_usage, mem_avail))
 
     eia = np.zeros((nocc,nvir))
     eijab = np.zeros((nocc,nocc,nvir,nvir))
@@ -89,7 +90,7 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     fao2mo = mp._scf.with_df.ao2mo
     kconserv = mp.khelper.kconserv
     emp2 = 0.
-    oovv_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=mo_coeff[0].dtype)
+    oovv_ij = np.zeros((2,nocc,nocc,nvir,nvir), dtype=mo_coeff[0].dtype)
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -106,39 +107,54 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     if with_df_ints:
         Lov = _init_mp_df_eris(mp)
 
+    # helper functions
+    def get_oovv(ki,kj,ka,kb):
+        if with_df_ints:
+            return (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki, ka],
+                                       Lov[kj, kb]).transpose(0,2,1,3)
+        else:
+            orbo_i = mo_coeff[ki][:,:nocc]
+            orbo_j = mo_coeff[kj][:,:nocc]
+            orbv_a = mo_coeff[ka][:,nocc:]
+            orbv_b = mo_coeff[kb][:,nocc:]
+            return fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
+                          (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
+                          compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
+
+    def contract1(ki,kj,ka,kb, oovv_ijab, oovv_ijba):
+        # Remove zero/padded elements from denominator
+        eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+        n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+        eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+
+        ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+        n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
+        ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+
+        eijab = lib.direct_sum('ia,jb->ijab',eia,ejb)
+        t2_ijab = np.conj(oovv_ijab/eijab)
+        if with_t2:
+            t2[ki, kj, ka] = t2_ijab
+        woovv = 2*oovv_ijab - oovv_ijba.transpose(0,1,3,2)
+        return einsum('ijab,ijab', t2_ijab, woovv).real
+
     for ki in range(nkpts):
         for kj in range(nkpts):
+            kblist = [kconserv[ki,ka,kj] for ka in range(nkpts)]
+            done = {(ka,kblist[ka]):False for ka in range(nkpts)}
             for ka in range(nkpts):
-                kb = kconserv[ki,ka,kj]
+                kb = kblist[ka]
+                if done[(ka,kb)] and done[(kb,ka)]:
+                    continue
                 # (ia|jb)
-                if with_df_ints:
-                    oovv_ij[ka] = (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki, ka], Lov[kj, kb]).transpose(0,2,1,3)
-                else:
-                    orbo_i = mo_coeff[ki][:,:nocc]
-                    orbo_j = mo_coeff[kj][:,:nocc]
-                    orbv_a = mo_coeff[ka][:,nocc:]
-                    orbv_b = mo_coeff[kb][:,nocc:]
-                    oovv_ij[ka] = fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
-                                         (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
-                                         compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
-            for ka in range(nkpts):
-                kb = kconserv[ki,ka,kj]
+                oovv_ij[0] = get_oovv(ki,kj,ka,kb)
+                oovv_ij[1] = oovv_ij[0] if ka == kb else get_oovv(ki,kj,kb,ka)
+                # contract
+                emp2 += contract1(ki,kj,ka,kb, oovv_ij[0], oovv_ij[1])
+                if ka != kb:
+                    emp2 += contract1(ki,kj,kb,ka, oovv_ij[1], oovv_ij[0])
 
-                # Remove zero/padded elements from denominator
-                eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
-                eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
-
-                ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
-                ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
-
-                eijab = lib.direct_sum('ia,jb->ijab',eia,ejb)
-                t2_ijab = np.conj(oovv_ij[ka]/eijab)
-                if with_t2:
-                    t2[ki, kj, ka] = t2_ijab
-                woovv = 2*oovv_ij[ka] - oovv_ij[kb].transpose(0,1,3,2)
-                emp2 += einsum('ijab,ijab', t2_ijab, woovv).real
+                done[(ka,kb)] = done[(kb,ka)] = True
 
     log.timer("KMP2", *cput0)
 
@@ -787,7 +803,8 @@ if __name__ == '__main__':
     3.370137329, 0.000000000, 3.370137329
     3.370137329, 3.370137329, 0.000000000'''
     cell.unit = 'B'
-    cell.verbose = 5
+    cell.verbose = 7
+    cell.mesh = [15,15,15]
     cell.build()
 
     # Running HF and MP2 with 1x1x2 Monkhorst-Pack k-point mesh
@@ -797,4 +814,3 @@ if __name__ == '__main__':
     mymp = mp.KMP2(kmf)
     emp2, t2 = mymp.kernel()
     print(emp2 - -0.204721432828996)
-
