@@ -70,6 +70,8 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
 
     if with_t2:
         t2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
+    else:
+        t2 = None
 
     if eris is None: eris = mp.ao2mo(mo_coeff=mo_coeff)
 
