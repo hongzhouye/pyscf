@@ -136,6 +136,7 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
         return emp2_this.real
 
     # compute
+    cput1 = (logger.process_clock(), logger.perf_counter())
     for ki in range(nkpts):
         for kj in range(nkpts):
             kblist = [kconserv[ki,ka,kj] for ka in range(nkpts)]
@@ -148,6 +149,8 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
                 emp2 += contract1(eris, (ki,kj,ka,kb))
 
                 done[(ka,kb)] = done[(kb,ka)] = True
+
+            cput1 = log.timer_debug1('(ki,kj) = (%d,%d)'%(ki,kj), *cput1)
 
     log.timer("KMP2", *cput0)
 
