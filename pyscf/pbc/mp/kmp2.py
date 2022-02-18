@@ -108,7 +108,7 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
         if swap_ab:
             eja = get_eia(kj,ka)
             eib = get_eia(ki,kb)
-        if mp.less_mem:
+        if with_df_ints or mp.less_mem:
             def get_oovv_i(i, kind):
                 if kind == 'd':
                     return eris.get_oovv_i(i, kijab)
