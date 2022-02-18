@@ -191,6 +191,30 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(ekpt2, -1.2053666821021261, 9)
         self.assertAlmostEqual(mp.e_corr, -6.9881475423322723e-06, 9)
 
+    def test_kmp2_111_outcore(self):
+        nk = (1, 1, 1)
+        abs_kpts = cell.make_kpts(nk, wrap_around=True)
+        kmf = pbcscf.KRHF(cell, abs_kpts).density_fit()
+        kmf.conv_tol = 1e-12
+        ekpt = kmf.scf()
+        mp = pyscf.pbc.mp.kmp2.KMP2(kmf)
+        eris = pyscf.pbc.mp.kmp2._make_df_eris_outcore(mp)
+        mp.kernel(eris=eris)
+
+        self.assertAlmostEqual(mp.e_corr, -6.9881475423322723e-06, 9)
+
+    def test_kmp2_211_outcore(self):
+        nk = (2, 1, 1)
+        abs_kpts = cell.make_kpts(nk, wrap_around=True)
+        kmf = pbcscf.KRHF(cell, abs_kpts).density_fit()
+        kmf.conv_tol = 1e-12
+        ekpt = kmf.scf()
+        mp = pyscf.pbc.mp.kmp2.KMP2(kmf)
+        eris = pyscf.pbc.mp.kmp2._make_df_eris_outcore(mp)
+        mp.kernel(eris=eris)
+
+        self.assertAlmostEqual(mp.e_corr, -1.1141027569491207e-05, 9)
+
 
 if __name__ == '__main__':
     print("Full kpoint test")
