@@ -830,7 +830,7 @@ class KMP2(mp2.MP2):
         with_df_ints = self.with_df_ints
 
         mem_usage = 2*nocc*nvir**2 * 16/1e6 # ejab and t2i
-        if not (with_df_ints and self.less_mem):
+        if not (with_df_ints or self.less_mem):
             mem_usage += 2*(nocc*nvir)**2 * 16/1e6 # (ia|jb) and (ib|ja)
         if with_t2:
             mem_usage += (nkpts**3 * (nocc * nvir)**2) * 16/1e6
