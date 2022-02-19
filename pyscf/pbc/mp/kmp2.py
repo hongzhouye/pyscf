@@ -171,94 +171,6 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
     return emp2, t2, emp2_ss, emp2_os
 
 
-def _init_mp_df_eris(mp, mo_coeff=None, Lov=None):
-    """Compute 3-center electron repulsion integrals, i.e. (L|ov),
-    where `L` denotes DF auxiliary basis functions and `o` and `v` occupied and virtual
-    canonical crystalline orbitals. Note that `o` and `v` contain kpt indices `ko` and `kv`,
-    and the third kpt index `kL` is determined by the conservation of momentum.
-
-    Arguments:
-        mp (KMP2) -- A KMP2 instance
-        mo_coeff (list) -- MO coeff by kpts. Generated from _add_padding if None.
-        Lov (ndarray or H5 group) -- where to store integrals. If None, a numpy
-            ndarray is created.
-
-    Returns:
-        Lov (numpy.ndarray or H5 group) -- 3-center DF ints, with shape
-            (nkpts, nkpts, naux, nocc, nvir)
-    """
-    from pyscf.pbc.df import df
-    from pyscf.ao2mo import _ao2mo
-    from pyscf.pbc.lib.kpts_helper import gamma_point
-
-    log = logger.Logger(mp.stdout, mp.verbose)
-
-    if mp._scf.with_df._cderi is None:
-        mp._scf.with_df.build()
-
-    cell = mp._scf.cell
-    if cell.dimension == 2:
-        # 2D ERIs are not positive definite. The 3-index tensors are stored in
-        # two part. One corresponds to the positive part and one corresponds
-        # to the negative part. The negative part is not considered in the
-        # DF-driven CCSD implementation.
-        raise NotImplementedError
-
-    nocc = mp.nocc
-    nmo = mp.nmo
-    nvir = nmo - nocc
-    nao = cell.nao_nr()
-
-    if mo_coeff is None: mo_coeff = _add_padding(mp, mp.mo_coeff, mp.mo_energy)[0]
-    kpts = mp.kpts
-    nkpts = len(kpts)
-    if gamma_point(kpts):
-        dtype = np.double
-    else:
-        dtype = np.complex128
-    dtype = np.result_type(dtype, *mo_coeff)
-    if Lov is None:
-        Lov = np.empty((nkpts, nkpts), dtype=object)
-    elif isinstance(Lov, np.ndarray):
-        assert(Lov.dtype == object)
-    elif not isinstance(Lov, h5py.Group):
-        log.error('Input Lov must be np.ndarray or h5py.Group.')
-        raise TypeError
-
-    cput0 = (logger.process_clock(), logger.perf_counter())
-
-    bra_start = 0
-    bra_end = nocc
-    ket_start = nmo+nocc
-    ket_end = ket_start + nvir
-    with h5py.File(mp._scf.with_df._cderi, 'r') as f:
-        kptij_lst = f['j3c-kptij'][:]
-        tao = []
-        ao_loc = None
-        for ki, kpti in enumerate(kpts):
-            for kj, kptj in enumerate(kpts):
-                kpti_kptj = np.array((kpti, kptj))
-                Lpq_ao = np.asarray(df._getitem(f, 'j3c', kpti_kptj, kptij_lst))
-
-                mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
-                mo = np.asarray(mo, dtype=dtype, order='F')
-                if dtype == np.double:
-                    out = _ao2mo.nr_e2(Lpq_ao, mo, (bra_start, bra_end, ket_start, ket_end), aosym='s2')
-                else:
-                    #Note: Lpq.shape[0] != naux if linear dependency is found in auxbasis
-                    if Lpq_ao[0].size != nao**2:  # aosym = 's2'
-                        Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
-                    out = _ao2mo.r_e2(Lpq_ao, mo, (bra_start, bra_end, ket_start, ket_end), tao, ao_loc)
-                if isinstance(Lov, np.ndarray):
-                    Lov[ki, kj] = out.reshape(-1, nocc, nvir)
-                else:
-                    Lov['%d,%d'%(ki,kj)] = out.reshape(-1, nocc, nvir)
-
-    log.timer("transforming DF-MP2 integrals", *cput0)
-
-    return Lov
-
-
 def _padding_k_idx(nmo, nocc, kind="split"):
     """A convention used for padding vectors, matrices and tensors in case when occupation numbers depend on the
     k-point index.
@@ -977,6 +889,88 @@ def _make_df_eris_incore(mp, mo_coeff=None):
 def _make_df_eris_outcore(mp, mo_coeff=None):
     eris = _DFMP2ERIS_OUTCORE()._common_init_(mp, mo_coeff=mo_coeff)
     return eris
+
+def ao2mo_df(cderi, mo_coeff, nocc, kpts, Lov=None):
+    from pyscf.pbc.df import df
+    from pyscf.ao2mo import _ao2mo
+    from pyscf.pbc.lib.kpts_helper import gamma_point
+
+    nkpts = len(kpts)
+    nao, nmo = mo_coeff[0].shape
+    nvir = nmo - nocc
+    if gamma_point(kpts):
+        dtype = np.double
+    else:
+        dtype = np.complex128
+    dtype = np.result_type(dtype, *mo_coeff)
+
+    if Lov is None:
+        Lov = np.empty((nkpts, nkpts), dtype=object)
+    elif isinstance(Lov, np.ndarray):
+        assert(Lov.dtype == object)
+    elif not isinstance(Lov, h5py.Group):
+        raise TypeError('Input Lov must be np.ndarray or h5py.Group.')
+
+    bra_start = 0
+    bra_end = nocc
+    ket_start = nmo+nocc
+    ket_end = ket_start + nvir
+    with h5py.File(cderi, 'r') as f:
+        kptij_lst = f['j3c-kptij'][:]
+        tao = []
+        ao_loc = None
+        for ki, kpti in enumerate(kpts):
+            for kj, kptj in enumerate(kpts):
+                kpti_kptj = np.array((kpti, kptj))
+                Lpq_ao = np.asarray(df._getitem(f, 'j3c', kpti_kptj, kptij_lst))
+
+                mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
+                mo = np.asarray(mo, dtype=dtype, order='F')
+                if dtype == np.double:
+                    out = _ao2mo.nr_e2(Lpq_ao, mo, (bra_start, bra_end, ket_start, ket_end), aosym='s2')
+                else:
+                    #Note: Lpq.shape[0] != naux if linear dependency is found in auxbasis
+                    if Lpq_ao[0].size != nao**2:  # aosym = 's2'
+                        Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
+                    out = _ao2mo.r_e2(Lpq_ao, mo, (bra_start, bra_end, ket_start, ket_end), tao, ao_loc)
+                if isinstance(Lov, np.ndarray):
+                    Lov[ki, kj] = out.reshape(-1, nocc, nvir)
+                else:
+                    Lov['%d,%d'%(ki,kj)] = out.reshape(-1, nocc, nvir)
+
+    return Lov
+
+def _init_mp_df_eris(mp, mo_coeff=None, Lov=None):
+    """Compute 3-center electron repulsion integrals, i.e. (L|ov),
+    where `L` denotes DF auxiliary basis functions and `o` and `v` occupied and virtual
+    canonical crystalline orbitals. Note that `o` and `v` contain kpt indices `ko` and `kv`,
+    and the third kpt index `kL` is determined by the conservation of momentum.
+
+    Arguments:
+        mp (KMP2) -- A KMP2 instance
+        mo_coeff (list) -- MO coeff by kpts. Generated from _add_padding if None.
+        Lov (ndarray or H5 group) -- where to store integrals. If None, a numpy
+            ndarray is created.
+
+    Returns:
+        Lov (numpy.ndarray or H5 group) -- 3-center DF ints, with shape
+            (nkpts, nkpts, naux, nocc, nvir)
+    """
+    log = logger.new_logger(mp)
+
+    nocc = mp.nocc
+    if mo_coeff is None: mo_coeff = _add_padding(mp, mp.mo_coeff, mp.mo_energy)[0]
+    kpts = mp.kpts
+    if mp._scf.with_df._cderi is None:
+        mp._scf.with_df.build()
+    cderi = mp._scf.with_df._cderi
+
+    cput0 = (logger.process_clock(), logger.perf_counter())
+    Lov = ao2mo_df(cderi, mo_coeff, nocc, kpts, Lov=Lov)
+    log.timer("transforming DF-MP2 integrals", *cput0)
+
+    return Lov
+
 
 KRMP2 = KMP2
 
