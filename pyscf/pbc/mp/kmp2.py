@@ -64,7 +64,7 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
     nocc = mp.nocc
     nvir = nmo - nocc
     nkpts = mp.nkpts
-    with_df_ints = mp.with_df_ints and isinstance(mp._scf.with_df, df.GDF)
+    with_df_ints = mp.with_df_ints
 
     mp._memory_sanity_check(with_t2)
 
@@ -779,18 +779,15 @@ class KMP2(mp2.MP2):
         logger.info(self, "")
         logger.info(self, "******** %s ********", self.__class__)
         logger.info(self, "nkpts = %d", self.nkpts)
-        logger.info(self, "nocc = %d", self.nocc)
-        logger.info(self, "nmo = %d", self.nmo)
+        logger.info(self, "nocc = %s", self.nocc)
+        logger.info(self, "nmo = %s", self.nmo)
         logger.info(self, "with_df_ints = %s", self.with_df_ints)
         logger.info(self, "less_mem = %r", self.less_mem)
 
         if self.frozen is not None:
             logger.info(self, "frozen orbitals = %s", self.frozen)
-        logger.info(
-            self,
-            "max_memory %d MB (current use %d MB)",
-            self.max_memory,
-            lib.current_memory()[0],
+        logger.info(self, "max_memory %d MB (current use %d MB)",
+                    self.max_memory, lib.current_memory()[0],
         )
         return self
 
@@ -830,7 +827,7 @@ class KMP2(mp2.MP2):
         nocc = self.nocc
         nvir = self.nmo - nocc
         nkpts = len(self.kpts)
-        with_df_ints = self.with_df_ints and isinstance(self._scf.with_df, df.GDF)
+        with_df_ints = self.with_df_ints
 
         mem_usage = 2*nocc*nvir**2 * 16/1e6 # ejab and t2i
         if not (with_df_ints and self.less_mem):
@@ -848,7 +845,7 @@ class KMP2(mp2.MP2):
         nocc = self.nocc
         nvir = self.nmo - nocc
         nkpts = len(self.kpts)
-        with_df_ints = self.with_df_ints and isinstance(self._scf.with_df, df.GDF)
+        with_df_ints = self.with_df_ints
 
         mem_usage = 2*nocc*nvir**2 * 16/1e6 # ejab and t2i
         if with_df_ints:
