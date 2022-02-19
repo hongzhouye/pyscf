@@ -138,11 +138,13 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
             edi, exi = _contract1(kijab, i, eia, ejb, gdi, gxi)
             ed_this += edi
             ex_this += exi
-        return ed_this, ex_this
+        ess_this = ed_this*0.5 + ex_this
+        eos_this = ed_this*0.5
+        return ess_this, eos_this
 
     # compute
     cput1 = (logger.process_clock(), logger.perf_counter())
-    emp2_d = emp2_x = 0.
+    emp2_ss = emp2_os = 0.
     for ki in range(nkpts):
         for kj in range(nkpts):
             kblist = [kconserv[ki,ka,kj] for ka in range(nkpts)]
@@ -152,9 +154,9 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
                 if done[(ka,kb)] and done[(kb,ka)]:
                     continue
 
-                emp2_d_ijab, emp2_x_ijab = contract1(eris, (ki,kj,ka,kb))
-                emp2_d += emp2_d_ijab
-                emp2_x += emp2_x_ijab
+                emp2_ss_ijab, emp2_os_ijab = contract1(eris, (ki,kj,ka,kb))
+                emp2_ss += emp2_ss_ijab
+                emp2_os += emp2_os_ijab
 
                 done[(ka,kb)] = done[(kb,ka)] = True
 
@@ -162,11 +164,9 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
 
     log.timer("KMP2", *cput0)
 
-    emp2_d /= nkpts
-    emp2_x /= nkpts
-    emp2 = emp2_d + emp2_x
-    emp2_ss = emp2_d*0.5 + emp2_x
-    emp2_os = emp2_d*0.5
+    emp2_ss /= nkpts
+    emp2_os /= nkpts
+    emp2 = emp2_ss + emp2_os
 
     return emp2, t2, emp2_ss, emp2_os
 
