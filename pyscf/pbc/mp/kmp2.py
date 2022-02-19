@@ -76,7 +76,6 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
     if eris is None: eris = mp.ao2mo(mo_coeff=mo_coeff)
 
     kconserv = mp.khelper.kconserv
-    emp2 = 0.
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -91,23 +90,32 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
         n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
         eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
         return eia
-    def _contract1(kijab, i, eia, ejb, gdi, gxi):
-        t2i = gdi.conj() / lib.direct_sum('a+jb->jab', eia[i], ejb)
-        emp2_this = einsum('jab,jab->', t2i, gdi) * 2.
-        emp2_this -= einsum('jab,jba->', t2i, gxi)
+    def _contract1(kijab, i, eia, ejb, gdi, gxi=None):
+        r''' The energy for the (ka,kb)-pair is (ignoring denominator)
+        e = 2*|(ia|jb)|^2 + 2*|(jb|ia)|^2 - ( (ia|jb)^*(ib|ja) + c.c. )
+          = 2*( |(ia|jb)|^2 + |(jb|ia)|^2 - Re{ (ia|jb)^*(ib|ja) } )
+        Using the second line saves one einsum.
+        '''
+        ejab = lib.direct_sum('a+jb->jab', eia[i], ejb)
+        t2i = gdi.conj() / ejab
+        ed_this = einsum('jab,jab->', t2i, gdi) * 2.
         if with_t2:
-            ki,kj,ka = kijab[:3]
-            t2[ki,kj,ka,i] = t2i
-        return emp2_this
+            t2[kijab[0],kijab[1],kijab[2],i] = t2i
+        if gxi is None:
+            ex_this = -einsum('jab,jba->', t2i, gdi)
+        else:
+            ex_this = -einsum('jab,jba->', t2i, gxi) * 2
+            t2i = gxi.conj() / ejab.transpose(0,2,1)
+            ed_this += einsum('jab,jab->', t2i, gxi) * 2.
+            if with_t2:
+                t2[kijab[0],kijab[1],kijab[3],i] = t2i
+        return ed_this.real, ex_this.real
     def contract1(eris, kijab):
         ki,kj,ka,kb = kijab
         kijba = (ki,kj,kb,ka)
         swap_ab = ka != kb
         eia = get_eia(ki,ka)
         ejb = get_eia(kj,kb)
-        if swap_ab:
-            eja = get_eia(kj,ka)
-            eib = get_eia(ki,kb)
         if with_df_ints or mp.less_mem:
             def get_oovv_i(i, kind):
                 if kind == 'd':
@@ -123,20 +131,18 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
                     return oovv_ijab[i]
                 else:
                     return oovv_ijba[i]
-        emp2_this = 0.
+        ed_this = ex_this = 0
         for i in range(nocc):
             gdi = get_oovv_i(i, 'd')
-            if swap_ab:
-                gxi = get_oovv_i(i, 'x')
-                emp2_this += _contract1(kijab, i, eia, ejb, gdi, gxi)
-                emp2_this += _contract1(kijba, i, eib, eja, gxi, gdi)
-            else:
-                gxi = gdi
-                emp2_this += _contract1(kijab, i, eia, ejb, gdi, gxi)
-        return emp2_this.real
+            gxi = get_oovv_i(i, 'x') if swap_ab else None
+            edi, exi = _contract1(kijab, i, eia, ejb, gdi, gxi)
+            ed_this += edi
+            ex_this += exi
+        return ed_this, ex_this
 
     # compute
     cput1 = (logger.process_clock(), logger.perf_counter())
+    emp2_d = emp2_x = 0.
     for ki in range(nkpts):
         for kj in range(nkpts):
             kblist = [kconserv[ki,ka,kj] for ka in range(nkpts)]
@@ -146,7 +152,9 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
                 if done[(ka,kb)] and done[(kb,ka)]:
                     continue
 
-                emp2 += contract1(eris, (ki,kj,ka,kb))
+                emp2_d_ijab, emp2_x_ijab = contract1(eris, (ki,kj,ka,kb))
+                emp2_d += emp2_d_ijab
+                emp2_x += emp2_x_ijab
 
                 done[(ka,kb)] = done[(kb,ka)] = True
 
@@ -154,9 +162,13 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
 
     log.timer("KMP2", *cput0)
 
-    emp2 /= nkpts
+    emp2_d /= nkpts
+    emp2_x /= nkpts
+    emp2 = emp2_d + emp2_x
+    emp2_ss = emp2_d*0.5 + emp2_x
+    emp2_os = emp2_d*0.5
 
-    return emp2, t2
+    return emp2, t2, emp2_ss, emp2_os
 
 
 def _init_mp_df_eris(mp, mo_coeff=None, Lov=None):
@@ -751,6 +763,8 @@ class KMP2(mp2.MP2):
         self._nocc = None
         self._nmo = None
         self.e_corr = None
+        self.e_corr_ss = None
+        self.e_corr_os = None
         self.e_hf = None
         self.t2 = None
         self._keys = set(self.__dict__.keys())
@@ -796,11 +810,21 @@ class KMP2(mp2.MP2):
         # TODO: compute e_hf for non-canonical SCF
         self.e_hf = self._scf.e_tot
 
-        self.e_corr, self.t2 = \
+        self.e_corr, self.t2, self.e_corr_ss, self.e_corr_os = \
                 kernel(self, mo_energy, mo_coeff, eris=eris,
                        verbose=self.verbose, with_t2=with_t2)
-        logger.log(self, 'KMP2 energy = %.15g', self.e_corr)
+
+        self._finalize()
+
         return self.e_corr, self.t2
+
+    def _finalize(self):
+        '''Hook for dumping results and clearing up the object.'''
+        logger.note(self, 'E(%s) = %.15g  E_corr = %.15g',
+                    self.__class__.__name__, self.e_tot, self.e_corr)
+        logger.info(self, 'E_corr(same-spin) = %.15g', self.e_corr_ss)
+        logger.info(self, 'E_corr(oppo-spin) = %.15g', self.e_corr_os)
+        return self
 
     def _memory_sanity_check(self, with_t2):
         nocc = self.nocc
@@ -987,6 +1011,7 @@ if __name__ == '__main__':
 
     # Running HF and MP2 with 1x1x2 Monkhorst-Pack k-point mesh
     kmf = scf.KRHF(cell, kpts=cell.make_kpts([1,1,2]), exxdiv=None)
+    # kmf = scf.KRHF(cell, kpts=cell.make_kpts([1,1,2]), exxdiv=None).rs_density_fit()
     ehf = kmf.kernel()
 
     mymp = mp.KMP2(kmf)
