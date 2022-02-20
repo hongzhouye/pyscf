@@ -119,9 +119,9 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
         if with_df_ints or mp.less_mem:
             def get_oovv_i(i, kind):
                 if kind == 'd':
-                    return eris.get_oovv_i(i, kijab)
+                    return eris.get_oovv(kijab, shls_slice_i=(i,i+1))[0]
                 else:
-                    return eris.get_oovv_i(i, kijba)
+                    return eris.get_oovv(kijba, shls_slice_i=(i,i+1))[0]
         else:
             # caching ijab and ijba
             oovv_ijab = eris.get_oovv(kijab)
@@ -800,31 +800,20 @@ class _MP2ERIS_INCORE:
         return _fao2mo(mo_iajb, kpts_iajb, compact=False
                        ).reshape(*shape).transpose(0,2,1,3) * fac
 
-    def get_oovv(self, kijab):
+    def get_oovv(self, kijab, shls_slice_i=None):
         ki,kj,ka,kb = kijab
         kpts = self.kpts
         mo_coeff = self.mo_coeff
         nocc = self.nocc
+        if shls_slice_i is None:
+            shls_slice_i = (0, nocc)
 
-        orbo_i = mo_coeff[ki][:,:nocc]
+        orbo_i = mo_coeff[ki][:,shls_slice_i[0]:shls_slice_i[1]]
         orbo_j = mo_coeff[kj][:,:nocc]
         orbv_a = mo_coeff[ka][:,nocc:]
         orbv_b = mo_coeff[kb][:,nocc:]
         return self.fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
                            (kpts[ki],kpts[ka],kpts[kj],kpts[kb]))
-
-    def get_oovv_i(self, i, kijab):
-        ki,kj,ka,kb = kijab
-        kpts = self.kpts
-        mo_coeff = self.mo_coeff
-        nocc = self.nocc
-
-        orbo_i = mo_coeff[ki][:,i:i+1]
-        orbo_j = mo_coeff[kj][:,:nocc]
-        orbv_a = mo_coeff[ka][:,nocc:]
-        orbv_b = mo_coeff[kb][:,nocc:]
-        return self.fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
-                           (kpts[ki],kpts[ka],kpts[kj],kpts[kb]))[0]
 
 class _DFMP2ERIS_INCORE(_MP2ERIS_INCORE):
 
@@ -833,23 +822,17 @@ class _DFMP2ERIS_INCORE(_MP2ERIS_INCORE):
         self.Lov = _init_mp_df_eris(mp, mo_coeff=mo_coeff)
         return self
 
-    def get_Lov(self, ki, ka):
-        return self.Lov[ki,ka]
+    def get_Lov(self, ki, ka, shls_slice_i=None):
+        if shls_slice_i is None:
+            return self.Lov[ki,ka]
+        else:
+            return self.Lov[ki,ka][:,shls_slice_i[0]:shls_slice_i[1]]
 
-    def get_Lov_i(self, ki, ka, i):
-        return self.Lov[ki,ka][:,i]
-
-    def get_oovv(self, kijab):
+    def get_oovv(self, kijab, shls_slice_i=None):
         ki,kj,ka,kb = kijab
         nkpts = len(self.kpts)
-        return einsum("Lia,Ljb->iajb", self.get_Lov(ki,ka),
+        return einsum("Lia,Ljb->iajb", self.get_Lov(ki,ka,shls_slice_i),
                       self.get_Lov(kj,kb)).transpose(0,2,1,3) / nkpts
-
-    def get_oovv_i(self, i, kijab):
-        ki,kj,ka,kb = kijab
-        nkpts = len(self.kpts)
-        return einsum("La,Ljb->ajb", self.get_Lov_i(ki,ka,i),
-                      self.get_Lov(kj,kb)).transpose(1,0,2) / nkpts
 
 class _DFMP2ERIS_OUTCORE(_DFMP2ERIS_INCORE):
 
@@ -872,11 +855,11 @@ class _DFMP2ERIS_OUTCORE(_DFMP2ERIS_INCORE):
         _init_mp_df_eris(mp, mo_coeff=mo_coeff, Lov=self.Lov)
         return self
 
-    def get_Lov(self, ki, ka):
-        return self.Lov['%d,%d'%(ki,ka)]
-
-    def get_Lov_i(self, ki, ka, i):
-        return self.Lov['%d,%d'%(ki,ka)][:,i]
+    def get_Lov(self, ki, ka, shls_slice_i=None):
+        if shls_slice_i is None:
+            return self.Lov['%d,%d'%(ki,ka)]
+        else:
+            return self.Lov['%d,%d'%(ki,ka)][:,shls_slice_i[0]:shls_slice_i[1]]
 
 def _make_eris_incore(mp, mo_coeff=None):
     eris = _MP2ERIS_INCORE()._common_init_(mp, mo_coeff=mo_coeff)
