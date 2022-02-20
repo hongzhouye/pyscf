@@ -90,25 +90,28 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
         n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
         eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
         return eia
-    def _contract1(kijab, i, eia, ejb, gdi, gxi=None):
+    def _contract1(kijab, shls_slice, eia, ejb, gdi, gxi=None):
         r''' The energy for the (ka,kb)-pair is (ignoring denominator)
         e = 2*|(ia|jb)|^2 + 2*|(jb|ia)|^2 - ( (ia|jb)^*(ib|ja) + c.c. )
           = 2*( |(ia|jb)|^2 + |(jb|ia)|^2 - Re{ (ia|jb)^*(ib|ja) } )
         Using the second line saves one einsum.
         '''
-        ejab = lib.direct_sum('a+jb->jab', eia[i], ejb)
+        p0,p1 = shls_slice
+        ejab = lib.direct_sum('ia+jb->ijab', eia[p0:p1], ejb)
         t2i = gdi.conj() / ejab
-        ed_this = einsum('jab,jab->', t2i, gdi) * 2.
+        ed_this = einsum('ijab,ijab->', t2i, gdi) * 2.
         if with_t2:
-            t2[kijab[0],kijab[1],kijab[2],i] = t2i
+            t2[kijab[0],kijab[1],kijab[2],p0:p1] = t2i
         if gxi is None:
-            ex_this = -einsum('jab,jba->', t2i, gdi)
+            ex_this = -einsum('ijab,ijba->', t2i, gdi)
         else:
-            ex_this = -einsum('jab,jba->', t2i, gxi) * 2
-            t2i = gxi.conj() / ejab.transpose(0,2,1)
-            ed_this += einsum('jab,jab->', t2i, gxi) * 2.
+            ex_this = -einsum('ijab,ijba->', t2i, gxi) * 2 # (ka,kb) swap
+            t2i = None
+            t2i = gxi.conj() / ejab.transpose(0,1,3,2)
+            ed_this += einsum('ijab,ijab->', t2i, gxi) * 2.
             if with_t2:
-                t2[kijab[0],kijab[1],kijab[3],i] = t2i
+                t2[kijab[0],kijab[1],kijab[3],p0:p1] = t2i
+            t2i = None
         return ed_this.real, ex_this.real
     def contract1(eris, kijab):
         ki,kj,ka,kb = kijab
@@ -116,28 +119,37 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
         swap_ab = ka != kb
         eia = get_eia(ki,ka)
         ejb = get_eia(kj,kb)
-        if with_df_ints or mp.less_mem:
-            def get_oovv_i(i, kind):
-                if kind == 'd':
-                    return eris.get_oovv(kijab, shls_slice_i=(i,i+1))[0]
-                else:
-                    return eris.get_oovv(kijba, shls_slice_i=(i,i+1))[0]
-        else:
+        caching_oovv = not (with_df_ints or mp.less_mem)
+        if caching_oovv:
             # caching ijab and ijba
             oovv_ijab = eris.get_oovv(kijab)
             oovv_ijba = eris.get_oovv(kijba) if swap_ab else oovv_ijab
-            def get_oovv_i(i, kind):
+            def get_oovv(shls_slice, kind):
+                p0,p1 = shls_slice
                 if kind == 'd':
-                    return oovv_ijab[i]
+                    return oovv_ijab[p0:p1]
                 else:
-                    return oovv_ijba[i]
+                    return oovv_ijba[p0:p1]
+        else:
+            def get_oovv(shls_slice, kind):
+                if kind == 'd':
+                    return eris.get_oovv(kijab, shls_slice_i=shls_slice)
+                else:
+                    return eris.get_oovv(kijba, shls_slice_i=shls_slice)
         ed_this = ex_this = 0
-        for i in range(nocc):
-            gdi = get_oovv_i(i, 'd')
-            gxi = get_oovv_i(i, 'x') if swap_ab else None
-            edi, exi = _contract1(kijab, i, eia, ejb, gdi, gxi)
+        mem_avail = mp.max_memory - lib.current_memory()[0]
+        # gdi (1), gxi (1), t2i (1), ejab (0.5 bc real) --> 3.5 ovv
+        blksize = int(np.floor(mem_avail * 0.7 / (nocc*nvir**2*3.5 * 16/1e6)))
+        for p0,p1 in lib.prange(0, nocc, blksize):
+            shls_slice = (p0,p1)
+            gdi = get_oovv(shls_slice, 'd')
+            gxi = get_oovv(shls_slice, 'x') if swap_ab else None
+            edi, exi = _contract1(kijab, shls_slice, eia, ejb, gdi, gxi)
             ed_this += edi
             ex_this += exi
+            gdi = gxi = None
+        if caching_oovv:
+            oovv_ijab = oovv_ijba = None
         ess_this = ed_this*0.5 + ex_this
         eos_this = ed_this*0.5
         return ess_this, eos_this
