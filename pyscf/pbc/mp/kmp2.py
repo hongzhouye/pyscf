@@ -113,46 +113,6 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
                 t2[kijab[0],kijab[1],kijab[3],p0:p1] = t2i
             t2i = None
         return ed_this.real, ex_this.real
-    def contract1(eris, kijab):
-        ki,kj,ka,kb = kijab
-        kijba = (ki,kj,kb,ka)
-        swap_ab = ka != kb
-        eia = get_eia(ki,ka)
-        ejb = get_eia(kj,kb)
-        caching_oovv = not (with_df_ints or mp.less_mem)
-        if caching_oovv:
-            # caching ijab and ijba
-            oovv_ijab = eris.get_oovv(kijab)
-            oovv_ijba = eris.get_oovv(kijba) if swap_ab else oovv_ijab
-            def get_oovv(shls_slice, kind):
-                p0,p1 = shls_slice
-                if kind == 'd':
-                    return oovv_ijab[p0:p1]
-                else:
-                    return oovv_ijba[p0:p1]
-        else:
-            def get_oovv(shls_slice, kind):
-                if kind == 'd':
-                    return eris.get_oovv(kijab, shls_slice_i=shls_slice)
-                else:
-                    return eris.get_oovv(kijba, shls_slice_i=shls_slice)
-        ed_this = ex_this = 0
-        mem_avail = mp.max_memory - lib.current_memory()[0]
-        # gdi (1), gxi (1), t2i (1), ejab (0.5 bc real) --> 3.5 ovv
-        blksize = int(np.floor(mem_avail * 0.7 / (nocc*nvir**2*3.5 * 16/1e6)))
-        for p0,p1 in lib.prange(0, nocc, blksize):
-            shls_slice = (p0,p1)
-            gdi = get_oovv(shls_slice, 'd')
-            gxi = get_oovv(shls_slice, 'x') if swap_ab else None
-            edi, exi = _contract1(kijab, shls_slice, eia, ejb, gdi, gxi)
-            ed_this += edi
-            ex_this += exi
-            gdi = gxi = None
-        if caching_oovv:
-            oovv_ijab = oovv_ijba = None
-        ess_this = ed_this*0.5 + ex_this
-        eos_this = ed_this*0.5
-        return ess_this, eos_this
 
     # compute
     cput1 = (logger.process_clock(), logger.perf_counter())
@@ -166,22 +126,40 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, verbose=logger.NOTE, with_t2=WITH
                 if done[(ka,kb)] and done[(kb,ka)]:
                     continue
 
-                emp2_ss_ijab, emp2_os_ijab = contract1(eris, (ki,kj,ka,kb))
-                emp2_ss += emp2_ss_ijab
-                emp2_os += emp2_os_ijab
+                kijab = (ki,kj,ka,kb)
+                eia = get_eia(ki,ka)
+                ejb = get_eia(kj,kb)
+
+                if log.verbose >= logger.DEBUG2:
+                    cput2 = (logger.process_clock(), logger.perf_counter())
+
+                cache_eris = not (mp.with_df_ints or mp.less_mem)
+                p1 = 0
+                for gdi,gxi in eris.loop_oovv(kijab, max_memory=mp.max_memory,
+                                              cache_eris=cache_eris):
+                    p0 = p1
+                    p1 = p0 + gdi.shape[0]
+
+                    edi, exi = _contract1(kijab, (p0,p1), eia, ejb, gdi, gxi)
+
+                    emp2_ss += edi*0.5 + exi
+                    emp2_os += edi*0.5
+                    gdi = gxi = None
+
+                    if log.verbose >= logger.DEBUG2:
+                        cput2 = log.timer_debug1('[%d:%d]'%(p0,p1), *cput2)
 
                 done[(ka,kb)] = done[(kb,ka)] = True
 
             cput1 = log.timer_debug1('(ki,kj) = (%d,%d)'%(ki,kj), *cput1)
 
-    log.timer("KMP2", *cput0)
+    log.timer(mp.__class__.__name__, *cput0)
 
     emp2_ss /= nkpts
     emp2_os /= nkpts
     emp2 = emp2_ss + emp2_os
 
     return emp2, t2, emp2_ss, emp2_os
-
 
 def _padding_k_idx(nmo, nocc, kind="split"):
     """A convention used for padding vectors, matrices and tensors in case when occupation numbers depend on the
@@ -826,6 +804,70 @@ class _MP2ERIS_INCORE:
         orbv_b = mo_coeff[kb][:,nocc:]
         return self.fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
                            (kpts[ki],kpts[ka],kpts[kj],kpts[kb]))
+
+    def loop_oovv(self, kijab, swap_kakb=True, cache_eris=False, max_memory=2000,
+                  blksize=None):
+        r''' Given kijab = (ki,kj,ka,kb) the indices of four kpts in self.kpts,
+        this function returns blocks of the oovv tensor (slicing the first [o]
+        index) for kijab = (ki,kj,ka,kb) and (if swap_ab=True) kijba = (ki,kj,kb,ka).
+
+        Args:
+            kijab (tuple):
+                kijab = (ki,kj,ka,kb)
+            swap_kakb (bool):
+                If True and ka != kb, both direct term 'gdi' (ki,kj,ka,kb) and the
+                (ka,kb)-exchange term 'gxi' (ki,kj,kb,ka) will be returned.
+                Otherwise, the returned 'gxi' is None. The default is True.
+            cache_eris (bool):
+                If True, the full oovv tensor will be cached. Otherwise, the
+                corresponding block of oovv tensor is computed on the fly.
+            max_memory (float):
+                If blksize is not given, use this to determine an appropriate blksize.
+            blksize (int):
+                The block size over which the first [o] index is looped.
+
+        Returns:
+            gdi, gxi:
+                The direct and (ka,kb)-exchange terms of oovv, where gxi is None if
+                swap_kakb is False or ka == kb.
+        '''
+        ki,kj,ka,kb = kijab
+        kijba = (ki,kj,kb,ka)
+        swap_kakb &= ka != kb
+        nocc = self.nocc
+        nvir = self.nmo - nocc
+
+        if cache_eris:
+            # caching ijab and ijba
+            oovv_ijab = self.get_oovv(kijab)
+            oovv_ijba = self.get_oovv(kijba) if swap_kakb else oovv_ijab
+            def get_oovv(shls_slice, kind):
+                p0,p1 = shls_slice
+                if kind == 'd':
+                    return oovv_ijab[p0:p1]
+                else:
+                    return oovv_ijba[p0:p1]
+        else:
+            def get_oovv(shls_slice, kind):
+                if kind == 'd':
+                    return self.get_oovv(kijab, shls_slice_i=shls_slice)
+                else:
+                    return self.get_oovv(kijba, shls_slice_i=shls_slice)
+
+        if blksize is None:
+            mem_avail = max_memory - lib.current_memory()[0]
+            # gdi (1), gxi (1), t2i (1), ejab (0.5 bc real) --> 3.5 ovv
+            blksize = int(np.floor(mem_avail * 0.7 / (nocc*nvir**2*3.5 * 16/1e6)))
+
+        for p0,p1 in lib.prange(0, self.nocc, blksize):
+            shls_slice = (p0,p1)
+            gdi = get_oovv(shls_slice, 'd')
+            gxi = get_oovv(shls_slice, 'x') if swap_kakb else None
+            yield gdi, gxi
+            gdi = gxi = None
+
+        if cache_eris:
+            oovv_ijab = oovvijba = None
 
 class _DFMP2ERIS_INCORE(_MP2ERIS_INCORE):
 
