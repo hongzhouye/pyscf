@@ -65,7 +65,7 @@ class KnownValues(unittest.TestCase):
                     moq = mo_coeff[kq]
                     mor = mo_coeff[kr]
                     mos = mo_coeff[ks]
-                    eri = ao2mo((mop,moq,mor,mos), 
+                    eri = ao2mo((mop,moq,mor,mos),
                           (kpts[kp], kpts[kq], kpts[kr], kpts[ks]),
                           compact=False).reshape(mop.shape[-1],moq.shape[-1],
                           mor.shape[-1],mos.shape[-1]) / nkpts
@@ -73,6 +73,17 @@ class KnownValues(unittest.TestCase):
                     idx += 1
         e += cell.energy_nuc()
         self.assertAlmostEqual(e, e_tot, 9)
+
+    def test_kmp2_dm_without_t2(self):
+        kmp2 = mp.KMP2(kmf)
+        e_corr, t2 = kmp2.kernel()
+        kmp2.t2 = None
+
+        dm1_with_t2 = kmp2.make_rdm1(t2=t2)
+        dm1_without_t2 = kmp2.make_rdm1()
+        nkpts = len(kmf.kpts)
+        err = max([abs(dm1_with_t2[k]-dm1_with_t2[k]).max() for k in range(nkpts)])
+        self.assertAlmostEqual(err, 0., 9)
 
 if __name__ == "__main__":
     print("Full Tests for kmp2 rdm")
