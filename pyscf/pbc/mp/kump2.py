@@ -14,15 +14,14 @@
 # limitations under the License.
 #
 # Author: James McClain <jdmcclain47@gmail.com>
+#         Hong-Zhou Ye <hzyechem@gmail.com>
 #
 
 
 '''
 kpoint-adapted unrestricted MP2
-t2[i,j,a,b] = <ij|ab> / D_ij^ab
-
-t2 and eris are never stored in full, only a partial
-eri of size (nkpts,nocc,nocc,nvir,nvir)
+t2 = (t2aa, t2ab, t2bb)
+t2aa/ab/bb[i,j,a,b] = <ij|ab> / D_ij^ab
 '''
 
 

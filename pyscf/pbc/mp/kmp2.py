@@ -15,15 +15,13 @@
 #
 # Author: Timothy Berkelbach <tim.berkelbach@gmail.com>
 #         James McClain <jdmcclain47@gmail.com>
+#         Hong-Zhou Ye <hzyechem@gmail.com>
 #
 
 
 '''
 kpoint-adapted and spin-adapted MP2
 t2[i,j,a,b] = <ij|ab> / D_ij^ab
-
-t2 and eris are never stored in full, only a partial
-eri of size (nkpts,nocc,nocc,nvir,nvir)
 '''
 
 import numpy as np
