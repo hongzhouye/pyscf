@@ -119,6 +119,7 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbos
     mem_avail = mp.max_memory - lib.current_memory()[0]
     # 4 ovv-type tensors: gdi, gxi, ejab, t2i
     blksize = int(np.floor(mem_avail*0.7 / (nocc*nvir**2.*4 * 16/1e6)))
+    cache_eris = not (mp.with_df_ints or mp.less_mem)
     cput1 = (logger.process_clock(), logger.perf_counter())
     emp2_ss = emp2_os = 0.
     for ki in range(nkpts):
@@ -134,7 +135,6 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbos
                 eia = get_eia(ki,ka)
                 ejb = get_eia(kj,kb)
 
-                cache_eris = not (mp.with_df_ints or mp.less_mem)
                 p1 = 0
                 for gdi,gxi in eris.loop_oovv(kijab, blksize=blksize,
                                               cache_eris=cache_eris):
