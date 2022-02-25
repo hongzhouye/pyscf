@@ -790,6 +790,15 @@ class KMP2(mp2.MP2):
         logger.info(self, 'E_corr(oppo-spin) = %.15g', self.e_corr_os)
         return self
 
+    def e_corr_scs(self, pss, pos):
+        return self.e_corr_ss*pss + self.e_corr_os*pos
+    def e_tot_scs(self, pss, pos):
+        return self.e_tot-self.e_corr + self.e_corr_scs(pss,pos)
+    def e_corr_sos(self, pos):
+        return self.e_corr_scs(0., pos)
+    def e_tot_sos(self, pos):
+        return self.e_tot_scs(0., pos)
+
     def _memory_sanity_check(self, with_t2):
         nocc = self.nocc
         nvir = self.nmo - nocc
