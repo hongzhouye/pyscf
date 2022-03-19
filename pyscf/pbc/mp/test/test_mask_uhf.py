@@ -132,8 +132,8 @@ class KnownValues(unittest.TestCase):
         #  k1 :  O O | - V V     |  - | - V
         #  k2 :  O - | V V V     |  O | V V
         split_idx = padding_k_idx(mp, kind='split')
-        outa = [[y for x in split_idx[0][idx] for y in x] for idx in range(2)]  # Flatten the list for ease-of-use
-        outb = [[y for x in split_idx[1][idx] for y in x] for idx in range(2)]
+        outa = [[y for x in split_idx[idx][0] for y in x] for idx in range(2)]  # Flatten the list for ease-of-use
+        outb = [[y for x in split_idx[idx][1] for y in x] for idx in range(2)]
         expecteda = [[0, 1, 0], [1, 2, 0, 1, 2]]  # [occ_idx, vir_idx] for alpha
         expectedb = [[0], [1, 0, 1]]              # [occ_idx, vir_idx] for beta
         self.assertAlmostEqual(outa, expecteda)
@@ -172,8 +172,8 @@ class KnownValues(unittest.TestCase):
         #  k1 :  O | - V V   |  O | V V V
         #  k2 :  O | V V V   |  O | - V V
         split_idx = padding_k_idx(mp, kind='split')
-        outa = [[y for x in split_idx[0][idx] for y in x] for idx in range(2)]  # Flatten the list for ease-of-use
-        outb = [[y for x in split_idx[1][idx] for y in x] for idx in range(2)]
+        outa = [[y for x in split_idx[idx][0] for y in x] for idx in range(2)]  # Flatten the list for ease-of-use
+        outb = [[y for x in split_idx[idx][1] for y in x] for idx in range(2)]
         expecteda = [[0, 0], [1, 2, 0, 1, 2]]  # [occ_idx, vir_idx] for alpha
         expectedb = [[0, 0], [0, 1, 2, 1, 2]]  # [occ_idx, vir_idx] for beta
         self.assertAlmostEqual(outa, expecteda)
@@ -191,4 +191,3 @@ class KnownValues(unittest.TestCase):
 if __name__ == '__main__':
     print("Full mask test")
     unittest.main()
-
