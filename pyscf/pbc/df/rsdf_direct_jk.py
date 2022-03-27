@@ -71,8 +71,10 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     j3c_dtype, j3c_dsize = (REAL,8) if is_zero(kptii_lst) else (COMPLEX,16)
     j3c_real = j3c_dtype == REAL
     mem_avail = mydf.max_memory - lib.current_memory()[0]
-    blksize = min(nao*nao, mem_avail*0.7e6 / (2*nkpts*naux*j3c_dsize))
+    log.debug1('get_j mem_avail= %.1f MB', mem_avail)
+    blksize = min(nao*nao, mem_avail*0.7e6 / (2*max(nkpts,nband)*naux*j3c_dsize))
     shranges = _guess_shell_ranges(mydf.cell, blksize, 's1')
+    log.debug1('get_j blksize= %s  shranges= %s', blksize, shranges)
     blksize = np.max([x[2] for x in shranges])
     bufR = np.empty(naux*blksize, dtype=REAL)
     bufI = np.empty(naux*blksize, dtype=REAL)
@@ -129,13 +131,6 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
 
 # step 3: vj_{pq}^{ki} = \sum_{L} (L|pq)^{ki,ki} rho_L
     kptbandii_lst = np.repeat(kpts_band,2,axis=0).reshape(nband,2,3)
-    j3c_dtype, j3c_dsize = (REAL,8) if is_zero(kptbandii_lst) else (COMPLEX,16)
-    mem_avail = mydf.max_memory - lib.current_memory()[0]
-    blksize = min(nao*nao, mem_avail*0.7e6 / (2*nband*naux*j3c_dsize))
-    shranges = _guess_shell_ranges(mydf.cell, blksize, 's1')
-    blksize = np.max([x[2] for x in shranges])
-    # bufR = np.empty(naux*blksize, dtype=REAL)
-    # bufI = np.empty(naux*blksize, dtype=REAL)
     p1 = 0
     for kcLpq in loop_j3c(mydf, kptij_lst=kptbandii_lst, aosym='s1', partition_iorj='i',
                           shranges=shranges, verbose=verbose1, bvk_kmesh=bvk_kmesh):
@@ -205,6 +200,8 @@ def get_k_kpts_gamma(mydf, smo):
     XYblksizemin = (nset+2)*naux*nao    # add 2 for Lpi, Xpi
     mem_XYblk = XYblksizemin*vs_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
+    log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
+    log.debug1('get_k nmomax= %d  nmoblksize= %d', nmomax, nmoblksize)
     if nmoblksize < 1:
         mem_need = mem_XYblk + mem_j3cblk
         log.error('Caching (L|[p]q) and (L|p[i]) needs at least %.1f MB of memory, '
@@ -221,6 +218,9 @@ def get_k_kpts_gamma(mydf, smo):
     shranges = _guess_shell_ranges(mydf.cell, aopblksize, 's1')
     aopblksize = np.max([x[2] for x in shranges])
     pblksize = aopblksize // nao
+    log.debug1('get_k mem_avail= %.2f MB  memj3cblk= %.2f MB', mem_avail, mem_j3cblk)
+    log.debug1('get_k aopblksize= %d  pblksize= %d  shranges= %s',
+               aopblksize, pblksize, shranges)
     buf_Lpi = np.empty(naux*pblksize*nmoblksize, dtype=REAL)
 
     for i0,i1 in lib.prange(0,nmomax,nmoblksize):
@@ -350,6 +350,8 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     XYblksizemin = (nset*(nkptij+nkptijswap)+2)*naux*nao    # add 2 for Lpi, Xpi
     mem_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
+    log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
+    log.debug1('get_k nmomax= %d  nmoblksize= %d', nmomax, nmoblksize)
     if nmoblksize < 1:
         mem_need = mem_XYblk + mem_j3cblk
         log.error('Caching (L|[p]q) and (L|p[i]) needs at least %.1f MB of memory, '
@@ -371,6 +373,9 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     shranges = _guess_shell_ranges(mydf.cell, aopblksize, 's1')
     aopblksize = np.max([x[2] for x in shranges])
     pblksize = aopblksize // nao
+    log.debug1('get_k mem_avail= %.2f MB  memj3cblk= %.2f MB', mem_avail, mem_j3cblk)
+    log.debug1('get_k aopblksize= %d  pblksize= %d  shranges= %s',
+               aopblksize, pblksize, shranges)
     buf_LpqR = np.empty(naux*aopblksize, dtype=REAL)
     buf_LqpR = np.empty(naux*aopblksize, dtype=REAL)
     buf_LpiR = np.empty(naux*pblksize*nmoblksize, dtype=REAL)
