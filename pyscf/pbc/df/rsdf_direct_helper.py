@@ -684,10 +684,10 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
         blksizemax = max([x[-1] for x in shranges])
     buf = np.empty(rowlen*blksizemax, dtype=dtype)
 
-    t1 = (logger.process_clock(), logger.perf_counter())
-
     p1 = 0
     for ipart,shrange in enumerate(shranges):
+        t1 = (logger.process_clock(), logger.perf_counter())
+
         s0, s1, ncol = shrange
         p0 = p1
         p1 = p0 + ncol
@@ -696,6 +696,7 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
         j3c = get_j3c(mydf, kptij_lst=kptij_lst, shls_slice=shls_slice, aosym=aosym,
                       out=buf, bvk_kmesh_R=bvk_kmesh_R, bvk_kmesh_G=bvk_kmesh_G,
                       verbose=log.verbose)
+
         t1 = log.timer('j3c [%d:%d]'%(p0,p1), *t1)
 
         yield j3c
