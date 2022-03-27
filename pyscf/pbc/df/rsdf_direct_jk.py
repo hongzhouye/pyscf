@@ -201,7 +201,8 @@ def get_k_kpts_gamma(mydf, smo):
     mem_XYblk = XYblksizemin*vs_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
-    log.debug1('get_k nmomax= %d  nmoblksize= %d', nmomax, nmoblksize)
+    log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
+               nmomax//nmoblksize+nmomax%nmoblksize>0)
     if nmoblksize < 1:
         mem_need = mem_XYblk + mem_j3cblk
         log.error('Caching (L|[p]q) and (L|p[i]) needs at least %.1f MB of memory, '
@@ -219,8 +220,9 @@ def get_k_kpts_gamma(mydf, smo):
     aopblksize = np.max([x[2] for x in shranges])
     pblksize = aopblksize // nao
     log.debug1('get_k mem_avail= %.2f MB  memj3cblk= %.2f MB', mem_avail, mem_j3cblk)
-    log.debug1('get_k aopblksize= %d  pblksize= %d  shranges= %s',
-               aopblksize, pblksize, shranges)
+    log.debug1('get_k aopblksize= %d  pblksize= %d  nblk= %d', aopblksize, pblksize,
+               len(shranges))
+    log.debug1('get_k shranges= %s', shranges)
     buf_Lpi = np.empty(naux*pblksize*nmoblksize, dtype=REAL)
 
     for i0,i1 in lib.prange(0,nmomax,nmoblksize):
@@ -351,7 +353,8 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     mem_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
-    log.debug1('get_k nmomax= %d  nmoblksize= %d', nmomax, nmoblksize)
+    log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
+               nmomax//nmoblksize+nmomax%nmoblksize>0)
     if nmoblksize < 1:
         mem_need = mem_XYblk + mem_j3cblk
         log.error('Caching (L|[p]q) and (L|p[i]) needs at least %.1f MB of memory, '
@@ -374,8 +377,9 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     aopblksize = np.max([x[2] for x in shranges])
     pblksize = aopblksize // nao
     log.debug1('get_k mem_avail= %.2f MB  memj3cblk= %.2f MB', mem_avail, mem_j3cblk)
-    log.debug1('get_k aopblksize= %d  pblksize= %d  shranges= %s',
-               aopblksize, pblksize, shranges)
+    log.debug1('get_k aopblksize= %d  pblksize= %d  nblk= %d', aopblksize, pblksize,
+               len(shranges))
+    log.debug1('get_k shranges= %s', shranges)
     buf_LpqR = np.empty(naux*aopblksize, dtype=REAL)
     buf_LqpR = np.empty(naux*aopblksize, dtype=REAL)
     buf_LpiR = np.empty(naux*pblksize*nmoblksize, dtype=REAL)
