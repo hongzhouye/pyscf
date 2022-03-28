@@ -518,6 +518,7 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exx
         log.warn('RSDF get_k_kpts for band calculations is not implemented.')
         raise NotImplementedError
 
+    kpts = lib.asarray(kpts).reshape(-1,3)
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     nband = len(kpts_band)
 
@@ -541,6 +542,7 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exx
                   len(mo_occ)   == nset and len(mo_occ[0])   == nkpts):
             log.error('Input mo_coeff or mo_occ has wrong dim.')
             raise ValueError
+        log.debug1('Input mo_coeff and mo_occ found via tagged dm_kpts.')
     else:
         log.debug1('Diagonalizing dm_kpts to generate mo_coeff and mo_occ')
         xs = [_eigh_rdm1(dms[i]) for i in range(nset)]

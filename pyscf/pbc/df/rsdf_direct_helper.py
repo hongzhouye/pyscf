@@ -640,6 +640,7 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
         bvk_kmesh_R , bvk_kmesh_G = bvk_kmesh
     else:
         bvk_kmesh_R = bvk_kmesh_G = bvk_kmesh
+    log.debug1('Using bvk_kmesh_R= %s  bvk_kmesh_G= %s', bvk_kmesh_R, bvk_kmesh_G)
 
     cell = mydf.cell
     auxcell = mydf.auxcell

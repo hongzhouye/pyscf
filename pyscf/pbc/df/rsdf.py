@@ -741,19 +741,21 @@ cell.dimension=3 with large vacuum.""")
             vj = vk = None
             dms = lib.asarray(dm)
             if dms.ndim == 2:   # nset = 1
-                single_kpt = True
+                single_set = True
                 dm_input = [dm]
             else:
-                single_kpt = False
+                single_set = False
+                dm_input = dm
             if with_k:
                 vk = rsdf_direct_jk.get_k_kpts(self, dm_input, hermi, [kpts], kpts_band,
                                                exxdiv)
-                if single_kpt:
+                if single_set:
                     vk = vk[0]
             if with_j:
                 vj = rsdf_direct_jk.get_j_kpts(self, dm_input, hermi, [kpts], kpts_band)
-                if single_kpt:
+                if single_set:
                     vj = vj[0]
+            return vj, vk
 
         if isinstance(self.use_bvk, bool):
             use_bvk_R = use_bvk_G = self.use_bvk
