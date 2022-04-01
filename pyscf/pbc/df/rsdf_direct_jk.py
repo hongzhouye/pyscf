@@ -354,7 +354,7 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
-               nmomax//nmoblksize+nmomax%nmoblksize>0)
+               nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
     if nmoblksize < 1:
         mem_need = mem_XYblk + mem_j3cblk
         log.error('Caching (L|[p]q) and (L|p[i]) needs at least %.1f MB of memory, '
@@ -396,6 +396,11 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
         kXipI.fill(0)
         kYipI = np.ndarray((nset,nkptijswap,naux,di,nao),dtype=REAL,buffer=buf_kYipI)
 
+        tspans = np.zeros((9,2))
+        tnames = ['buffer', 'Lpq ji', 'Lpi ji', 'kXip ji', 'Lpq ij', 'Lpi ij', 'kXip ij',
+                  'j3c', 'xform']
+        tick_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
+
         p1 = 0
         for kcLpq in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='i',
                               shranges=shranges, verbose=verbose1, bvk_kmesh=bvk_kmesh):
@@ -403,6 +408,8 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
             assert(dp*nao == kcLpq.shape[-1])
             p0 = p1
             p1 += dp
+
+            tick = np.asarray((logger.process_clock(), logger.perf_counter()))
 
             LpqR = np.ndarray((naux,dp,nao), dtype=REAL, buffer=buf_LpqR)
             LpqI = np.ndarray((naux,dp,nao), dtype=REAL, buffer=buf_LpqI)
@@ -413,35 +420,67 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
             LpiR = np.ndarray((naux*dp,di), dtype=REAL, buffer=buf_LpiR)
             LpiI = np.ndarray((naux*dp,di), dtype=REAL, buffer=buf_LpiI)
 
+            tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[0] += tock - tick
+
             ijswap = 0
             for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
                 for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
                     kj = _safe_member(kptj, kpts)
                     ki = _safe_member(kptj-kpt, kpts)
+                    tick = np.asarray((logger.process_clock(), logger.perf_counter()))
                     LqpR[:] = kcLpq[ji][0].real.reshape(naux,dp,nao).transpose(0,2,1)
                     LqpI[:] = kcLpq[ji][0].imag.reshape(naux,dp,nao).transpose(0,2,1)
+                    tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[1] += tock - tick
                     for iset in range(nset):
                         moR = skmoR[iset][ki][p0:p1,i0:i1]
                         moI = skmoI[iset][ki][p0:p1,i0:i1]
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
                         zdotNC(LqpR.reshape(-1,dp), LqpI.reshape(-1,dp), moR, moI,
                                1, LqiR, LqiI)
+                        tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[2] += tock - tick
                         kXipR[iset,ji] += LqiR.reshape(naux,nao,di).transpose(0,2,1)
                         kXipI[iset,ji] += LqiI.reshape(naux,nao,di).transpose(0,2,1)
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[3] += tick - tock
                     if ki != kj:
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
                         LpqR[:] = LqpR.transpose(0,2,1)
                         LpqI[:] = LqpI.transpose(0,2,1)
+                        tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[4] += tock - tick
                         for iset in range(nset):
                             moR = skmoR[iset][kj][:,i0:i1]
                             moI = skmoI[iset][kj][:,i0:i1]
+                            tick = np.asarray((logger.process_clock(), logger.perf_counter()))
                             zdotNN(LpqR.reshape(-1,nao), LpqI.reshape(-1,nao), moR, moI,
                                    1, LpiR, LpiI)
+                            tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                            tspans[5] += tock - tick
                             kYipR[iset,ijswap,:,:,p0:p1] = \
                                         LpiR.reshape(naux,dp,di).transpose(0,2,1)
                             kYipI[iset,ijswap,:,:,p0:p1] = \
                                         LpiI.reshape(naux,dp,di).transpose(0,2,1)
+                            tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                            tspans[6] += tick - tock
                         ijswap += 1
 
             LpqR = LpqI = LqpR = LqpI = LqiR = LqiI = LpiR = LpiI = kcLpq = None
+
+        tock_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
+        tspans[8] = tspans[:7].sum(axis=0)
+        tspans[7] += tock_tot - tick_tot - tspans[8]
+
+        for tspan,tname in zip(tspans,tnames):
+            log.debug1('CPU time for get_k_kpts pass 1     %10s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan)
+        for tspan,tname in zip(tspans,tnames):
+            if 'ij' in tname or 'ji' in tname:
+                tspan_avg = tspan / (nkptij if 'ji' in tname else nkptijswap)
+                log.debug1('CPU time for get_k_kpts pass 1 avg %10s  %9.2f sec, '
+                           'wall time  %9.2f sec', tname, *tspan_avg)
 
         t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 1'%(i0,i1), *t1)
 
