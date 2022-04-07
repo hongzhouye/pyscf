@@ -424,10 +424,12 @@ def remove_j3c_sr_G0_q_(mydf, j3c, shls_slice, kptij_lst, cell=None, auxcell=Non
     return j3c
 def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx, cell=None, auxcell=None,
                   shls_slice=None, omega=None, mesh=None, aosym='s2ij', comp=None,
-                  bvk_kmesh=None, verbose=None):
+                  gLRI=None, bvk_kmesh=None, verbose=None):
     r''' Add LR part of j3c to input j3c
     '''
     log = logger.new_logger(mydf, verbose)
+
+    j3c_order = 'Lij'
 
     if comp is None: comp = 1
     if comp != 1:
@@ -440,10 +442,14 @@ def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx, cell=None, auxc
     if shls_slice is None:
         shls_slice = (0, cell.nbas, 0, cell.nbas, 0, auxcell.nbas)
 
-# determine nao_pair and check if input j3c has correct shape
+    nkptj = len(adapted_kptjs)
+
+# determine nao_pair
     ao_loc = cell.ao_loc_nr()
+    aux_loc = auxcell.ao_loc_nr()
     ni = ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]]
     nj = ao_loc[shls_slice[3]] - ao_loc[shls_slice[2]]
+    naoaux = aux_loc[shls_slice[5]] - aux_loc[shls_slice[4]]
     nii_start = ao_loc[shls_slice[1]]*(ao_loc[shls_slice[1]]+1)//2
     nii_end = ao_loc[shls_slice[0]]*(ao_loc[shls_slice[0]]+1)//2
     nii = nii_end - nii_start
@@ -454,18 +460,18 @@ def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx, cell=None, auxc
     else:
         aosym_ = 's1'
 
-    nao_pair = nii if aosym_ == 's2' else nij
-    for idx in adapted_ji_idx:
-        if j3c[idx].shape[-1] != nao_pair:
-            log.error('j3c for kptji_idx %d has wrong shape. Expecting '
-                      'shape[-1] = %d, get %d', idx, nao_pair, j3c[idx].shape[-1])
-            raise ValueError
-    ncol = nao_pair
+    ncol = nii if aosym_ == 's2' else nij
 
-# check if j3c has the correct data type
+# check j3c dtype and shape
     if j3c.dtype == np.double and not (is_zero(kpt) and is_zero(adapted_kptjs)):
         log.error('input j3c is real but input kpt/adapted_kptjs are not gamma point')
-        raise RuntimeError
+        raise ValueError
+
+    j3c_shape = (naoaux,ncol) if j3c_order == 'Lij' else (ncol,naoaux)
+    if j3c.shape[-2:] != j3c_shape:
+        log.error('Input j3c has a wrong shape. Expecting j3c.shape[-2:]= %s, '
+                  'getting %s.', j3c_shape, j3c.shape[-2:])
+        raise ValueError
 
 # useful constants
     nbas = cell.nbas
@@ -481,47 +487,59 @@ def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx, cell=None, auxc
     ngrids = gxyz.shape[0]
 
 # bra
-    auxshls_slice = (shls_slice[-2], shls_slice[-1])
-    Gaux = ft_ao.ft_ao(auxcell, Gv, auxshls_slice, b, gxyz, Gvbase, kpt)
-    wcoulG_lr = mydf.weighted_coulG(omega, kpt, False, mesh)
-    Gaux *= wcoulG_lr.reshape(-1,1)
-    kLR = Gaux.real.copy('C')
-    kLI = Gaux.imag.copy('C')
-    Gaux = None
+    if gLRI is None:
+        auxshls_slice = (shls_slice[-2], shls_slice[-1])
+        Gaux = ft_ao.ft_ao(auxcell, Gv, auxshls_slice, b, gxyz, Gvbase, kpt)
+        wcoulG_lr = mydf.weighted_coulG(omega, kpt, False, mesh)
+        Gaux *= wcoulG_lr.reshape(-1,1)
+        gLR = Gaux.real.copy('C')
+        gLI = Gaux.imag.copy('C')
+        Gaux = None
+    else:
+        gLR, gLI = gLRI
 
 # set up buffer
     # buffer for out
-    kLpqRbuf = np.zeros((nkptj,naoaux,ncol), dtype=np.double)
+    kLpqRbuf = np.zeros((nkptj,*j3c_shape), dtype=np.double)
     if j3c[0].dtype == np.complex128:
-        kLpqIbuf = np.zeros((nkptj,naoaux,ncol), dtype=np.double)
+        kLpqIbuf = np.zeros((nkptj,*j3c_shape), dtype=np.double)
     # (pq|G;{kj}) + (pq|G) ==> ncol*(nkptj+1)*Gblksize
     mem_avail = mydf.max_memory - lib.current_memory()[0]
     Gblksize = max(16, int(np.floor(mem_avail*0.4 / (ncol*(nkptj+1)*16/1e6))))
     Gblksize = min(Gblksize, ngrids, 16384)
-    pqkRbuf = np.empty(Gblksize*ncol, dtype=np.double)
-    pqkIbuf = np.empty(Gblksize*ncol, dtype=np.double)
+    pqgRbuf = np.empty(Gblksize*ncol, dtype=np.double)
+    pqgIbuf = np.empty(Gblksize*ncol, dtype=np.double)
     buf = np.empty(nkptj*Gblksize*ncol, dtype=np.complex128)
     for p0, p1 in lib.prange(0, ngrids, Gblksize):
         # shape: nkptj, nG, ncol
-        dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice, aosym,
+        dat = ft_ao.ft_aopair_kpts(cell, Gv[p0:p1], shls_slice, aosym_,
                                    b, gxyz[p0:p1], Gvbase, kpt,
                                    adapted_kptjs, out=buf,
                                    bvk_kmesh=bvk_kmesh)
         nG = p1 - p0
         for k, ji in enumerate(adapted_ji_idx):
             aoao = dat[k].reshape(nG,ncol)
-            pqkR = np.ndarray((ncol,nG), buffer=pqkRbuf)
-            pqkI = np.ndarray((ncol,nG), buffer=pqkIbuf)
-            pqkR[:] = aoao.real.T
-            pqkI[:] = aoao.imag.T
+            pqgR = np.ndarray((ncol,nG), buffer=pqgRbuf)
+            pqgI = np.ndarray((ncol,nG), buffer=pqgIbuf)
+            pqgR[:] = aoao.real.T
+            pqgI[:] = aoao.imag.T
 
-            j3c_kR = kLpqRbuf[k]
-            lib.dot(kLR[p0:p1].T, pqkR.T, 1, j3c_kR, 1)
-            lib.dot(kLI[p0:p1].T, pqkI.T, 1, j3c_kR, 1)
-            if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
-                j3c_kI = kLpqIbuf[k]
-                lib.dot(kLR[p0:p1].T, pqkI.T, 1, j3c_kI, 1)
-                lib.dot(kLI[p0:p1].T, pqkR.T, -1, j3c_kI, 1)
+            if j3c_order == 'Lij':
+                j3c_kR = kLpqRbuf[k]
+                lib.dot(gLR[p0:p1].T, pqgR.T, 1, j3c_kR, 1)
+                lib.dot(gLI[p0:p1].T, pqgI.T, 1, j3c_kR, 1)
+                if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                    j3c_kI = kLpqIbuf[k]
+                    lib.dot(gLR[p0:p1].T, pqgI.T, 1, j3c_kI, 1)
+                    lib.dot(gLI[p0:p1].T, pqgR.T, -1, j3c_kI, 1)
+            else:
+                j3c_kR = kLpqRbuf[k]
+                lib.dot(pqgR, gLR[p0:p1], 1, j3c_kR, 1)
+                lib.dot(pqgI, gLI[p0:p1], 1, j3c_kR, 1)
+                if not (is_zero(kpt) and gamma_point(adapted_kptjs[k])):
+                    j3c_kI = kLpqIbuf[k]
+                    lib.dot(pqgI, gLR[p0:p1], 1, j3c_kI, 1)
+                    lib.dot(pqgR, gLI[p0:p1], -1, j3c_kI, 1)
 
     for k, ji in enumerate(adapted_ji_idx):
         if j3c[ji].dtype == np.complex128:
@@ -532,7 +550,7 @@ def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx, cell=None, auxc
     return j3c
 def add_j3c_lr_(mydf, j3c, cell=None, auxcell=None, kptij_lst=None, shls_slice=None,
                 omega=None, mesh=None, aosym='s2ij', comp=None, bvk_kmesh=None,
-                verbose=None):
+                kgLRI=None, verbose=None):
     r''' Add the LR part of j3c to input j3c.
     '''
     log = logger.new_logger(mydf, verbose)
@@ -547,17 +565,20 @@ def add_j3c_lr_(mydf, j3c, cell=None, auxcell=None, kptij_lst=None, shls_slice=N
     if kptij_lst is None: kptij_lst = np.zeros((1,2,3))
 
     verbose_loop = mydf.verbose - 2 # print only if verbose>=8
+    kq = 0
     for kpt,adapted_kptjs,adapted_ji_idx in loop_uniq_q(mydf, kptij_lst=kptij_lst,
                                                         verbose=verbose_loop):
+        gLRI = kgLRI[kq] if kgLRI is not None else None
         add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx,
                       cell=cell, auxcell=auxcell, shls_slice=shls_slice,
                       omega=omega, mesh=mesh, aosym=aosym, comp=comp,
-                      bvk_kmesh=bvk_kmesh, verbose=verbose)
+                      bvk_kmesh=bvk_kmesh, verbose=verbose, gLRI=gLRI)
+        kq += 1
     return j3c
 def get_j3c(mydf, cell=None, auxcell=None, kptij_lst=None, shls_slice=None,
             omega=None, aosym='s2ij', comp=None, bvk_kmesh_R=None, bvk_kmesh_G=None,
-            precision=None, mesh=None, estimator='ME', exxdiv=None, int3c=None,
-            out=None, verbose=None):
+            precision=None, mesh=None, estimator='ME', exxdiv=None,
+            int3c=None, kgLRI=None, out=None, verbose=None):
     if cell is None: cell = mydf.cell
     if auxcell is None: auxcell = mydf.auxcell
     if kptij_lst is None: np.zeros((1,2,3)) # gamma point only
@@ -578,7 +599,7 @@ def get_j3c(mydf, cell=None, auxcell=None, kptij_lst=None, shls_slice=None,
     t1 = log.timer_debug1('j3c_g0', *t1)
     add_j3c_lr_(mydf, j3c, cell=cell, auxcell=auxcell, kptij_lst=kptij_lst,
                 shls_slice=shls_slice, omega=omega, mesh=mesh, aosym=aosym,
-                comp=comp, bvk_kmesh=bvk_kmesh_G, verbose=verbose)
+                comp=comp, bvk_kmesh=bvk_kmesh_G, kgLRI=kgLRI, verbose=verbose)
     t1 = log.timer_debug1('j3c_lr', *t1)
     return j3c
 
@@ -648,8 +669,10 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
     naoaux = auxcell.nao_nr()
 
     nkptij = len(kptij_lst)
-    nkptjmax = np.max([len(x[1]) for x in loop_uniq_q(mydf, kptij_lst=kptij_lst,
-                                                      verbose=0)])
+    xs = [x for x in loop_uniq_q(mydf, kptij_lst=kptij_lst, verbose=0)]
+    nkptjmax = np.max([len(x[1]) for x in xs])
+    uniq_kpts = np.asarray([x[0] for x in xs])
+    xs = None
 
     if aosym[:2] == 's2':
         # not impossible but later...
@@ -691,10 +714,29 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
         blksizemax = max([x[-1] for x in shranges])
     buf = np.empty(rowlen*blksizemax, dtype=dtype)
 
-    # precompute int3c
-    int3c = get_int3c(cell, auxcell, mydf.omega, precision=mydf.precision_R,
-                      kptij_lst=kptij_lst, verbose=log.verbose, bvk_kmesh=bvk_kmesh_R,
-                      aosym=aosym, j3c_order='Lij')
+    if len(shranges) > 1:
+        # precompute int3c
+        int3c = get_int3c(cell, auxcell, mydf.omega, precision=mydf.precision_R,
+                          kptij_lst=kptij_lst, verbose=log.verbose, bvk_kmesh=bvk_kmesh_R,
+                          aosym=aosym, j3c_order='Lij')
+        # precompute kgLR/I
+        mesh = mydf.mesh_compact
+        omega = mydf.omega
+        b = cell.reciprocal_vectors()
+        Gv, Gvbase, kws = cell.get_Gv_weights(mesh)
+        gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
+        ngrids = gxyz.shape[0]
+        auxshls_slice = (0, auxcell.nbas)
+        kgLRI = np.empty((len(uniq_kpts),2,ngrids,naoaux), dtype=np.float64)
+        for k,kpt in enumerate(uniq_kpts):
+            Gaux = ft_ao.ft_ao(auxcell, Gv, auxshls_slice, b, gxyz, Gvbase, kpt)
+            wcoulG_lr = mydf.weighted_coulG(omega, kpt, False, mesh)
+            Gaux *= wcoulG_lr.reshape(-1,1)
+            kgLRI[k,0] = Gaux.real
+            kgLRI[k,1] = Gaux.imag
+            Gaux = None
+    else:
+        int3c = kgLRI = None
 
     p1 = 0
     for ipart,shrange in enumerate(shranges):
@@ -707,7 +749,7 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
         shls_slice = get_shls_slice(s0,s1)
         j3c = get_j3c(mydf, kptij_lst=kptij_lst, shls_slice=shls_slice, aosym=aosym,
                       out=buf, bvk_kmesh_R=bvk_kmesh_R, bvk_kmesh_G=bvk_kmesh_G,
-                      verbose=log.verbose, int3c=int3c)
+                      verbose=log.verbose, int3c=int3c, kgLRI=kgLRI)
 
         t1 = log.timer('j3c [%d:%d]'%(p0,p1), *t1)
 
