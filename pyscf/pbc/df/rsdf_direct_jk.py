@@ -79,26 +79,24 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     bufR = np.empty(naux*blksize, dtype=REAL)
     bufI = np.empty(naux*blksize, dtype=REAL)
     p1 = 0
-    for kcLpq in loop_j3c(mydf, kptij_lst=kptii_lst, aosym='s1', partition_iorj='i',
-                          shranges=shranges, verbose=verbose1, bvk_kmesh=bvk_kmesh):
-        dp = kcLpq.shape[-1]
+    for kcpqL in loop_j3c(mydf, kptij_lst=kptii_lst, aosym='s1', partition_iorj='i',
+                          j3c_order='ijL', shranges=shranges, bvk_kmesh=bvk_kmesh,
+                          verbose=verbose1):
+        dp = kcpqL.shape[-2]
         p0 = p1
         p1 += dp
-        LpqR = np.ndarray((naux,dp), dtype=REAL, buffer=bufR)
+        pqLR = np.ndarray((dp,naux), dtype=REAL, buffer=bufR)
         if not j3c_real:
-            LpqI = np.ndarray((naux,dp), dtype=REAL, buffer=bufI)
+            pqLI = np.ndarray((dp,naux), dtype=REAL, buffer=bufI)
         for k,kpt in enumerate(kpts):
-            # TODO create buf for LpqR/I
-            LpqR[:] = kcLpq[k][0].real
+            pqLR[:] = kcpqL[k][0].real
+            rhoR += lib.dot(dmsR[:,k,p0:p1], pqLR)
+            rhoI += lib.dot(dmsI[:,k,p0:p1], pqLR)
             if not j3c_real:
-                LpqI[:] = kcLpq[k][0].imag
-            rhoR[:] += lib.einsum('Lp,xp->xL', LpqR, dmsR[:,k,p0:p1])
-            rhoI[:] += lib.einsum('Lp,xp->xL', LpqR, dmsI[:,k,p0:p1])
-            if not j3c_real:
-                rhoR[:] -= lib.einsum('Lp,xp->xL', LpqI, dmsI[:,k,p0:p1])
-                rhoI[:] += lib.einsum('Lp,xp->xL', LpqI, dmsR[:,k,p0:p1])
-        LpqR = LpqI = kcLpq = None
-    # bufR = bufI = None
+                pqLI[:] = kcpqL[k][0].imag
+                rhoR -= lib.dot(dmsI[:,k,p0:p1], pqLI)
+                rhoI += lib.dot(dmsR[:,k,p0:p1], pqLI)
+        pqLR = pqLI = kcpqL = None
 
     weight = 1./nkpts
     rhoR *= weight
@@ -133,7 +131,8 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     kptbandii_lst = np.repeat(kpts_band,2,axis=0).reshape(nband,2,3)
     p1 = 0
     for kcLpq in loop_j3c(mydf, kptij_lst=kptbandii_lst, aosym='s1', partition_iorj='i',
-                          shranges=shranges, verbose=verbose1, bvk_kmesh=bvk_kmesh):
+                          j3c_order='Lij', shranges=shranges, bvk_kmesh=bvk_kmesh,
+                          verbose=verbose1):
         dp = kcLpq.shape[-1]
         p0 = p1
         p1 += dp
