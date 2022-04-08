@@ -28,6 +28,7 @@ r''' Needed functions
 [x] support nset > 1 for get_k_kpts
 [x] support bvk_kmesh
 [x] make prescreening precomputeable
+[x] get_k gamma uses ijL
 '''
 
 
@@ -235,59 +236,24 @@ def get_k_kpts_gamma(mydf, smo):
     for i0,i1 in lib.prange(0,nmomax,nmoblksize):
         di = i1 - i0
 
-        # sXip = np.ndarray((nset,naux,di,nao),dtype=REAL,buffer=buf_sXip)
-        #
-        # p1 = 0
-        # for kcLpq in loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1',
-        #                       partition_iorj='i', shranges=shranges, verbose=verbose1):
-        #     dp = kcLpq.shape[-1] // nao
-        #     assert(dp*nao == kcLpq.shape[-1])
-        #     p0 = p1
-        #     p1 += dp
-        #
-        #     Lpq = kcLpq[0][0].reshape(-1,nao)
-        #     Lpi = np.ndarray((naux*dp,di), dtype=REAL, buffer=buf_Lpi)
-        #     for iset in range(nset):
-        #         mo = smo[iset][:,i0:i1]
-        #         lib.ddot(Lpq, mo, c=Lpi)
-        #         sXip[iset,:,:,p0:p1] = \
-        #                     Lpi.reshape(naux,dp,di).transpose(0,2,1)
-        #     Lpq = Lpi = kcLpq = None
-        #
-        # t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 1'%(i0,i1), *t1)
-        #
-        # if j2ctag == 'CD':
-        #     Xip = np.ndarray((nao*di,naux), dtype=REAL, buffer=buf_Xip)
-        #     for iset in range(nset):
-        #         Xip[:] = sXip[iset].transpose(1,2,0)
-        #         scipy.linalg.solve_triangular(j2c, Xip.T, lower=True, overwrite_b=True)
-        #         lib.ddot(Xip.reshape(nao,-1), Xip.reshape(nao,-1).T, c=vs[iset], beta=1)
-        # else:
-        #     Xip = np.ndarray((naux,di*nao), dtype=REAL, buffer=buf_Xip)
-        #     for iset in range(nset):
-        #         lib.ddot(j2c, sXip[iset].reshape(naux,-1), c=Xip)
-        #         lib.ddot(Xip.reshape(-1,nao).T, Xip.reshape(-1,nao), c=vs[iset], beta=1)
-        #
-        # Xip = sXip = None
-
         spiX = np.ndarray((nset,nao,di,naux),dtype=REAL,buffer=buf_sXip)
 
-        p1 = 0
-        for kcLpq in loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1',
-                              partition_iorj='i', shranges=shranges, verbose=verbose1):
-            dp = kcLpq.shape[-1] // nao
-            assert(dp*nao == kcLpq.shape[-1])
-            p0 = p1
-            p1 += dp
+        q1 = 0
+        for kcpqL in loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1',
+                              j3c_order='ijL', partition_iorj='j', shranges=shranges,
+                              verbose=verbose1):
+            dq = kcpqL.shape[-2] // nao
+            assert(dq*nao == kcpqL.shape[-2])
+            q0 = q1
+            q1 += dq
 
-            Lpq = kcLpq[0][0].reshape(-1,nao)
-            Lpi = np.ndarray((naux*dp,di), dtype=REAL, buffer=buf_Lpi)
+            pqL = kcpqL[0][0].reshape(nao,-1)
+            iqL = np.ndarray((di,naux*dq), dtype=REAL, buffer=buf_Lpi)
             for iset in range(nset):
                 mo = smo[iset][:,i0:i1]
-                lib.ddot(Lpq, mo, c=Lpi)
-                spiX[iset,p0:p1] = \
-                            Lpi.reshape(naux,dp,di).transpose(1,2,0)
-            Lpq = Lpi = kcLpq = None
+                lib.ddot(mo.T, pqL, c=iqL)
+                spiX[iset,q0:q1] = iqL.reshape(di,dq,naux).transpose(1,0,2)
+            pqL = iqL = kcpqL = None
 
         t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 1'%(i0,i1), *t1)
 
