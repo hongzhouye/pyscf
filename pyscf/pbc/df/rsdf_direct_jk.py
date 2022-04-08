@@ -29,6 +29,7 @@ r''' Needed functions
 [x] support bvk_kmesh
 [x] make prescreening precomputeable
 [x] get_k gamma uses ijL
+[x] get_k complex swap ij and ji
 '''
 
 
@@ -363,11 +364,11 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     for i0,i1 in lib.prange(0,nmomax,nmoblksize):
         di = i1 - i0
         kXipR = np.ndarray((nset,nkptij,naux,di,nao),dtype=REAL,buffer=buf_kXipR)
-        kXipR.fill(0)
         kYipR = np.ndarray((nset,nkptijswap,naux,di,nao),dtype=REAL,buffer=buf_kYipR)
+        kYipR.fill(0)
         kXipI = np.ndarray((nset,nkptij,naux,di,nao),dtype=REAL,buffer=buf_kXipI)
-        kXipI.fill(0)
         kYipI = np.ndarray((nset,nkptijswap,naux,di,nao),dtype=REAL,buffer=buf_kYipI)
+        kYipI.fill(0)
 
         tspans = np.zeros((9,2))
         tnames = ['buffer', 'Lpq ji', 'Lpi ji', 'kXip ji', 'Lpq ij', 'Lpi ij', 'kXip ij',
@@ -376,7 +377,8 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
 
         p1 = 0
         for kcLpq in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='i',
-                              shranges=shranges, verbose=verbose1, bvk_kmesh=bvk_kmesh):
+                              j3c_order='Lij', shranges=shranges, bvk_kmesh=bvk_kmesh,
+                              verbose=verbose1):
             dp = kcLpq.shape[-1] // nao
             assert(dp*nao == kcLpq.shape[-1])
             p0 = p1
@@ -402,42 +404,44 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
                     kj = _safe_member(kptj, kpts)
                     ki = _safe_member(kptj-kpt, kpts)
                     tick = np.asarray((logger.process_clock(), logger.perf_counter()))
-                    LqpR[:] = kcLpq[ji][0].real.reshape(naux,dp,nao).transpose(0,2,1)
-                    LqpI[:] = kcLpq[ji][0].imag.reshape(naux,dp,nao).transpose(0,2,1)
+                    LpqR[:] = kcLpq[ji][0].real.reshape(naux,dp,nao)
+                    LpqI[:] = kcLpq[ji][0].imag.reshape(naux,dp,nao)
                     tock = np.asarray((logger.process_clock(), logger.perf_counter()))
-                    tspans[1] += tock - tick
+                    tspans[4] += tock - tick
                     for iset in range(nset):
-                        moR = skmoR[iset][ki][p0:p1,i0:i1]
-                        moI = skmoI[iset][ki][p0:p1,i0:i1]
+                        moR = skmoR[iset][kj][:,i0:i1]
+                        moI = skmoI[iset][kj][:,i0:i1]
                         tick = np.asarray((logger.process_clock(), logger.perf_counter()))
-                        zdotNC(LqpR.reshape(-1,dp), LqpI.reshape(-1,dp), moR, moI,
-                               1, LqiR, LqiI)
+                        zdotNN(LpqR.reshape(-1,nao), LpqI.reshape(-1,nao), moR, moI,
+                               1, LpiR, LpiI)
                         tock = np.asarray((logger.process_clock(), logger.perf_counter()))
-                        tspans[2] += tock - tick
-                        kXipR[iset,ji] += LqiR.reshape(naux,nao,di).transpose(0,2,1)
-                        kXipI[iset,ji] += LqiI.reshape(naux,nao,di).transpose(0,2,1)
+                        tspans[5] += tock - tick
+                        kXipR[iset,ji,:,:,p0:p1] = \
+                                    LpiR.reshape(naux,dp,di).transpose(0,2,1)
+                        kXipI[iset,ji,:,:,p0:p1] = \
+                                    LpiI.reshape(naux,dp,di).transpose(0,2,1)
                         tick = np.asarray((logger.process_clock(), logger.perf_counter()))
-                        tspans[3] += tick - tock
+                        tspans[6] += tick - tock
                     if ki != kj:
                         tick = np.asarray((logger.process_clock(), logger.perf_counter()))
-                        LpqR[:] = LqpR.transpose(0,2,1)
-                        LpqI[:] = LqpI.transpose(0,2,1)
+                        LqpR[:] = LpqR.transpose(0,2,1)
+                        LqpI[:] = LpqI.transpose(0,2,1)
                         tock = np.asarray((logger.process_clock(), logger.perf_counter()))
-                        tspans[4] += tock - tick
+                        tspans[1] += tock - tick
                         for iset in range(nset):
-                            moR = skmoR[iset][kj][:,i0:i1]
-                            moI = skmoI[iset][kj][:,i0:i1]
+                            moR = skmoR[iset][ki][p0:p1,i0:i1]
+                            moI = skmoI[iset][ki][p0:p1,i0:i1]
                             tick = np.asarray((logger.process_clock(), logger.perf_counter()))
-                            zdotNN(LpqR.reshape(-1,nao), LpqI.reshape(-1,nao), moR, moI,
-                                   1, LpiR, LpiI)
+                            zdotNC(LqpR.reshape(-1,dp), LqpI.reshape(-1,dp), moR, moI,
+                                   1, LqiR, LqiI)
                             tock = np.asarray((logger.process_clock(), logger.perf_counter()))
-                            tspans[5] += tock - tick
-                            kYipR[iset,ijswap,:,:,p0:p1] = \
-                                        LpiR.reshape(naux,dp,di).transpose(0,2,1)
-                            kYipI[iset,ijswap,:,:,p0:p1] = \
-                                        LpiI.reshape(naux,dp,di).transpose(0,2,1)
+                            tspans[2] += tock - tick
+                            kYipR[iset,ijswap] += \
+                                        LqiR.reshape(naux,nao,di).transpose(0,2,1)
+                            kYipI[iset,ijswap] += \
+                                        LqiI.reshape(naux,nao,di).transpose(0,2,1)
                             tick = np.asarray((logger.process_clock(), logger.perf_counter()))
-                            tspans[6] += tick - tock
+                            tspans[3] += tick - tock
                         ijswap += 1
 
             LpqR = LpqI = LqpR = LqpI = LqiR = LqiI = LpiR = LpiI = kcLpq = None
@@ -478,7 +482,7 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
                         Xiq[:] = lib.dot(j2c, Xiq)
                     XiqR[:] = Xiq.real.reshape(-1,nao)
                     XiqI[:] = Xiq.imag.reshape(-1,nao)
-                    zdotCN(XiqR.T, XiqI.T, XiqR, XiqI, 1, vkR[iset,kj], vkI[iset,kj], 1)
+                    zdotNC(XiqR.T, XiqI.T, XiqR, XiqI, 1, vkR[iset,ki], vkI[iset,ki], 1)
                 if ki != kj:
                     for iset in range(nset):
                         Xiq.real = kYipR[iset,ijswap].reshape(naux,-1)
@@ -489,7 +493,7 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
                             Xiq[:] = lib.dot(j2c, Xiq)
                         XiqR[:] = Xiq.real.reshape(-1,nao)
                         XiqI[:] = Xiq.imag.reshape(-1,nao)
-                        zdotNC(XiqR.T, XiqI.T, XiqR, XiqI, 1, vkR[iset,ki], vkI[iset,ki], 1)
+                        zdotCN(XiqR.T, XiqI.T, XiqR, XiqI, 1, vkR[iset,kj], vkI[iset,kj], 1)
                     ijswap += 1
             kq += 1
 
@@ -501,7 +505,6 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     vk_kpts *= 1./nkpts
 
     return vk_kpts
-
 
 def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exxdiv=None,
                bvk_kmesh=None):
