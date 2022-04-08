@@ -22,12 +22,12 @@ r''' Needed functions
 
 ''' To-do
 [x] block get_j_kpts
-[ ] make get_j_kpts enjoy aosym='s2'
+[x] make get_j_kpts enjoy aosym='s2'
 [x] branching real and complex cases in get_k_kpts (e.g., solve_triangular)
 [x] handle real mo_coeff in get_k_kpts
 [x] support nset > 1 for get_k_kpts
-[ ] support bvk_kmesh
-[ ] make prescreening precomputeable
+[x] support bvk_kmesh
+[x] make prescreening precomputeable
 '''
 
 
@@ -51,7 +51,6 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
         mydf.build()
     naux = mydf.auxcell.nao_nr()
     nao_pair = nao * (nao+1) // 2
-    # nao_pair = nao*nao
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     nband = len(kpts_band)
@@ -167,7 +166,6 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     else:
         vj_kpts = vjR + vjI*1j
     vj_kpts = lib.unpack_tril(vj_kpts.reshape(-1,nao_pair))
-    # vj_kpts = vj_kpts.reshape(nset,nband,nao,nao)
 
     return _format_jks(vj_kpts, dm_kpts, input_band, kpts)
 
