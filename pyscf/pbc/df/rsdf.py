@@ -737,26 +737,6 @@ cell.dimension=3 with large vacuum.""")
                 kpts = self.kpts
         kpts = np.asarray(kpts)
 
-        if kpts.shape == (3,):
-            vj = vk = None
-            dms = lib.asarray(dm)
-            if dms.ndim == 2:   # nset = 1
-                single_set = True
-                dm_input = [dm]
-            else:
-                single_set = False
-                dm_input = dm
-            if with_k:
-                vk = rsdf_direct_jk.get_k_kpts(self, dm_input, hermi, [kpts], kpts_band,
-                                               exxdiv)
-                if single_set:
-                    vk = vk[0]
-            if with_j:
-                vj = rsdf_direct_jk.get_j_kpts(self, dm_input, hermi, [kpts], kpts_band)
-                if single_set:
-                    vj = vj[0]
-            return vj, vk
-
         if isinstance(self.use_bvk, bool):
             use_bvk_R = use_bvk_G = self.use_bvk
         else:
@@ -768,6 +748,11 @@ cell.dimension=3 with large vacuum.""")
                          bvk_kmesh0 if use_bvk_G else None]
         else:
             bvk_kmesh = None
+
+        if kpts.shape == (3,):
+            bvk_kmesh_ = None if kpts_band is None else bvk_kmesh
+            return rsdf_direct_jk.get_jk(mydf, dm, hermi, kpt, kpts_band, bvk_kmesh_,
+                                         exxdiv, with_j, with_k)
 
         vj = vk = None
         if with_k:

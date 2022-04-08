@@ -72,9 +72,10 @@ def test_j(kmesh, scaled_center):
 
     vj_kpts = mydf2.get_jk(dm_kpts, kpts=kpts, with_j=True, with_k=False)[0]
 
+    same_shape = vj_ref_kpts.shape == vj_kpts.shape
     errs = [abs(vj_ref_kpts[k] - vj_kpts[k]).max() for k in range(nkpts)]
 
-    return np.asarray(errs)
+    return np.asarray(errs), same_shape
 
 def test_k(kmesh, scaled_center):
     nao = cell.nao_nr()
@@ -99,9 +100,10 @@ def test_k(kmesh, scaled_center):
 
     vk_kpts = mydf2.get_jk(dm_kpts, kpts=kpts, with_j=False, with_k=True)[1]
 
+    same_shape = vk_ref_kpts.shape == vk_kpts.shape
     errs = [abs(vk_ref_kpts[k] - vk_kpts[k]).max() for k in range(nkpts)]
 
-    return np.asarray(errs)
+    return np.asarray(errs), same_shape
 
 
 class KnownValues(unittest.TestCase):
@@ -110,72 +112,80 @@ class KnownValues(unittest.TestCase):
         '''
         kmesh = [1,1,1]
         scaled_center = scaled_center0
-        errs = test_j(kmesh, scaled_center)
+        errs, same_shape = test_j(kmesh, scaled_center)
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
 
     def test_j_kpt_shifted(self):
         ''' Single twisted angle
         '''
         kmesh = [1,1,1]
         scaled_center = scaled_center1
-        errs = test_j(kmesh, scaled_center)
+        errs, same_shape = test_j(kmesh, scaled_center)
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
 
     def test_j_kpts_unshifted(self):
         ''' Gamma-included kmesh
         '''
         kmesh = [3,2,1]
         scaled_center = scaled_center0
-        errs = test_j(kmesh, scaled_center)
+        errs, same_shape = test_j(kmesh, scaled_center)
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
 
     def test_j_kpts_shifted(self):
         ''' Twisted kmesh
         '''
         kmesh = [3,2,1]
         scaled_center = scaled_center1
-        errs = test_j(kmesh, scaled_center)
+        errs, same_shape = test_j(kmesh, scaled_center)
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
 
     def test_k_kpt_unshifted(self):
         ''' Gamma
         '''
         kmesh = [1,1,1]
         scaled_center = scaled_center0
-        errs = test_k(kmesh, scaled_center)
+        errs, same_shape = test_k(kmesh, scaled_center)
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
 
     def test_k_kpt_shifted(self):
         ''' Single twisted angle
         '''
         kmesh = [1,1,1]
         scaled_center = scaled_center1
-        errs = test_k(kmesh, scaled_center)
+        errs, same_shape = test_k(kmesh, scaled_center)
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
 
     def test_k_kpts_unshifted(self):
         ''' Gamma-included kmesh
         '''
         kmesh = [3,2,1]
         scaled_center = scaled_center0
-        errs = test_k(kmesh, scaled_center)
+        errs, same_shape = test_k(kmesh, scaled_center)
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
 
     def test_k_kpts_shifted(self):
         ''' Twisted kmesh
         '''
         kmesh = [3,2,1]
         scaled_center = scaled_center1
-        errs = test_k(kmesh, scaled_center)
+        errs, same_shape = test_k(kmesh, scaled_center)
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
 
 
 if __name__ == '__main__':

@@ -30,6 +30,7 @@ r''' Needed functions
 [x] make prescreening precomputeable
 [x] get_k gamma uses ijL
 [x] get_k complex swap ij and ji
+[x] add a wrapper for single kpt
 '''
 
 
@@ -170,6 +171,14 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     vj_kpts = lib.unpack_tril(vj_kpts.reshape(-1,nao_pair))
 
     return _format_jks(vj_kpts, dm_kpts, input_band, kpts)
+def get_j(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None):
+    kpts = np.asarray(kpt).reshape(1,3)
+    dms = np.asarray(dm)
+    vjs = get_j_kpts(mydf, dm, hermi=hermi, kpts=kpts, kpts_band=kpts_band,
+                     bvk_kmesh=None)
+    if kpts_band is None:
+        vjs = vjs.reshape(dms.shape)
+    return vjs
 
 
 def _safe_member(q, qs):
@@ -586,6 +595,27 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exx
         _ewald_exxdiv_for_G0(cell, kpts, dms, vk_kpts, kpts_band)
 
     return _format_jks(vk_kpts, dm_kpts, input_band, kpts)
+def get_k(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None, bvk_kmesh=None,
+          exxdiv=None):
+    kpts = np.asarray(kpt).reshape(1,3)
+    dms = np.asarray(dm)
+    vks = get_k_kpts(mydf, dm, hermi=hermi, kpts=kpts, kpts_band=kpts_band,
+                     bvk_kmesh=bvk_kmesh, exxdiv=exxdiv)
+    if kpts_band is None:
+        vks = vks.reshape(dms.shape)
+    return vks
+
+''' Wrapper for single kpt
+'''
+def get_jk(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None, bvk_kmesh=None,
+           exxdiv=None, with_j=True, with_k=True):
+    vj = vk = None
+    if with_j:
+        vj = get_j(mydf, dm, hermi=hermi, kpt=kpt, kpts_band=kpts_band)
+    if with_k:
+        vk = get_k(mydf, dm, hermi=hermi, kpt=kpt, kpts_band=kpts_band,
+                   bvk_kmesh=bvk_kmesh, exxdiv=exxdiv)
+    return vj, vk
 
 
 def _eigh_rdm1(dm_kpts, thr_nonzero=EIGH_DM_THRESH):
