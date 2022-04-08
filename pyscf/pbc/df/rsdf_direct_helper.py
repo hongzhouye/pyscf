@@ -11,6 +11,7 @@ from pyscf.lib import logger
 from pyscf import __config__
 
 KINT_MAX = getattr(__config__, 'pbc_df_rsdf_direct_helper_kint_max', 30)
+J3C_ORDER = getattr(__config__, 'pbc_df_rsdf_direct_helper_j3c_order', 'Lij')
 
 
 ''' These functions exist in previous implementations but are updated here.
@@ -39,7 +40,10 @@ def get_aux_chg(auxcell):
 ''' To-do:
 [x] separate the G=0 for get_j2c_sr
 [x] make C code compute j3c in (L|ij) order
-[ ] make prescreening precomputeable
+[x] make prescreening precomputeable
+[x] support different j3c order
+[ ] support aosym='s2' for j_only mode
+[ ] support separation of real and imag of j3c
 '''
 
 def kpts_to_kmesh(cell, kpts, kint_max=KINT_MAX):
@@ -241,7 +245,7 @@ def get_prescreening_data(cell, auxcell, omega, precision=None, estimator='ME',
     return prescreening_data
 def get_int3c(cell, auxcell, omega, precision=None, kptij_lst=np.zeros((1,2,3)),
               intor='int3c2e', comp=None, estimator='ME', verbose=None,
-              bvk_kmesh=None, aosym='s2ij', j3c_order='Lij'):
+              bvk_kmesh=None, aosym='s2ij', j3c_order=J3C_ORDER):
     prescreening_data = get_prescreening_data(cell, auxcell, omega,
                                               precision=precision,
                                               estimator=estimator,
@@ -257,9 +261,9 @@ def get_int3c(cell, auxcell, omega, precision=None, kptij_lst=np.zeros((1,2,3)),
                                  verbose=verbose)
     return int3c
 def aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, intor='int3c2e', aosym='s2ij',
-                     comp=None, kptij_lst=np.zeros((1,2,3)), shls_slice=None,
-                     bvk_kmesh=None, precision=None, estimator="ME", int3c=None,
-                     verbose=None, out=None):
+                     j3c_order=J3C_ORDER, comp=None, kptij_lst=np.zeros((1,2,3)),
+                     shls_slice=None, bvk_kmesh=None, precision=None, estimator="ME",
+                     int3c=None, verbose=None, out=None):
     r'''3-center AO integrals (ij|L) with double lattice sum:
     \sum_{lm} (i[l]j[m]|L[0]), where L is the auxiliary basis.
     Three-index integral tensor (kptij_idx, nao_pair, naux) or four-index
@@ -296,7 +300,7 @@ def aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, intor='int3c2e', aosym='s
     if not callable(int3c):
         int3c = get_int3c(cell, auxcell, omega, precision=precision, kptij_lst=kptij_lst,
                       intor=intor, comp=comp, estimator=estimator, verbose=verbose,
-                      bvk_kmesh=bvk_kmesh, aosym=aosym, j3c_order='Lij')
+                      bvk_kmesh=bvk_kmesh, aosym=aosym, j3c_order=j3c_order)
 
     intor, comp = mol_gto.moleintor._get_intor_and_comp(cell._add_suffix(intor), comp)
 
@@ -333,8 +337,10 @@ def aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, intor='int3c2e', aosym='s
         dtype = np.complex128
         dsize = 16
 
-    # bufshape = (nkptij,comp,nao_pair,nk)
-    bufshape = (nkptij,comp,nk,nao_pair)
+    if j3c_order == 'Lij':
+        bufshape = (nkptij,comp,nk,nao_pair)
+    else:
+        bufshape = (nkptij,comp,nao_pair,nk)
     bufsize = np.prod(bufshape)
     if out is None:
         bufmem = bufsize * dsize / 1e6
@@ -352,7 +358,8 @@ def aux_e2_nospltbas(cell, auxcell_or_auxbasis, omega, intor='int3c2e', aosym='s
 
     return buf
 def get_j3c_sr(mydf, cell=None, auxcell=None, kptij_lst=None, shls_slice=None,
-               omega=None, aosym='s2ij', comp=None, bvk_kmesh=None, precision=None,
+               omega=None, aosym='s2ij', j3c_order=J3C_ORDER, comp=None,
+               bvk_kmesh=None, precision=None,
                estimator='ME', int3c=None, verbose=None, out=None):
     r''' Compute the SR part of the j3c tensor. Shape = (nkptij,comp,naoaux,nao_pair)
     '''
@@ -365,18 +372,27 @@ def get_j3c_sr(mydf, cell=None, auxcell=None, kptij_lst=None, shls_slice=None,
     if verbose is None: verbose = mydf.verbose
     # out.shape = (nkptij, comp, nao_pair, naoaux)
     out = aux_e2_nospltbas(cell, auxcell, omega, intor='int3c2e',
-                           aosym=aosym, comp=comp, kptij_lst=kptij_lst,
+                           aosym=aosym, j3c_order=j3c_order,
+                           comp=comp, kptij_lst=kptij_lst,
                            shls_slice=shls_slice, bvk_kmesh=bvk_kmesh,
                            precision=precision, estimator=estimator,
                            int3c=int3c, verbose=verbose, out=out)
     return out
 def remove_j3c_sr_G0_q_(mydf, j3c, shls_slice, kptij_lst, cell=None, auxcell=None,
-                        omega=None, aosym='s2ij', exxdiv=None):
+                        omega=None, aosym='s2ij', j3c_order=J3C_ORDER, exxdiv=None,
+                        verbose=None):
     r''' Calculate G=0 correction to SR j3c. This will modify the input j3c in situ.
+
+    Args:
+        aosym (str):
+            's1' or 's2'. This has to be consistent with the input j3c, shls_slice,
+            and kptij_lst.
     '''
     if cell is None: cell = mydf.cell
     if auxcell is None: auxcell = mydf.auxcell
     if omega is None: omega = mydf.omega
+
+    log = logger.new_logger(mydf, verbose)
 
     if not exxdiv:
         if cell.dimension == 3:
@@ -389,11 +405,19 @@ def remove_j3c_sr_G0_q_(mydf, j3c, shls_slice, kptij_lst, cell=None, auxcell=Non
             nij = ni * nj
 
             if aosym[:2] == 's2':
+                # check if aosym is consistent with kptij_lst and shls_slice
                 assert(shls_slice[2] == 0)
+                assert(is_j_only(kptij_lst))
                 nao_pair = nii
             else:
                 nao_pair = nij
-            assert(j3c.shape[-1] == nao_pair)
+
+            # check if aosym is consistent with j3c shape
+            if j3c_order == 'Lij':
+                nao_pair_j3c = j3c.shape[-1]
+            else:
+                nao_pair_j3c = j3c.shape[-2]
+            assert(nao_pair_j3c == nao_pair)
 
             g0 = np.pi/omega**2./cell.vol
             qaux = get_aux_chg(auxcell)
@@ -416,20 +440,24 @@ def remove_j3c_sr_G0_q_(mydf, j3c, shls_slice, kptij_lst, cell=None, auxcell=Non
                               ao_loc[shls_slice[2]]:ao_loc[shls_slice[3]]].reshape(-1)
                             for s in ovlp]
 
-                for k, idx in enumerate(adapted_ji_idx):
-                    for i in np.where(vbar != 0)[0]:
-                        j3c[idx,0,i] -= vbar[i] * ovlp[k]
+                if j3c_order == 'Lij':
+                    for k, idx in enumerate(adapted_ji_idx):
+                        for i in np.where(vbar != 0)[0]:
+                            j3c[idx,0,i] -= vbar[i] * ovlp[k]
+                else:
+                    for k, idx in enumerate(adapted_ji_idx):
+                        for i in np.where(vbar != 0)[0]:
+                            j3c[idx,0,:,i] -= vbar[i] * ovlp[k]
     else:
         raise NotImplementedError
     return j3c
-def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx, cell=None, auxcell=None,
-                  shls_slice=None, omega=None, mesh=None, aosym='s2ij', comp=None,
-                  gLRI=None, bvk_kmesh=None, verbose=None):
+def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx,
+                  cell=None, auxcell=None, shls_slice=None, omega=None, mesh=None,
+                  aosym='s2ij', j3c_order=J3C_ORDER, comp=None, gLRI=None,
+                  bvk_kmesh=None, verbose=None):
     r''' Add LR part of j3c to input j3c
     '''
     log = logger.new_logger(mydf, verbose)
-
-    j3c_order = 'Lij'
 
     if comp is None: comp = 1
     if comp != 1:
@@ -549,8 +577,8 @@ def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx, cell=None, auxc
 
     return j3c
 def add_j3c_lr_(mydf, j3c, cell=None, auxcell=None, kptij_lst=None, shls_slice=None,
-                omega=None, mesh=None, aosym='s2ij', comp=None, bvk_kmesh=None,
-                kgLRI=None, verbose=None):
+                omega=None, mesh=None, aosym='s2ij', j3c_order=J3C_ORDER, comp=None,
+                bvk_kmesh=None, kgLRI=None, verbose=None):
     r''' Add the LR part of j3c to input j3c.
     '''
     log = logger.new_logger(mydf, verbose)
@@ -562,6 +590,11 @@ def add_j3c_lr_(mydf, j3c, cell=None, auxcell=None, kptij_lst=None, shls_slice=N
     if shls_slice is None:
         shls_slice = (0, cell.nbas, 0, cell.nbas, 0, auxcell.nbas)
 
+    if aosym[:2] == 's2' and is_j_only(kptij_lst) and shls_slice[2] == 0:
+        aosym = 's2'
+    else:
+        aosym = 's1'
+
     if kptij_lst is None: kptij_lst = np.zeros((1,2,3))
 
     verbose_loop = mydf.verbose - 2 # print only if verbose>=8
@@ -571,12 +604,13 @@ def add_j3c_lr_(mydf, j3c, cell=None, auxcell=None, kptij_lst=None, shls_slice=N
         gLRI = kgLRI[kq] if kgLRI is not None else None
         add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx,
                       cell=cell, auxcell=auxcell, shls_slice=shls_slice,
-                      omega=omega, mesh=mesh, aosym=aosym, comp=comp,
-                      bvk_kmesh=bvk_kmesh, verbose=verbose, gLRI=gLRI)
+                      omega=omega, mesh=mesh, aosym=aosym, j3c_order=j3c_order,
+                      comp=comp, bvk_kmesh=bvk_kmesh, verbose=verbose, gLRI=gLRI)
         kq += 1
     return j3c
 def get_j3c(mydf, cell=None, auxcell=None, kptij_lst=None, shls_slice=None,
-            omega=None, aosym='s2ij', comp=None, bvk_kmesh_R=None, bvk_kmesh_G=None,
+            omega=None, aosym='s2ij', j3c_order=J3C_ORDER, comp=None,
+            bvk_kmesh_R=None, bvk_kmesh_G=None,
             precision=None, mesh=None, estimator='ME', exxdiv=None,
             int3c=None, kgLRI=None, out=None, verbose=None):
     if cell is None: cell = mydf.cell
@@ -587,25 +621,35 @@ def get_j3c(mydf, cell=None, auxcell=None, kptij_lst=None, shls_slice=None,
     if precision is None: precision = mydf.precision_R
     if mesh is None: mesh = mydf.mesh_compact
     if verbose is None: verbose = mydf.verbose
+
+    # determine aosym
+    if aosym[:2] == 's2' and is_j_only(kptij_lst) and shls_slice[2] == 0:
+        aosym = 's2'
+    else:
+        aosym = 's1'
+
     log = logger.new_logger(mydf, verbose)
     t0 = (logger.process_clock(), logger.perf_counter())
     j3c = get_j3c_sr(mydf, cell=cell, auxcell=auxcell, kptij_lst=kptij_lst,
-                     shls_slice=shls_slice, omega=omega, aosym=aosym, comp=comp,
-                     bvk_kmesh=bvk_kmesh_R, precision=precision, estimator=estimator,
+                     shls_slice=shls_slice, omega=omega, aosym=aosym,
+                     j3c_order=j3c_order, comp=comp, bvk_kmesh=bvk_kmesh_R,
+                     precision=precision, estimator=estimator,
                      int3c=int3c, out=out, verbose=verbose)
     t1 = log.timer_debug1('j3c_sr', *t0)
     remove_j3c_sr_G0_q_(mydf, j3c, shls_slice, kptij_lst, cell=cell, auxcell=auxcell,
-                        omega=omega, aosym=aosym, exxdiv=exxdiv)
+                        omega=omega, aosym=aosym, j3c_order=j3c_order, exxdiv=exxdiv,
+                        verbose=verbose)
     t1 = log.timer_debug1('j3c_g0', *t1)
     add_j3c_lr_(mydf, j3c, cell=cell, auxcell=auxcell, kptij_lst=kptij_lst,
                 shls_slice=shls_slice, omega=omega, mesh=mesh, aosym=aosym,
-                comp=comp, bvk_kmesh=bvk_kmesh_G, kgLRI=kgLRI, verbose=verbose)
+                j3c_order=j3c_order, comp=comp, bvk_kmesh=bvk_kmesh_G,
+                kgLRI=kgLRI, verbose=verbose)
     t1 = log.timer_debug1('j3c_lr', *t1)
     return j3c
 
-def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
-             max_memory=2000, blksize=None, shranges=None, verbose=None,
-             **kwargs):
+def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', j3c_order=J3C_ORDER,
+             partition_iorj='i', max_memory=2000, blksize=None, shranges=None,
+             verbose=None, **kwargs):
     r''' Return j3c in (L|ij) form where the AO pair index 'ij' is partitioned.
 
     Args:
@@ -615,10 +659,18 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
         aosym (str):
             Symmetry of the AO pair, can be 's1' or 's2'.
             Currently only 's1' is supported.
+        j3c_order (str):
+            How are the j3c integrals arranged?
+                - 'ijL': return j3c tensor in the form (ij|L)
+                - 'Lij': return j3c tensor in the form (L|ij)
         partition_iorj (str):
-            Which of the two AO indices is partitioned, can be
+            Which of the two AO indices is partitioned, can be 'i' or 'j'.
+            For j3c_order = 'Lij':
                 - 'i': return (L|[i0:i1]j), (L|[i1:i2]j), ...
                 - 'j': return (L|i[j0:j1]), (L|i[j1:j2]), ...
+            For j3c_order = 'ijL':
+                - 'i': return ([i0:i1]j|L), ([i1:i2]j|L), ...
+                - 'j': return (i[j0:j1]|L), (i[j1:j2]|L), ...
         max_memory (float) | blksize (int) | shranges (array-like, shape (x,3)):
             These arguments are related and together determine the AO pair blocks.
             - 'shranges' has the format
@@ -718,7 +770,7 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
         # precompute int3c
         int3c = get_int3c(cell, auxcell, mydf.omega, precision=mydf.precision_R,
                           kptij_lst=kptij_lst, verbose=log.verbose, bvk_kmesh=bvk_kmesh_R,
-                          aosym=aosym, j3c_order='Lij')
+                          aosym=aosym, j3c_order=j3c_order)
         # precompute kgLR/I
         mesh = mydf.mesh_compact
         omega = mydf.omega
@@ -748,7 +800,8 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', partition_iorj='i',
 
         shls_slice = get_shls_slice(s0,s1)
         j3c = get_j3c(mydf, kptij_lst=kptij_lst, shls_slice=shls_slice, aosym=aosym,
-                      out=buf, bvk_kmesh_R=bvk_kmesh_R, bvk_kmesh_G=bvk_kmesh_G,
+                      j3c_order=j3c_order, out=buf,
+                      bvk_kmesh_R=bvk_kmesh_R, bvk_kmesh_G=bvk_kmesh_G,
                       verbose=log.verbose, int3c=int3c, kgLRI=kgLRI)
 
         t1 = log.timer('j3c [%d:%d]'%(p0,p1), *t1)
@@ -773,6 +826,12 @@ def get_kptij_lst(kpts, kpts_band=None, j_only=False):
         kptij_lst.extend([(ki, ki) for ki in kband_uniq])
         kptij_lst = np.asarray(kptij_lst)
     return kptij_lst
+def is_j_only(kptij_lst):
+    kpti = kptij_lst[:,0]
+    kptj = kptij_lst[:,1]
+    aosym_ks2 = abs(kpti-kptj).sum(axis=1) < KPT_DIFF_TOL
+    j_only = np.all(aosym_ks2)
+    return j_only
 def loop_uniq_q(mydf, kptij_lst=None, verbose=None):
     r''' Loop over uniq q = kptj-kpti, yielding q, adapted_kptjs, adapted_ji_idx
     '''

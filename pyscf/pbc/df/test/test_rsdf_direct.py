@@ -36,7 +36,7 @@ scaled_center0 = np.zeros(3)
 scaled_center1 = np.array([0.65881329, 0.40465128, 0.85241511])
 
 
-def test_gen(kmesh, scaled_center, aosym, partition_iorj):
+def test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj):
     nao = cell.nao_nr()
     kpts = cell.make_kpts(kmesh, scaled_center=scaled_center)
 
@@ -84,9 +84,11 @@ def test_gen(kmesh, scaled_center, aosym, partition_iorj):
     shranges = _guess_shell_ranges(mydf.cell, blksize, aosym)
     verbose_loop = cell.verbose - 2
     p1 = 0
-    for j3cblk in loop_j3c(mydf, kptij_lst=kptij_lst, aosym=aosym,
+    for j3cblk in loop_j3c(mydf, kptij_lst=kptij_lst, aosym=aosym, j3c_order=j3c_order,
                            partition_iorj=partition_iorj, shranges=shranges,
                            verbose=verbose_loop):
+        if j3c_order == 'ijL':
+            j3cblk = j3cblk.transpose(0,1,3,2)
         ncol = j3cblk.shape[-1]
         p0 = p1
         p1 = p0 + ncol
@@ -117,9 +119,10 @@ class KnownValues(unittest.TestCase):
         scaled_center = scaled_center0
         aosym = 's1'
         partition_iorj = 'i'
-        errs = test_gen(kmesh, scaled_center, aosym, partition_iorj)
-        errmax = np.max(errs)
-        self.assertAlmostEqual(errmax, 0., 10)
+        for j3c_order in ['Lij','ijL']:
+            errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj)
+            err = np.max(errs)
+            self.assertAlmostEqual(err, 0., 10)
 
     def test_j3c_kpt_shifted(self):
         ''' Single twisted angle
@@ -128,27 +131,30 @@ class KnownValues(unittest.TestCase):
         scaled_center = scaled_center1
         aosym = 's1'
         partition_iorj = 'i'
-        errs = test_gen(kmesh, scaled_center, aosym, partition_iorj)
-        errmax = np.max(errs)
-        self.assertAlmostEqual(errmax, 0., 10)
+        for j3c_order in ['Lij','ijL']:
+            errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj)
+            err = np.max(errs)
+            self.assertAlmostEqual(err, 0., 10)
 
     def test_j3c_kpts_unshifted(self):
         kmesh = [3,2,1]
         scaled_center = scaled_center0
         aosym = 's1'
         partition_iorj = 'i'
-        errs = test_gen(kmesh, scaled_center, aosym, partition_iorj)
-        errmax = np.max(errs)
-        self.assertAlmostEqual(errmax, 0., 10)
+        for j3c_order in ['Lij','ijL']:
+            errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj)
+            err = np.max(errs)
+            self.assertAlmostEqual(err, 0., 10)
 
     def test_j3c_kpts_shifted(self):
         kmesh = [3,2,1]
         scaled_center = scaled_center1
         aosym = 's1'
         partition_iorj = 'i'
-        errs = test_gen(kmesh, scaled_center, aosym, partition_iorj)
-        errmax = np.max(errs)
-        self.assertAlmostEqual(errmax, 0., 10)
+        for j3c_order in ['Lij','ijL']:
+            errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj)
+            err = np.max(errs)
+            self.assertAlmostEqual(err, 0., 10)
 
 
 if __name__ == '__main__':
