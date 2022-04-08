@@ -42,7 +42,7 @@ def get_aux_chg(auxcell):
 [x] make C code compute j3c in (L|ij) order
 [x] make prescreening precomputeable
 [x] support different j3c order
-[ ] support aosym='s2' for j_only mode
+[x] support aosym='s2' for j_only mode
 [ ] support separation of real and imag of j3c
 '''
 
@@ -399,8 +399,8 @@ def remove_j3c_sr_G0_q_(mydf, j3c, shls_slice, kptij_lst, cell=None, auxcell=Non
             ao_loc = cell.ao_loc_nr()
             ni = ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]]
             nj = ao_loc[shls_slice[3]] - ao_loc[shls_slice[2]]
-            nii_start = ao_loc[shls_slice[1]]*(ao_loc[shls_slice[1]]+1)//2
-            nii_end = ao_loc[shls_slice[0]]*(ao_loc[shls_slice[0]]+1)//2
+            nii_start = ao_loc[shls_slice[0]]*(ao_loc[shls_slice[0]]+1)//2
+            nii_end = ao_loc[shls_slice[1]]*(ao_loc[shls_slice[1]]+1)//2
             nii = nii_end - nii_start
             nij = ni * nj
 
@@ -429,6 +429,7 @@ def remove_j3c_sr_G0_q_(mydf, j3c, shls_slice, kptij_lst, cell=None, auxcell=Non
                     continue
 
                 # TODO: calculate ovlp for shls_slice only
+                # @@HY: no need. FWIW this function seems to NEVER take >1% of the time
 
                 vbar = qaux * g0
                 ovlp = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=adapted_kptjs)
@@ -478,8 +479,8 @@ def add_j3c_lr_q_(mydf, j3c, kpt, adapted_kptjs, adapted_ji_idx,
     ni = ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]]
     nj = ao_loc[shls_slice[3]] - ao_loc[shls_slice[2]]
     naoaux = aux_loc[shls_slice[5]] - aux_loc[shls_slice[4]]
-    nii_start = ao_loc[shls_slice[1]]*(ao_loc[shls_slice[1]]+1)//2
-    nii_end = ao_loc[shls_slice[0]]*(ao_loc[shls_slice[0]]+1)//2
+    nii_start = ao_loc[shls_slice[0]]*(ao_loc[shls_slice[0]]+1)//2
+    nii_end = ao_loc[shls_slice[1]]*(ao_loc[shls_slice[1]]+1)//2
     nii = nii_end - nii_start
     nij = ni * nj
 
@@ -726,18 +727,24 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', j3c_order=J3C_ORDER,
     uniq_kpts = np.asarray([x[0] for x in xs])
     xs = None
 
+    rowlen = (nkptij + nkptjmax) * naoaux
     if aosym[:2] == 's2':
-        # not impossible but later...
-        raise NotImplementedError
-        rowlen = (nkptij + nkptjmax) * naoaux
+        if not is_j_only(kptij_lst):
+            log.error('aosym = "s2" must be used with kpti = kptj, i.e., j-only mode.')
+            raise RuntimeError
+
+        if j3c_order == 'Lij':
+            log.error('s2 symmetry for j3c_order = "Lij" is not implemented (yet). '
+                      'Use j3c_order = "ijL" instead.')
+            raise NotImplementedError
+
         nao_pair = nao*(nao+1)//2
         if partition_iorj == 'i':
             get_shls_slice = lambda p0,p1: (p0,p1,0,p1,0,auxcell.nbas)
         else:
-            log.error('aosym == "s2" must be used with partition_iorj = "i".')
+            log.error('aosym = "s2" must be used with partition_iorj = "i".')
             raise ValueError
     else:
-        rowlen = (nkptij + nkptjmax) * naoaux
         nao_pair = nao*nao
         if partition_iorj == 'i':
             get_shls_slice = lambda p0,p1: (p0,p1,0,cell.nbas,0,auxcell.nbas)

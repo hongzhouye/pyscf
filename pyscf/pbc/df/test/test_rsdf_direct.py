@@ -36,7 +36,7 @@ scaled_center0 = np.zeros(3)
 scaled_center1 = np.array([0.65881329, 0.40465128, 0.85241511])
 
 
-def test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj):
+def test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj, j_only=False):
     nao = cell.nao_nr()
     kpts = cell.make_kpts(kmesh, scaled_center=scaled_center)
 
@@ -44,7 +44,7 @@ def test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj):
     swapfile = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
     mydf._cderi_to_save = swapfile.name
     swapfile = None
-    mydf.build()
+    mydf.build(j_only=j_only)
 
     with h5py.File(mydf._cderi_to_save, 'r') as f:
         kptijs = np.sort(list(map(int,list(f['j3c']))))
@@ -56,19 +56,20 @@ def test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj):
     naoaux = mydf2.auxcell.nao_nr()
 
     from pyscf.pbc.df.rsdf_direct_helper import (loop_j3c, get_kptij_lst, get_j2c,
-                                                 loop_uniq_q, cholesky_decomposed_metric)
+                                                 loop_uniq_q, cholesky_decomposed_metric,
+                                                 is_j_only)
     from pyscf.df.outcore import _guess_shell_ranges
     from pyscf.pbc.lib.kpts_helper import (is_zero, gamma_point, member, unique,
                                            KPT_DIFF_TOL)
 
-    kptij_lst = get_kptij_lst(kpts)
+    kptij_lst = get_kptij_lst(kpts, j_only=j_only)
     nkptij = len(kptij_lst)
     uniq_q_loop = [x for x in loop_uniq_q(mydf, kptij_lst=kptij_lst, verbose=0)]
     uniq_kpts = np.asarray([x[0] for x in uniq_q_loop])
     nkpts_uniq = len(uniq_kpts)
 
     dtype = np.double if is_zero(kptij_lst) else np.complex128
-    if dtype == np.double and aosym[:2] == 's2':
+    if aosym[:2] == 's2' and is_j_only(kptij_lst):
         nao_pair = nao*(nao+1)//2
     else:
         nao_pair = nao*nao
@@ -137,6 +138,8 @@ class KnownValues(unittest.TestCase):
             self.assertAlmostEqual(err, 0., 10)
 
     def test_j3c_kpts_unshifted(self):
+        ''' Gamma-included kmesh
+        '''
         kmesh = [3,2,1]
         scaled_center = scaled_center0
         aosym = 's1'
@@ -147,6 +150,8 @@ class KnownValues(unittest.TestCase):
             self.assertAlmostEqual(err, 0., 10)
 
     def test_j3c_kpts_shifted(self):
+        ''' Twisted kmesh
+        '''
         kmesh = [3,2,1]
         scaled_center = scaled_center1
         aosym = 's1'
@@ -155,6 +160,56 @@ class KnownValues(unittest.TestCase):
             errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj)
             err = np.max(errs)
             self.assertAlmostEqual(err, 0., 10)
+
+    def test_j3c_kpt_unshifted_s2sym(self):
+        ''' Gamma with s2 symmetry
+        '''
+        kmesh = [1,1,1]
+        scaled_center = scaled_center0
+        aosym = 's2'
+        partition_iorj = 'i'
+        j3c_order = 'ijL'   # only ijL is implemented for s2 symm
+        errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj)
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+
+    def test_j3c_kpt_shifted_s2sym(self):
+        ''' Single twisted angle with s2 symmetry
+        '''
+        kmesh = [1,1,1]
+        scaled_center = scaled_center1
+        aosym = 's2'
+        partition_iorj = 'i'
+        j3c_order = 'ijL'   # only ijL is implemented for s2 symm
+        errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj)
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+
+    def test_j3c_kpts_unshifted_s2sym(self):
+        ''' Gamma-included kmesh with s2 symmetry
+        '''
+        kmesh = [3,2,1]
+        scaled_center = scaled_center0
+        aosym = 's2'
+        partition_iorj = 'i'
+        j3c_order = 'ijL'   # only ijL is implemented for s2 symm
+        errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj,
+                        j_only=True)
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+
+    def test_j3c_kpts_shifted_s2sym(self):
+        ''' Twisted kmesh with s2 symmetry
+        '''
+        kmesh = [3,2,1]
+        scaled_center = scaled_center1
+        aosym = 's2'
+        partition_iorj = 'i'
+        j3c_order = 'ijL'   # only ijL is implemented for s2 symm
+        errs = test_gen(kmesh, scaled_center, aosym, j3c_order, partition_iorj,
+                        j_only=True)
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
 
 
 if __name__ == '__main__':
