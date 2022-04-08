@@ -50,15 +50,15 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     if mydf.auxcell is None:
         mydf.build()
     naux = mydf.auxcell.nao_nr()
-    # nao_pair = nao * (nao+1) // 2
-    nao_pair = nao*nao
+    nao_pair = nao * (nao+1) // 2
+    # nao_pair = nao*nao
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     nband = len(kpts_band)
     j_real = gamma_point(kpts_band) and not np.iscomplexobj(dms)
 
-    dmsR = dms.real.transpose(0,1,3,2).reshape(nset,nkpts,nao**2)
-    dmsI = dms.imag.transpose(0,1,3,2).reshape(nset,nkpts,nao**2)
+    dmsR = np.asarray(dms.real.transpose(0,1,3,2).reshape(nset,nkpts,nao**2), order='C')
+    dmsI = np.asarray(dms.imag.transpose(0,1,3,2).reshape(nset,nkpts,nao**2), order='C')
 
 # allocate memory
     rhoR = np.zeros((nset,naux))
@@ -71,10 +71,10 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     j3c_dtype, j3c_dsize = (REAL,8) if is_zero(kptii_lst) else (COMPLEX,16)
     j3c_real = j3c_dtype == REAL
     mem_avail = mydf.max_memory - lib.current_memory()[0]
-    log.debug1('get_j mem_avail= %.1f MB', mem_avail)
-    blksize = min(nao*nao, mem_avail*0.7e6 / (2*max(nkpts,nband)*naux*j3c_dsize))
+    log.debug1('get_j pass1 mem_avail= %.1f MB', mem_avail)
+    blksize = min(nao*nao, mem_avail*0.7e6 / (2*nkpts*naux*j3c_dsize))
     shranges = _guess_shell_ranges(mydf.cell, blksize, 's1')
-    log.debug1('get_j blksize= %s  shranges= %s', blksize, shranges)
+    log.debug1('get_j pass1 blksize= %s  shranges= %s', blksize, shranges)
     blksize = np.max([x[2] for x in shranges])
     bufR = np.empty(naux*blksize, dtype=REAL)
     bufI = np.empty(naux*blksize, dtype=REAL)
@@ -97,11 +97,12 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
                 rhoR -= lib.dot(dmsI[:,k,p0:p1], pqLI)
                 rhoI += lib.dot(dmsR[:,k,p0:p1], pqLI)
         pqLR = pqLI = kcpqL = None
+    bufR = bufI = None
 
     weight = 1./nkpts
     rhoR *= weight
     rhoI *= weight
-    t1 = log.timer_debug1('get_j pass 1  ', *t1)
+    t1 = log.timer_debug1('get_j pass1   ', *t1)
 
 # setp 2: j2v inv
     j2c = get_j2c(mydf, kpts=np.zeros((1,3)), verbose=verbose1)[0]
@@ -129,35 +130,44 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
 
 # step 3: vj_{pq}^{ki} = \sum_{L} (L|pq)^{ki,ki} rho_L
     kptbandii_lst = np.repeat(kpts_band,2,axis=0).reshape(nband,2,3)
+    mem_avail = mydf.max_memory - lib.current_memory()[0]
+    log.debug1('get_j pass2 mem_avail= %.1f MB', mem_avail)
+    blksize = min(nao*(nao+1)//2, mem_avail*0.7e6 / (2*nband*naux*j3c_dsize))
+    shranges = _guess_shell_ranges(mydf.cell, blksize, 's2')
+    log.debug1('get_j pass2 blksize= %s  shranges= %s', blksize, shranges)
+    blksize = np.max([x[2] for x in shranges])
+    bufR = np.empty(naux*blksize, dtype=REAL)
+    bufI = np.empty(naux*blksize, dtype=REAL)
     p1 = 0
-    for kcLpq in loop_j3c(mydf, kptij_lst=kptbandii_lst, aosym='s1', partition_iorj='i',
-                          j3c_order='Lij', shranges=shranges, bvk_kmesh=bvk_kmesh,
+    for kcpqL in loop_j3c(mydf, kptij_lst=kptbandii_lst, aosym='s2', partition_iorj='i',
+                          j3c_order='ijL', shranges=shranges, bvk_kmesh=bvk_kmesh,
                           verbose=verbose1):
-        dp = kcLpq.shape[-1]
+        dp = kcpqL.shape[-2]
         p0 = p1
         p1 += dp
-        LpqR = np.ndarray((naux,dp), dtype=REAL, buffer=bufR)
-        LpqI = np.ndarray((naux,dp), dtype=REAL, buffer=bufI)
-        for k,kpt in enumerate(kpts):
-            LpqR = np.asarray(kcLpq[k][0].real, order='C')
-            LpqI = np.asarray(kcLpq[k][0].imag, order='C')
-            vjR[:,k,p0:p1] += lib.dot(rhoR, LpqR)
+        pqLR = np.ndarray((naux,dp), dtype=REAL, buffer=bufR)
+        pqLI = np.ndarray((naux,dp), dtype=REAL, buffer=bufI)
+        for k,kpt in enumerate(kpts_band):
+            pqLR = np.asarray(kcpqL[k][0].real, order='C')
+            if not is_zero(kpt):
+                pqLI = np.asarray(kcpqL[k][0].imag, order='C')
+            vjR[:,k,p0:p1] += lib.dot(rhoR, pqLR.T)
             if not j_real:
-                vjI[:,k,p0:p1] += lib.dot(rhoI[:], LpqR)
-                if LpqI is not None:
-                    vjR[:,k,p0:p1] -= lib.dot(rhoI[:], LpqI)
-                    vjI[:,k,p0:p1] += lib.dot(rhoR[:], LpqI)
-        LpqR = LpqI = kcLpq = None
+                vjI[:,k,p0:p1] += lib.dot(rhoI, pqLR.T)
+                if not is_zero(kpt):
+                    vjR[:,k,p0:p1] -= lib.dot(rhoI, pqLI.T)
+                    vjI[:,k,p0:p1] += lib.dot(rhoR, pqLI.T)
+        pqLR = pqLI = kcpqL = None
     bufR = bufI = None
-    t1 = log.timer_debug1('get_j pass 2  ', *t1)
+    t1 = log.timer_debug1('get_j pass2   ', *t1)
 
 # post-proc
     if j_real:
         vj_kpts = vjR
     else:
         vj_kpts = vjR + vjI*1j
-    # vj_kpts = lib.unpack_tril(vj_kpts.reshape(-1,nao_pair))
-    vj_kpts = vj_kpts.reshape(nset,nband,nao,nao)
+    vj_kpts = lib.unpack_tril(vj_kpts.reshape(-1,nao_pair))
+    # vj_kpts = vj_kpts.reshape(nset,nband,nao,nao)
 
     return _format_jks(vj_kpts, dm_kpts, input_band, kpts)
 
