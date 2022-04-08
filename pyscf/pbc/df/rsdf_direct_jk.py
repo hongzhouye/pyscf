@@ -485,7 +485,7 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
                        'wall time  %9.2f sec', tname, *tspan)
         for tspan,tname in zip(tspans,tnames):
             if 'ij' in tname or 'ji' in tname:
-                tspan_avg = tspan / (nkptij if 'ji' in tname else nkptijswap)
+                tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
                 log.debug1('CPU time for get_k_kpts pass 1 avg %10s  %9.2f sec, '
                            'wall time  %9.2f sec', tname, *tspan_avg)
 
