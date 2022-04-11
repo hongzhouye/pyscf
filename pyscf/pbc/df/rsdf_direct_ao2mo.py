@@ -32,7 +32,7 @@ def ao2mo_e2_Lij_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
             If None, such a numpy array is created.
     '''
     log = logger.new_logger(mydf)
-    verbose1 = 0
+    verbose1 = mydf.verbose - 2
 
     nkpts = len(kpts)
 
@@ -111,6 +111,11 @@ def ao2mo_e2_Lij_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                len(shranges))
     log.debug1('ao2mo shranges= %s', shranges)
 
+    tspans = np.zeros((6,2))
+    tnames = ['ki,kj xform', 'ki,kj write', 'kj,ki xform', 'kj,ki write', 'xform', 'j3c']
+
+    t1_tock = logger.process_clock(), logger.perf_counter()
+
     p1 = 0
     for kcLpq in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='i',
                           j3c_order='Lij', shranges=shranges, bvk_kmesh=bvk_kmesh,
@@ -125,18 +130,23 @@ def ao2mo_e2_Lij_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                 kj = _safe_member(kptj, kpts)
                 ki = _safe_member(kptj-kpt, kpts)
 
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
                 Lpq = kcLpq[ji][0].reshape(naoaux,dp,nao)
                 mo1 = mo_coeff1[ki][p0:p1]
                 mo2 = mo_coeff2[kj]
                 nmo1 = mo1.shape[1]
                 nmo2 = mo2.shape[1]
                 Lij = lib.einsum('Lpq,pi,qj->Lij', Lpq, mo1.conj(), mo2)
+                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[0] += tock - tick
                 Lij = Lij.reshape(-1,nmo1,nmo2)
                 if hasdata(out,ki,kj):
                     accumdata(out,ki,kj,Lij)
                 else:
                     writedata(out,ki,kj,Lij)
                 Lij = None
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[1] += tick - tock
 
                 if ki != kj:
                     mo1 = mo_coeff1[kj]
@@ -144,32 +154,76 @@ def ao2mo_e2_Lij_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                     nmo1 = mo1.shape[1]
                     nmo2 = mo2.shape[1]
                     Lji = lib.einsum('Lpq,pi,qj->Lij', Lpq, mo2.conj(), mo1).conj()
+                    tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[2] += tock - tick
                     Lij = Lji.reshape(-1,nmo2,nmo1).transpose(0,2,1)
                     if hasdata(out,kj,ki):
                         accumdata(out,kj,ki,Lij)
                     else:
                         writedata(out,kj,ki,Lij)
+                    tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[3] += tick - tock
                 Lpq = Lij = Lji = None
 
+        t1_tick = t1_tock
+        t1_tock = log.timer_debug1('ao2mo pass1 [%d:%d]'%(p0,p1), *t1_tick)
+        tspans[5] += np.asarray(t1_tock) - np.asarray(t1_tick)
+
+    tspans[4] = tspans[:4].sum(axis=0)
+    tspans[5] -= tspans[4]
+    for tspan,tname in zip(tspans,tnames):
+        log.debug1('CPU time for ao2mo pass1     %12s  %9.2f sec, '
+                   'wall time  %9.2f sec', tname, *tspan)
+    for tspan,tname in zip(tspans,tnames):
+        if 'ki,kj' in tname or 'kj,ki' in tname:
+            tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
+            log.debug1('CPU time for ao2mo pass1 avg %12s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan_avg)
     t0 = log.timer_debug1('ao2mo pass1', *t0)
+
+    tspans = np.zeros((6,2))
+    tnames = ['ki,kj  load','ki,kj solve','ki,kj write',
+              'kj,ki  load','kj,ki solve','kj,ki write']
 
     kq = 0
     for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
         j2c = kj2c[kq]
         j2ctag = kj2ctag[kq]
         for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
+            tick = np.asarray((logger.process_clock(), logger.perf_counter()))
             kj = _safe_member(kptj, kpts)
             ki = _safe_member(kptj-kpt, kpts)
             Lij = loaddata(out,ki,kj)
+            tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[0] += tock - tick
             Lij = scipy.linalg.solve_triangular(j2c, Lij, lower=True)
+            tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[1] += tick - tock
             writedata(out,ki,kj,Lij)
+            tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[2] += tock - tick
             Lij = None
             if ki != kj:
                 Lij = loaddata(out,kj,ki)
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[3] += tick - tock
                 Lij = scipy.linalg.solve_triangular(j2c.conj(), Lij, lower=True)
+                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[4] += tock - tick
                 writedata(out,kj,ki,Lij)
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[5] += tick - tock
                 Lij = None
         kq += 1
+
+    for tspan,tname in zip(tspans,tnames):
+        log.debug1('CPU time for ao2mo pass2     %12s  %9.2f sec, '
+                   'wall time  %9.2f sec', tname, *tspan)
+    for tspan,tname in zip(tspans,tnames):
+        if 'ki,kj' in tname or 'kj,ki' in tname:
+            tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
+            log.debug1('CPU time for ao2mo pass2 avg %12s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan_avg)
 
     t0 = log.timer_debug1('ao2mo pass2', *t0)
 
@@ -189,7 +243,7 @@ def ao2mo_e2_Lij_kernel2(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
             If None, such a numpy array is created.
     '''
     log = logger.new_logger(mydf)
-    verbose1 = 0
+    verbose1 = mydf.verbose - 2
 
     nkpts = len(kpts)
 
@@ -327,7 +381,7 @@ def ao2mo_e2_ijL_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
             If None, such a numpy array is created.
     '''
     log = logger.new_logger(mydf)
-    verbose1 = 0
+    verbose1 = mydf.verbose - 2
 
     nkpts = len(kpts)
 
@@ -406,6 +460,11 @@ def ao2mo_e2_ijL_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                len(shranges))
     log.debug1('ao2mo shranges= %s', shranges)
 
+    tspans = np.zeros((6,2))
+    tnames = ['ki,kj xform', 'ki,kj write', 'kj,ki xform', 'kj,ki write', 'xform', 'j3c']
+
+    t1_tock = logger.process_clock(), logger.perf_counter()
+
     p1 = 0
     for kcpqL in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='i',
                           j3c_order='ijL', shranges=shranges, bvk_kmesh=bvk_kmesh,
@@ -420,18 +479,23 @@ def ao2mo_e2_ijL_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                 kj = _safe_member(kptj, kpts)
                 ki = _safe_member(kptj-kpt, kpts)
 
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
                 pqL = kcpqL[ji][0].reshape(dp,nao,naoaux)
                 mo1 = mo_coeff1[ki][p0:p1]
                 mo2 = mo_coeff2[kj]
                 nmo1 = mo1.shape[1]
                 nmo2 = mo2.shape[1]
                 ijL = lib.einsum('pqL,pi,qj->ijL', pqL, mo1.conj(), mo2)
+                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[0] += tock - tick
                 ijL = ijL.reshape(nmo1,nmo2,-1)
                 if hasdata(out,ki,kj):
                     accumdata(out,ki,kj,ijL)
                 else:
                     writedata(out,ki,kj,ijL)
                 ijL = None
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[1] += tick - tock
 
                 if ki != kj:
                     mo1 = mo_coeff1[kj]
@@ -439,32 +503,76 @@ def ao2mo_e2_ijL_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                     nmo1 = mo1.shape[1]
                     nmo2 = mo2.shape[1]
                     jiL = lib.einsum('pqL,pi,qj->ijL', pqL, mo2.conj(), mo1).conj()
+                    tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[2] += tock - tick
                     ijL = jiL.reshape(nmo2,nmo1,-1).transpose(1,0,2)
                     if hasdata(out,kj,ki):
                         accumdata(out,kj,ki,ijL)
                     else:
                         writedata(out,kj,ki,ijL)
+                    tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[3] += tick - tock
                 pqL = ijL = jiL = None
+        t1_tick = t1_tock
+        t1_tock = log.timer_debug1('ao2mo pass1 [%d:%d]'%(p0,p1), *t1_tick)
+        tspans[5] += np.asarray(t1_tock) - np.asarray(t1_tick)
+
+    tspans[4] = tspans[:4].sum(axis=0)
+    tspans[5] -= tspans[4]
+    for tspan,tname in zip(tspans,tnames):
+        log.debug1('CPU time for ao2mo pass1     %12s  %9.2f sec, '
+                   'wall time  %9.2f sec', tname, *tspan)
+    for tspan,tname in zip(tspans,tnames):
+        if 'ki,kj' in tname or 'kj,ki' in tname:
+            tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
+            log.debug1('CPU time for ao2mo pass1 avg %12s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan_avg)
 
     t0 = log.timer_debug1('ao2mo pass1', *t0)
+
+    tspans = np.zeros((6,2))
+    tnames = ['ki,kj  load','ki,kj solve','ki,kj write',
+              'kj,ki  load','kj,ki solve','kj,ki write']
 
     kq = 0
     for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
         j2c = kj2c[kq]
         j2ctag = kj2ctag[kq]
         for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
+            tick = np.asarray((logger.process_clock(), logger.perf_counter()))
             kj = _safe_member(kptj, kpts)
             ki = _safe_member(kptj-kpt, kpts)
             ijL = loaddata(out,ki,kj)
+            tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[0] += tock - tick
             ijL = scipy.linalg.solve_triangular(j2c, ijL.T, lower=True).T
+            tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[1] += tick - tock
             writedata(out,ki,kj,ijL)
+            tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[2] += tock - tick
             ijL = None
             if ki != kj:
                 ijL = loaddata(out,kj,ki)
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[3] += tick - tock
                 ijL = scipy.linalg.solve_triangular(j2c.conj(), ijL.T, lower=True).T
+                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[4] += tock - tick
                 writedata(out,kj,ki,ijL)
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[5] += tick - tock
                 ijL = None
         kq += 1
+
+    for tspan,tname in zip(tspans,tnames):
+        log.debug1('CPU time for ao2mo pass2     %12s  %9.2f sec, '
+                   'wall time  %9.2f sec', tname, *tspan)
+    for tspan,tname in zip(tspans,tnames):
+        if 'ki,kj' in tname or 'kj,ki' in tname:
+            tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
+            log.debug1('CPU time for ao2mo pass2 avg %12s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan_avg)
 
     t0 = log.timer_debug1('ao2mo pass2', *t0)
 
@@ -483,7 +591,7 @@ def ao2mo_e2_ijL_kernel2(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
             If None, such a numpy array is created.
     '''
     log = logger.new_logger(mydf)
-    verbose1 = 0
+    verbose1 = mydf.verbose - 2
 
     nkpts = len(kpts)
 
@@ -699,31 +807,6 @@ if __name__ == '__main__':
     mf.with_df.verbose = 6
     kkLovref = ao2mo_e2_ref(mf.with_df, mo_coeffs)
 
-    mydf = df.RSDF(cell, kpts)
-    mydf.direct = True
-    mydf.verbose = 6
-    mydf.build()
-    for kernel in [1,2]:
-        f = lib.H5TmpFile()
-        kkLov = f.create_group('kkLov')
-        # kkLov = None
-        kkLov = ao2mo_e2(mydf, mo_coeffs, kpts, j3c_order='Lij', kernel=kernel, out=kkLov)
-        for k1 in range(nkpts):
-            for k2 in range(nkpts):
-                if isinstance(kkLov, np.ndarray):
-                    print(kkLov[k1,k2].data.f_contiguous, kkLovref[k1,k2].data.c_contiguous)
-                    err_real = abs(kkLov[k1,k2].real - kkLovref[k1,k2].real).max()
-                    err_imag = abs(kkLov[k1,k2].imag - kkLovref[k1,k2].imag).max()
-                else:
-                    kstr = '%d,%d'%(k1,k2)
-                    print(kkLov[kstr][()].data.c_contiguous,
-                          kkLovref[k1,k2].data.c_contiguous)
-                    err_real = abs(kkLov[kstr][()].real - kkLovref[k1,k2].real).max()
-                    err_imag = abs(kkLov[kstr][()].imag - kkLovref[k1,k2].imag).max()
-                print(f'{k1:2d} {k2:2d}  {err_real:.3e}  {err_imag:.3e}')
-        if isinstance(kkLov, h5py.Group):
-            f.close()
-
     # mydf = df.RSDF(cell, kpts)
     # mydf.direct = True
     # mydf.verbose = 6
@@ -732,23 +815,48 @@ if __name__ == '__main__':
     #     f = lib.H5TmpFile()
     #     kkLov = f.create_group('kkLov')
     #     # kkLov = None
-    #     kkLov = ao2mo_e2(mydf, mo_coeffs, kpts, j3c_order='ijL', kernel=kernel, out=kkLov)
+    #     kkLov = ao2mo_e2(mydf, mo_coeffs, kpts, j3c_order='Lij', kernel=kernel, out=kkLov)
     #     for k1 in range(nkpts):
     #         for k2 in range(nkpts):
     #             if isinstance(kkLov, np.ndarray):
-    #                 print(kkLov[k1,k2].data.c_contiguous, kkLovref[k1,k2].data.c_contiguous)
-    #                 err_real = abs(kkLov[k1,k2].real.transpose(2,0,1) -
-    #                                kkLovref[k1,k2].real).max()
-    #                 err_imag = abs(kkLov[k1,k2].imag.transpose(2,0,1) -
-    #                                kkLovref[k1,k2].imag).max()
+    #                 print(kkLov[k1,k2].data.f_contiguous, kkLovref[k1,k2].data.c_contiguous)
+    #                 err_real = abs(kkLov[k1,k2].real - kkLovref[k1,k2].real).max()
+    #                 err_imag = abs(kkLov[k1,k2].imag - kkLovref[k1,k2].imag).max()
     #             else:
     #                 kstr = '%d,%d'%(k1,k2)
     #                 print(kkLov[kstr][()].data.c_contiguous,
     #                       kkLovref[k1,k2].data.c_contiguous)
-    #                 err_real = abs(kkLov[kstr][()].real.transpose(2,0,1) -
-    #                                kkLovref[k1,k2].real).max()
-    #                 err_imag = abs(kkLov[kstr][()].imag.transpose(2,0,1) -
-    #                                kkLovref[k1,k2].imag).max()
+    #                 err_real = abs(kkLov[kstr][()].real - kkLovref[k1,k2].real).max()
+    #                 err_imag = abs(kkLov[kstr][()].imag - kkLovref[k1,k2].imag).max()
     #             print(f'{k1:2d} {k2:2d}  {err_real:.3e}  {err_imag:.3e}')
     #     if isinstance(kkLov, h5py.Group):
     #         f.close()
+
+    mydf = df.RSDF(cell, kpts)
+    mydf.direct = True
+    mydf.verbose = 6
+    mydf.build()
+    for kernel in [1,2]:
+        f = lib.H5TmpFile()
+        kkLov = f.create_group('kkLov')
+        # kkLov = None
+        kkLov = ao2mo_e2(mydf, mo_coeffs, kpts, j3c_order='ijL', kernel=kernel, out=kkLov)
+        for k1 in range(nkpts):
+            for k2 in range(nkpts):
+                if isinstance(kkLov, np.ndarray):
+                    print(kkLov[k1,k2].data.c_contiguous, kkLovref[k1,k2].data.c_contiguous)
+                    err_real = abs(kkLov[k1,k2].real.transpose(2,0,1) -
+                                   kkLovref[k1,k2].real).max()
+                    err_imag = abs(kkLov[k1,k2].imag.transpose(2,0,1) -
+                                   kkLovref[k1,k2].imag).max()
+                else:
+                    kstr = '%d,%d'%(k1,k2)
+                    print(kkLov[kstr][()].data.c_contiguous,
+                          kkLovref[k1,k2].data.c_contiguous)
+                    err_real = abs(kkLov[kstr][()].real.transpose(2,0,1) -
+                                   kkLovref[k1,k2].real).max()
+                    err_imag = abs(kkLov[kstr][()].imag.transpose(2,0,1) -
+                                   kkLovref[k1,k2].imag).max()
+                print(f'{k1:2d} {k2:2d}  {err_real:.3e}  {err_imag:.3e}')
+        if isinstance(kkLov, h5py.Group):
+            f.close()
