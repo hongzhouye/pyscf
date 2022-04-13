@@ -322,6 +322,10 @@ def ao2mo_e2_Lij_kernel2(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                len(shranges))
     log.debug1('ao2mo shranges= %s', shranges)
 
+    tspans = np.zeros((7,2))
+    tnames = ['ki,kj fit  ', 'ki,kj xform', 'ki,kj write', 'kj,ki xform', 'kj,ki write', 'xform', 'j3c']
+    t1_tock = logger.process_clock(), logger.perf_counter()
+
     p1 = 0
     for kcLpq in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='i',
                           j3c_order='Lij', shranges=shranges, bvk_kmesh=bvk_kmesh,
@@ -339,19 +343,26 @@ def ao2mo_e2_Lij_kernel2(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                 kj = _safe_member(kptj, kpts)
                 ki = _safe_member(kptj-kpt, kpts)
 
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
                 Lpq = scipy.linalg.solve_triangular(j2c, kcLpq[ji][0],
                                                     lower=True).reshape(naoaux,dp,nao)
+                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[0] += tock - tick
                 mo1 = mo_coeff1[ki][p0:p1]
                 mo2 = mo_coeff2[kj]
                 nmo1 = mo1.shape[1]
                 nmo2 = mo2.shape[1]
                 Lij = lib.einsum('Lpq,pi,qj->Lij', Lpq, mo1.conj(), mo2)
                 Lij = Lij.reshape(-1,nmo1,nmo2)
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[1] += tick - tock
                 if hasdata(out,ki,kj):
                     accumdata(out,ki,kj,Lij)
                 else:
                     writedata(out,ki,kj,Lij)
                 Lij = None
+                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[2] += tock - tick
 
                 if ki != kj:
                     mo1 = mo_coeff1[kj]
@@ -360,12 +371,32 @@ def ao2mo_e2_Lij_kernel2(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                     nmo2 = mo2.shape[1]
                     Lji = lib.einsum('Lpq,pi,qj->Lij', Lpq, mo2.conj(), mo1).conj()
                     Lij = Lji.reshape(-1,nmo2,nmo1).transpose(0,2,1)
+                    tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[3] += tick - tock
                     if hasdata(out,kj,ki):
                         accumdata(out,kj,ki,Lij)
                     else:
                         writedata(out,kj,ki,Lij)
+                    tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[4] += tock - tick
                 Lpq = Lij = Lji = None
             kq += 1
+
+        t1_tick = t1_tock
+        t1_tock = log.timer_debug1('ao2mo pass1 [%d:%d]'%(p0,p1), *t1_tick)
+        tspans[6] += np.asarray(t1_tock) - np.asarray(t1_tick)
+
+    tspans[5] = tspans[:5].sum(axis=0)
+    tspans[6] -= tspans[5]
+    for tspan,tname in zip(tspans,tnames):
+        log.debug1('CPU time for ao2mo pass1     %12s  %9.2f sec, '
+                   'wall time  %9.2f sec', tname, *tspan)
+    for tspan,tname in zip(tspans,tnames):
+        if 'ki,kj' in tname or 'kj,ki' in tname:
+            tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
+            log.debug1('CPU time for ao2mo pass1 avg %12s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan_avg)
+
     return out
 
 def ao2mo_e2_ijL_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
@@ -670,6 +701,10 @@ def ao2mo_e2_ijL_kernel2(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                len(shranges))
     log.debug1('ao2mo shranges= %s', shranges)
 
+    tspans = np.zeros((7,2))
+    tnames = ['ki,kj fit  ', 'ki,kj xform', 'ki,kj write', 'kj,ki xform', 'kj,ki write', 'xform', 'j3c']
+    t1_tock = logger.process_clock(), logger.perf_counter()
+
     p1 = 0
     for kcpqL in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='i',
                           j3c_order='ijL', shranges=shranges, bvk_kmesh=bvk_kmesh,
@@ -687,19 +722,26 @@ def ao2mo_e2_ijL_kernel2(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                 kj = _safe_member(kptj, kpts)
                 ki = _safe_member(kptj-kpt, kpts)
 
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
                 pqL = scipy.linalg.solve_triangular(j2c, kcpqL[ji][0].T,
                                                     lower=True).T.reshape(dp,nao,naoaux)
+                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[0] += tock - tick
                 mo1 = mo_coeff1[ki][p0:p1]
                 mo2 = mo_coeff2[kj]
                 nmo1 = mo1.shape[1]
                 nmo2 = mo2.shape[1]
                 ijL = lib.einsum('pqL,pi,qj->ijL', pqL, mo1.conj(), mo2)
                 ijL = ijL.reshape(nmo1,nmo2,-1)
+                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[1] += tick - tock
                 if hasdata(out,ki,kj):
                     accumdata(out,ki,kj,ijL)
                 else:
                     writedata(out,ki,kj,ijL)
                 ijL = None
+                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[2] += tock - tick
 
                 if ki != kj:
                     mo1 = mo_coeff1[kj]
@@ -709,12 +751,31 @@ def ao2mo_e2_ijL_kernel2(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
                     jiL = lib.einsum('pqL,pi,qj->ijL', pqL, mo2.conj(), mo1).conj()
                     ijL = np.asarray(jiL.reshape(nmo2,nmo1,-1).transpose(1,0,2),
                                      order='C')
+                    tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[3] += tick - tock
                     if hasdata(out,kj,ki):
                         accumdata(out,kj,ki,ijL)
                     else:
                         writedata(out,kj,ki,ijL)
+                    tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[4] += tock - tick
                 pqL = ijL = jiL = None
             kq += 1
+
+        t1_tick = t1_tock
+        t1_tock = log.timer_debug1('ao2mo pass1 [%d:%d]'%(p0,p1), *t1_tick)
+        tspans[6] += np.asarray(t1_tock) - np.asarray(t1_tick)
+
+    tspans[5] = tspans[:5].sum(axis=0)
+    tspans[6] -= tspans[5]
+    for tspan,tname in zip(tspans,tnames):
+        log.debug1('CPU time for ao2mo pass1     %12s  %9.2f sec, '
+                   'wall time  %9.2f sec', tname, *tspan)
+    for tspan,tname in zip(tspans,tnames):
+        if 'ki,kj' in tname or 'kj,ki' in tname:
+            tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
+            log.debug1('CPU time for ao2mo pass1 avg %12s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan_avg)
 
     return out
 
