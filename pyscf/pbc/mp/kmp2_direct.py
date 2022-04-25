@@ -26,6 +26,7 @@ t2[i,j,a,b] = <ij|ab> / D_ij^ab
 
 import numpy as np
 from scipy.linalg import block_diag
+import tempfile
 import h5py
 
 from pyscf import lib
@@ -848,6 +849,8 @@ class KMP2_direct(mp2.MP2):
 
         self.less_mem = False
         self.use_s2symm = True
+        self._cderi = None
+        self._cderi_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
 
 ##################################################
 # don't modify the following attributes, they are not input options
@@ -971,10 +974,26 @@ class KMP2_direct(mp2.MP2):
             mem_avail = self.max_memory - lib.current_memory()[0]
             log.debug('mem Lov= %9.2f MB  mem avail= %9.2f MB', mem_usage, mem_avail)
             if mem_usage > mem_avail:
-                logger.info(self, 'Holding DF integrals outcore.')
-                return _make_df_eris_outcore(self, mo_coeff, j3c_order)
+                log.info('Holding DF integrals outcore.')
+                if isinstance(self._cderi, str):
+                    restart = True
+                    erifile = self._cderi
+                else:
+                    restart = False
+                    if isinstance(self._cderi_to_save, str):
+                        erifile = self._cderi_to_save
+                    else:
+                        erifile = self._cderi_to_save.name
+                if restart:
+                    log.info('Loading %s cderi from file: %s',
+                             self.__class__.__name__, erifile)
+                else:
+                    log.info('Saving %s cderi to file: %s',
+                             self.__class__.__name__, erifile)
+                return _make_df_eris_outcore(self, mo_coeff, j3c_order,
+                                             erifile=erifile, restart=restart)
             else:
-                logger.info(self, 'Holding DF integrals incore.')
+                log.info('Holding DF integrals incore.')
                 return _make_df_eris_incore(self, mo_coeff, j3c_order)
         else:
             return _make_eris_incore(self, mo_coeff)
@@ -1148,7 +1167,8 @@ class _DFMP2ERIS_INCORE_ovL(_MP2ERIS_INCORE):
 
 class _DFMP2ERIS_OUTCORE(_DFMP2ERIS_INCORE):
 
-    def _common_init_(self, mp, mo_coeff=None, j3c_order='Lij'):
+    def _common_init_(self, mp, mo_coeff=None, j3c_order='Lij', erifile=None,
+                      dataname='Lov', restart=False):
         _MP2ERIS_INCORE._common_init_(self, mp, mo_coeff=mo_coeff)
         nocc = self.nocc
         nvir = self.nmo - nocc
@@ -1159,10 +1179,15 @@ class _DFMP2ERIS_OUTCORE(_DFMP2ERIS_INCORE):
             naux = mydf.get_naoaux()
         else:
             naux = mydf.auxcell.nao_nr()
-        self.feri = lib.H5TmpFile()
-        logger.info(mp, 'Lov is saved to %s', self.feri.filename)
-        self.Lov = self.feri.create_group('Lov')
-        _init_mp_df_eris(mp, mo_coeff=self.mo_coeff, Lov=self.Lov, j3c_order=j3c_order)
+        if erifile is None: erifile = self._cderi_to_save
+        if restart:
+            self.feri = h5py.File(erifile, 'r')
+            self.Lov = self.feri[dataname]
+        else:
+            self.feri = h5py.File(erifile, 'w')
+            self.Lov = self.feri.create_group(dataname)
+            _init_mp_df_eris(mp, mo_coeff=self.mo_coeff, Lov=self.Lov,
+                             j3c_order=j3c_order)
         return self
 
     def get_Lov(self, ki, ka, shls_slice_i=None):
@@ -1173,8 +1198,10 @@ class _DFMP2ERIS_OUTCORE(_DFMP2ERIS_INCORE):
 
 class _DFMP2ERIS_OUTCORE_ovL(_DFMP2ERIS_INCORE_ovL):
 
-    def _common_init_(self, mp, mo_coeff=None, j3c_order='Lij'):
-        self = _DFMP2ERIS_OUTCORE._common_init_(self, mp, mo_coeff, 'ijL')
+    def _common_init_(self, mp, mo_coeff=None, j3c_order='Lij', erifile=None,
+                      dataname='ovL', restart=False):
+        self = _DFMP2ERIS_OUTCORE._common_init_(self, mp, mo_coeff, 'ijL', erifile,
+                                                dataname, restart)
         self.ovL = self.Lov
         self.Lov = None
         return self
@@ -1196,11 +1223,16 @@ def _make_df_eris_incore(mp, mo_coeff=None, j3c_order='Lij'):
         eris = _DFMP2ERIS_INCORE_ovL()._common_init_(mp, mo_coeff=mo_coeff)
     return eris
 
-def _make_df_eris_outcore(mp, mo_coeff=None, j3c_order='Lij'):
+def _make_df_eris_outcore(mp, mo_coeff=None, j3c_order='Lij', erifile=None,
+                          restart=False):
     if j3c_order == 'Lij':
-        eris = _DFMP2ERIS_OUTCORE()._common_init_(mp, mo_coeff=mo_coeff)
+        eris = _DFMP2ERIS_OUTCORE()._common_init_(mp, mo_coeff=mo_coeff,
+                                                  erifile=erifile, dataname='Lov',
+                                                  restart=restart)
     else:
-        eris = _DFMP2ERIS_OUTCORE_ovL()._common_init_(mp, mo_coeff=mo_coeff)
+        eris = _DFMP2ERIS_OUTCORE_ovL()._common_init_(mp, mo_coeff=mo_coeff,
+                                                      erifile=erifile, dataname='ovL',
+                                                      restart=restart)
     return eris
 
 def ao2mo_df(cderi, mo_coeff, nocc, kpts, Lov=None):

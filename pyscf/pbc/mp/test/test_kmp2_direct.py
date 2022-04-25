@@ -13,42 +13,91 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import tempfile
 import unittest
 import numpy as np
 
 from pyscf.pbc import gto, scf, mp
+from pyscf import lib
 
 
 atom = 'He 0 0 0; He 1 0 0'
 a = np.eye(3) * 3
 basis = 'cc-pvdz'
-verbose = 0
+verbose = 6
 cell = gto.Cell(atom=atom, a=a, basis=basis).set(verbose=verbose)
 cell.build()
 
-def run1(kmesh, direct=False, dm0=None, frozen=None, with_t2=False):
+def run_scf(kmesh, direct=False, dm0=None):
     kpts = cell.make_kpts(kmesh)
     mf = scf.KRHF(cell, kpts).rs_density_fit()
     mf.with_df.direct = direct
     mf.kernel(dm0=dm0)
+    return mf
 
+def run_mp2(mf, frozen=None, with_t2=False):
     mmp = mp.KMP2(mf, frozen=frozen)
     mmp.kernel(with_t2=with_t2)
-
     return mmp
-
 
 
 class KnownValues(unittest.TestCase):
     def test_211_energy(self):
         kmesh = (2,1,1)
-        mmp = run1(kmesh)
 
-        dm0 = mmp._scf.make_rdm1()
-        mmp_direct = run1(kmesh, direct=True, dm0=dm0)
+        mf = run_scf(kmesh)
+        mmp = run_mp2(mf)
+
+        dm0 = mf.make_rdm1()
+        mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
+        mmp_direct = run_mp2(mf_direct)
 
         self.assertAlmostEqual(mmp._scf.e_tot, mmp_direct._scf.e_tot, 8)
         self.assertAlmostEqual(mmp.e_corr, mmp_direct.e_corr, 8)
+
+    def test_211_restart(self):
+        kmesh = (2,1,1)
+        frozen = None
+        with_t2 = False
+
+        mf = run_scf(kmesh)
+        dm0 = mf.make_rdm1()
+        mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
+
+        ftemp = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+        mf_direct.max_memory = 0.05
+        mmp1 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp1._cderi_to_save = ftemp.name
+        mmp1.kernel(with_t2=with_t2)
+
+        mmp2 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp2._cderi = ftemp.name
+        mmp2.kernel(with_t2=with_t2)
+
+        self.assertAlmostEqual(mmp1.e_corr, mmp2.e_corr, 8)
+
+    def test_211_restart_ijL(self):
+        kmesh = (2,1,1)
+        frozen = None
+        with_t2 = False
+
+        mf = run_scf(kmesh)
+        dm0 = mf.make_rdm1()
+        mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
+
+        ftemp = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+        mf_direct.max_memory = 0.05
+        mmp1 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp1.j3c_order = 'ijL'
+        mmp1._cderi_to_save = ftemp.name
+        mmp1.kernel(with_t2=with_t2)
+
+        mmp2 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp2.j3c_order = 'ijL'
+        mmp2._cderi = ftemp.name
+        mmp2.kernel(with_t2=with_t2)
+
+        self.assertAlmostEqual(mmp1.e_corr, mmp2.e_corr, 8)
 
 
 if __name__ == '__main__':
