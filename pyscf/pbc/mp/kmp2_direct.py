@@ -1134,47 +1134,41 @@ class _MP2ERIS_INCORE:
 
 class _DFMP2ERIS_INCORE(_MP2ERIS_INCORE):
 
-    def _common_init_(self, mp, mo_coeff=None, j3c_order='Lij'):
-        _MP2ERIS_INCORE._common_init_(self, mp, mo_coeff=mo_coeff)
-        self.Lov = _init_mp_df_eris(mp, mo_coeff=self.mo_coeff, j3c_order=j3c_order)
-        return self
-
-    def get_Lov(self, ki, ka, shls_slice_i=None):
-        if shls_slice_i is None:
-            return self.Lov[ki,ka]
-        else:
-            return self.Lov[ki,ka][:,shls_slice_i[0]:shls_slice_i[1]]
-
-    def get_oovv(self, kijab, shls_slice_i=None):
-        ki,kj,ka,kb = kijab
-        nkpts = len(self.kpts)
-        return einsum("Lia,Ljb->iajb", self.get_Lov(ki,ka,shls_slice_i),
-                      self.get_Lov(kj,kb)).transpose(0,2,1,3) / nkpts
-
-class _DFMP2ERIS_INCORE_ovL(_MP2ERIS_INCORE):
+    def __init__(self, j3c_order='Lij'):
+        self.j3c_order = j3c_order
 
     def _common_init_(self, mp, mo_coeff=None):
-        self = _DFMP2ERIS_INCORE._common_init_(self, mp, mo_coeff, 'ijL')
-        self.ovL = self.Lov
-        self.Lov = None
+        _MP2ERIS_INCORE._common_init_(self, mp, mo_coeff=mo_coeff)
+        self.cderi = self.init_eris(mp)
         return self
 
-    def get_ovL(self, ki, ka, shls_slice_i=None):
+    def init_eris(self, mp, oslice=None):
+        return _init_mp_df_eris(mp, mo_coeff=self.mo_coeff, j3c_order=self.j3c_order,
+                                oslice=oslice)
+
+    def get_cderi(self, ki, ka, shls_slice_i=None):
         if shls_slice_i is None:
-            return self.ovL[ki,ka]
+            return self.cderi[ki,ka]
         else:
-            return self.ovL[ki,ka][shls_slice_i[0]:shls_slice_i[1],:]
+            if self.j3c_order == 'Lij':
+                return self.cderi[ki,ka][:,shls_slice_i[0]:shls_slice_i[1]]
+            else:
+                return self.cderi[ki,ka][shls_slice_i[0]:shls_slice_i[1],:]
 
     def get_oovv(self, kijab, shls_slice_i=None):
         ki,kj,ka,kb = kijab
         nkpts = len(self.kpts)
-        return einsum("iaL,jbL->iajb", self.get_ovL(ki,ka,shls_slice_i),
-                      self.get_ovL(kj,kb)).transpose(0,2,1,3) / nkpts
+        if self.j3c_order == 'Lij':
+            return einsum("Lia,Ljb->iajb", self.get_cderi(ki,ka,shls_slice_i),
+                          self.get_cderi(kj,kb)).transpose(0,2,1,3) / nkpts
+        else:
+            return einsum("iaL,jbL->iajb", self.get_cderi(ki,ka,shls_slice_i),
+                          self.get_cderi(kj,kb)).transpose(0,2,1,3) / nkpts
 
 class _DFMP2ERIS_OUTCORE(_DFMP2ERIS_INCORE):
 
-    def _common_init_(self, mp, mo_coeff=None, j3c_order='Lij', erifile=None,
-                      dataname='Lov', restart=False):
+    def _common_init_(self, mp, mo_coeff=None, erifile=None, dataname='Lov',
+                      restart=False):
         _MP2ERIS_INCORE._common_init_(self, mp, mo_coeff=mo_coeff)
         nocc = self.nocc
         nvir = self.nmo - nocc
@@ -1188,58 +1182,36 @@ class _DFMP2ERIS_OUTCORE(_DFMP2ERIS_INCORE):
         if erifile is None: erifile = self._cderi_to_save
         if restart:
             self.feri = h5py.File(erifile, 'r')
-            self.Lov = self.feri[dataname]
+            self.cderi = self.feri[dataname]
         else:
             self.feri = h5py.File(erifile, 'w')
-            self.Lov = self.feri.create_group(dataname)
-            _init_mp_df_eris(mp, mo_coeff=self.mo_coeff, Lov=self.Lov,
-                             j3c_order=j3c_order)
+            self.cderi = self.feri.create_group(dataname)
+            _init_mp_df_eris(mp, mo_coeff=self.mo_coeff, Lov=self.cderi,
+                             j3c_order=self.j3c_order)
         return self
 
-    def get_Lov(self, ki, ka, shls_slice_i=None):
+    def get_cderi(self, ki, ka, shls_slice_i=None):
+        key = '%d,%d'%(ki,ka)
         if shls_slice_i is None:
-            return self.Lov['%d,%d'%(ki,ka)]
+            return self.cderi[key]
         else:
-            return self.Lov['%d,%d'%(ki,ka)][:,shls_slice_i[0]:shls_slice_i[1]]
-
-class _DFMP2ERIS_OUTCORE_ovL(_DFMP2ERIS_INCORE_ovL):
-
-    def _common_init_(self, mp, mo_coeff=None, j3c_order='Lij', erifile=None,
-                      dataname='ovL', restart=False):
-        self = _DFMP2ERIS_OUTCORE._common_init_(self, mp, mo_coeff, 'ijL', erifile,
-                                                dataname, restart)
-        self.ovL = self.Lov
-        self.Lov = None
-        return self
-
-    def get_ovL(self, ki, ka, shls_slice_i=None):
-        if shls_slice_i is None:
-            return self.ovL['%d,%d'%(ki,ka)]
-        else:
-            return self.ovL['%d,%d'%(ki,ka)][shls_slice_i[0]:shls_slice_i[1],:]
+            if self.j3c_order == 'Lij':
+                return self.cderi[key][:,shls_slice_i[0]:shls_slice_i[1]]
+            else:
+                return self.cderi[key][shls_slice_i[0]:shls_slice_i[1],:]
 
 def _make_eris_incore(mp, mo_coeff=None):
     eris = _MP2ERIS_INCORE()._common_init_(mp, mo_coeff=mo_coeff)
     return eris
 
 def _make_df_eris_incore(mp, mo_coeff=None, j3c_order='Lij'):
-    if j3c_order == 'Lij':
-        eris = _DFMP2ERIS_INCORE()._common_init_(mp, mo_coeff=mo_coeff)
-    else:
-        eris = _DFMP2ERIS_INCORE_ovL()._common_init_(mp, mo_coeff=mo_coeff)
-    return eris
+    return _DFMP2ERIS_INCORE(j3c_order)._common_init_(mp, mo_coeff=mo_coeff)
 
 def _make_df_eris_outcore(mp, mo_coeff=None, j3c_order='Lij', erifile=None,
                           restart=False):
-    if j3c_order == 'Lij':
-        eris = _DFMP2ERIS_OUTCORE()._common_init_(mp, mo_coeff=mo_coeff,
-                                                  erifile=erifile, dataname='Lov',
-                                                  restart=restart)
-    else:
-        eris = _DFMP2ERIS_OUTCORE_ovL()._common_init_(mp, mo_coeff=mo_coeff,
-                                                      erifile=erifile, dataname='ovL',
-                                                      restart=restart)
-    return eris
+    return _DFMP2ERIS_OUTCORE(j3c_order)._common_init_(mp, mo_coeff=mo_coeff,
+                                                       erifile=erifile, dataname='Lov',
+                                                       restart=restart)
 
 def ao2mo_df(cderi, mo_coeff, nocc, kpts, Lov=None):
     from pyscf.pbc.df import df
@@ -1291,7 +1263,7 @@ def ao2mo_df(cderi, mo_coeff, nocc, kpts, Lov=None):
 
     return Lov
 
-def _init_mp_df_eris(mp, mo_coeff=None, Lov=None, j3c_order='Lij'):
+def _init_mp_df_eris(mp, mo_coeff=None, Lov=None, j3c_order='Lij', oslice=None):
     """Compute 3-center electron repulsion integrals, i.e. (L|ov),
     where `L` denotes DF auxiliary basis functions and `o` and `v` occupied and virtual
     canonical crystalline orbitals. Note that `o` and `v` contain kpt indices `ko` and `kv`,
@@ -1312,6 +1284,12 @@ def _init_mp_df_eris(mp, mo_coeff=None, Lov=None, j3c_order='Lij'):
     nocc = mp.nocc
     if mo_coeff is None: mo_coeff = _add_padding_mo_coeff(mp, mp.mo_coef)
     kpts = mp.kpts
+
+    # adjust mo and nocc if only certain occ slice is requested
+    if oslice is not None:
+        i0, i1 = oslice
+        mo_coeff = [np.hstack((x[:,i0:i1],x[:,nocc:])) for x in mo_coeff]
+        nocc = i1 - i0
 
     mydf = mp._scf.with_df
 
