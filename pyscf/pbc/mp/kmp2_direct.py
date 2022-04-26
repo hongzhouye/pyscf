@@ -235,7 +235,8 @@ def kernel_s2(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, ver
     cache_eris = not (mp.with_df_ints or mp.less_mem)
     cput1 = (logger.process_clock(), logger.perf_counter())
     emp2_ss = emp2_os = 0.
-    for ki in range(nkpts):
+    kilist = range(nkpts) if mp.kilist is None else mp.kilist
+    for ki in kilist:
         for ka in range(nkpts):
             kia = ki*nkpts + ka
             for kj in range(nkpts):
@@ -264,6 +265,8 @@ def kernel_s2(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, ver
                     gdi = gxi = None
 
             cput1 = log.timer_debug1('(ki,ka) = (%d,%d)'%(ki,ka), *cput1)
+            log.debug2('E_corr so far = %.15g (SS)  %.15g (OS)  %.15g',
+                       emp2_ss/nkpts, emp2_os/nkpts, (emp2_ss+emp2_os)/nkpts)
 
     log.timer(mp.__class__.__name__, *cput0)
 
@@ -851,6 +854,7 @@ class KMP2_direct(mp2.MP2):
         self.use_s2symm = True
         self._cderi = None
         self._cderi_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+        self.kilist = None
 
 ##################################################
 # don't modify the following attributes, they are not input options
@@ -876,18 +880,20 @@ class KMP2_direct(mp2.MP2):
     make_rdm2 = make_rdm2
 
     def dump_flags(self):
-        logger.info(self, "")
-        logger.info(self, "******** %s ********", self.__class__)
-        logger.info(self, "nkpts = %d", self.nkpts)
-        logger.info(self, "nocc = %s", self.nocc)
-        logger.info(self, "nmo = %s", self.nmo)
-        logger.info(self, "with_df_ints = %s", self.with_df_ints)
-        logger.info(self, "less_mem = %r", self.less_mem)
-        logger.info(self, "use_s2symm = %r", self.use_s2symm)
+        log = logger.new_logger(self)
+        log.info("")
+        log.info("******** %s ********", self.__class__)
+        log.info("nkpts = %d", self.nkpts)
+        log.info("nocc = %s", self.nocc)
+        log.info("nmo = %s", self.nmo)
+        log.info("with_df_ints = %s", self.with_df_ints)
+        log.info("less_mem = %r", self.less_mem)
+        log.info("use_s2symm = %r", self.use_s2symm)
+        log.info('kilist = %s', self.kilist)
 
         if self.frozen is not None:
-            logger.info(self, "frozen orbitals = %s", self.frozen)
-        logger.info(self, "max_memory %d MB (current use %d MB)",
+            log.info("frozen orbitals = %s", self.frozen)
+        log.info("max_memory %d MB (current use %d MB)",
                     self.max_memory, lib.current_memory()[0],
         )
         return self

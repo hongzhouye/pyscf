@@ -99,6 +99,32 @@ class KnownValues(unittest.TestCase):
 
         self.assertAlmostEqual(mmp1.e_corr, mmp2.e_corr, 8)
 
+    def test_211_kilist(self):
+        kmesh = (2,1,1)
+        frozen = None
+        with_t2 = False
+
+        mf = run_scf(kmesh)
+        dm0 = mf.make_rdm1()
+        mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
+        mf_direct.verbose = 7
+
+        nkpts = len(mf.kpts)
+        mmp1 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp1.verbose = 7
+        mmp1.kernel(with_t2=with_t2)
+
+        mmp2 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp2.kilist = range(nkpts//2)
+        mmp2.kernel(with_t2=with_t2)
+        ecorr2 = mmp2.e_corr
+
+        mmp2.kilist = range(nkpts//2,nkpts)
+        mmp2.kernel(with_t2=with_t2)
+        ecorr2 += mmp2.e_corr
+
+        self.assertAlmostEqual(mmp1.e_corr, ecorr2, 8)
+
 
 if __name__ == '__main__':
     print("Full KMP2 direct test")
