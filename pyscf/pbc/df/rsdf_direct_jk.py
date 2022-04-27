@@ -45,7 +45,7 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
                bvk_kmesh=None):
     log = logger.Logger(mydf.stdout, mydf.verbose)
     verbose1 = mydf.verbose - 2
-    t1 = (logger.process_clock(), logger.perf_counter())
+    t0 = (logger.process_clock(), logger.perf_counter())
 
     dm_kpts = lib.asarray(dm_kpts, order='C')
     dms = _format_dms(dm_kpts, kpts)
@@ -73,10 +73,10 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     j3c_dtype, j3c_dsize = (REAL,8) if is_zero(kptii_lst) else (COMPLEX,16)
     j3c_real = j3c_dtype == REAL
     mem_avail = mydf.max_memory - lib.current_memory()[0]
-    log.debug1('get_j pass1 mem_avail= %.1f MB', mem_avail)
+    log.debug1('get_j_kpts pass1 mem_avail= %.1f MB', mem_avail)
     blksize = min(nao*nao, mem_avail*0.7e6 / (2*nkpts*naux*j3c_dsize))
     shranges = _guess_shell_ranges(mydf.cell, blksize, 's1')
-    log.debug1('get_j pass1 blksize= %s  shranges= %s', blksize, shranges)
+    log.debug1('get_j_kpts pass1 blksize= %s  shranges= %s', blksize, shranges)
     blksize = np.max([x[2] for x in shranges])
     bufR = np.empty(naux*blksize, dtype=REAL)
     bufI = np.empty(naux*blksize, dtype=REAL)
@@ -104,7 +104,7 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     weight = 1./nkpts
     rhoR *= weight
     rhoI *= weight
-    t1 = log.timer_debug1('get_j pass1   ', *t1)
+    t1 = log.timer_debug1('get_j_kpts pass1   ', *t0)
 
 # setp 2: j2v inv
     j2c = get_j2c(mydf, kpts=np.zeros((1,3)), verbose=verbose1)[0]
@@ -128,15 +128,15 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     else:
         rhoR = lib.dot(lib.dot(rhoR, j2c.T.conj()), j2c)
         rhoI = lib.dot(lib.dot(rhoI, j2c.T.conj()), j2c)
-    t1 = log.timer_debug1('get_j j2c_cntr', *t1)
+    t1 = log.timer_debug1('get_j_kpts j2c_cntr', *t1)
 
 # step 3: vj_{pq}^{ki} = \sum_{L} (L|pq)^{ki,ki} rho_L
     kptbandii_lst = np.repeat(kpts_band,2,axis=0).reshape(nband,2,3)
     mem_avail = mydf.max_memory - lib.current_memory()[0]
-    log.debug1('get_j pass2 mem_avail= %.1f MB', mem_avail)
+    log.debug1('get_j_kpts pass2 mem_avail= %.1f MB', mem_avail)
     blksize = min(nao*(nao+1)//2, mem_avail*0.7e6 / (2*nband*naux*j3c_dsize))
     shranges = _guess_shell_ranges(mydf.cell, blksize, 's2')
-    log.debug1('get_j pass2 blksize= %s  shranges= %s', blksize, shranges)
+    log.debug1('get_j_kpts pass2 blksize= %s  shranges= %s', blksize, shranges)
     blksize = np.max([x[2] for x in shranges])
     bufR = np.empty(naux*blksize, dtype=REAL)
     bufI = np.empty(naux*blksize, dtype=REAL)
@@ -161,7 +161,7 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
                     vjI[:,k,p0:p1] += lib.dot(rhoR, pqLI.T)
         pqLR = pqLI = kcpqL = None
     bufR = bufI = None
-    t1 = log.timer_debug1('get_j pass2   ', *t1)
+    t1 = log.timer_debug1('get_j_kpts pass2   ', *t1)
 
 # post-proc
     if j_real:
@@ -169,6 +169,8 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     else:
         vj_kpts = vjR + vjI*1j
     vj_kpts = lib.unpack_tril(vj_kpts.reshape(-1,nao_pair))
+
+    log.timer_debug1('get_j_kpts         ', *t0)
 
     return _format_jks(vj_kpts, dm_kpts, input_band, kpts)
 def get_j(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None):
@@ -187,7 +189,7 @@ def _safe_member(q, qs):
         raise RuntimeError
     return idxs[0]
 def get_k_kpts_gamma(mydf, smo):
-    t1 = (logger.process_clock(), logger.perf_counter())
+    t0 = (logger.process_clock(), logger.perf_counter())
 
     cell = mydf.cell
     log = logger.Logger(mydf.stdout, mydf.verbose)
@@ -205,7 +207,7 @@ def get_k_kpts_gamma(mydf, smo):
 
     j2c = get_j2c(mydf, kpts=np.zeros((1,3)), verbose=verbose1)[0]
     j2c, j2c_negative, j2ctag = cholesky_decomposed_metric(mydf, j2c)
-    t1 = log.timer_debug1('get_k_kpts j2c', *t1)
+    t1 = log.timer_debug1('get_k_kpts j2c', *t0)
 
 # estimate minimum memory requirement for j3c
     ao_loc = mydf.cell.ao_loc_nr()
@@ -285,9 +287,11 @@ def get_k_kpts_gamma(mydf, smo):
 
     vk_kpts = vs.reshape((nset,1,nao,nao))
 
+    log.timer_debug1('get_k_kpts', *t0)
+
     return vk_kpts
 def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
-    t1 = (logger.process_clock(), logger.perf_counter())
+    t0 = (logger.process_clock(), logger.perf_counter())
 
     cell = mydf.cell
     log = logger.Logger(mydf.stdout, mydf.verbose)
@@ -322,7 +326,7 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     for k,kpt in enumerate(uniq_kpts):
         kj2c[k], kj2c_negative[k], kj2ctag[k] = cholesky_decomposed_metric(mydf, kj2c[k])
 
-    t1 = log.timer_debug1('get_k_kpts j2c', *t1)
+    t1 = log.timer_debug1('get_k_kpts j2c', *t0)
 
 # estimate minimum memory requirement for j3c
     ao_loc = mydf.cell.ao_loc_nr()
@@ -460,12 +464,12 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
         tspans[7] += tock_tot - tick_tot - tspans[8]
 
         for tspan,tname in zip(tspans,tnames):
-            log.debug1('CPU time for get_k_kpts pass 1     %10s  %9.2f sec, '
+            log.debug2('CPU time for get_k_kpts pass 1     %10s  %9.2f sec, '
                        'wall time  %9.2f sec', tname, *tspan)
         for tspan,tname in zip(tspans,tnames):
             if 'ij' in tname or 'ji' in tname:
                 tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
-                log.debug1('CPU time for get_k_kpts pass 1 avg %10s  %9.2f sec, '
+                log.debug2('CPU time for get_k_kpts pass 1 avg %10s  %9.2f sec, '
                            'wall time  %9.2f sec', tname, *tspan_avg)
 
         t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 1'%(i0,i1), *t1)
@@ -513,6 +517,8 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     vk_kpts = vkR + vkI * 1j
     vk_kpts *= 1./nkpts
 
+    log.timer_debug1('get_k_kpts', *t0)
+
     return vk_kpts
 
 def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exxdiv=None,
@@ -549,8 +555,6 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exx
     if mydf.auxcell is None:
         mydf.build()
     naux = mydf.auxcell.nao_nr()
-
-    t1 = (logger.process_clock(), logger.perf_counter())
 
 # set up mo_coeff, mo_occ
     dm_kpts_ = lib.asarray(dm_kpts, order='C')

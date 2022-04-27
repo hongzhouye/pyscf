@@ -172,12 +172,12 @@ def ao2mo_e2_Lij_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
     tspans[4] = tspans[:4].sum(axis=0)
     tspans[5] -= tspans[4]
     for tspan,tname in zip(tspans,tnames):
-        log.debug1('CPU time for ao2mo pass1     %12s  %9.2f sec, '
+        log.debug2('CPU time for ao2mo pass1     %12s  %9.2f sec, '
                    'wall time  %9.2f sec', tname, *tspan)
     for tspan,tname in zip(tspans,tnames):
         if 'ki,kj' in tname or 'kj,ki' in tname:
             tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
-            log.debug1('CPU time for ao2mo pass1 avg %12s  %9.2f sec, '
+            log.debug2('CPU time for ao2mo pass1 avg %12s  %9.2f sec, '
                        'wall time  %9.2f sec', tname, *tspan_avg)
     t0 = log.timer_debug1('ao2mo pass1', *t0)
 
@@ -217,12 +217,12 @@ def ao2mo_e2_Lij_kernel1(mydf, mo_coeffs, kpts, bvk_kmesh=None, out=None):
         kq += 1
 
     for tspan,tname in zip(tspans,tnames):
-        log.debug1('CPU time for ao2mo pass2     %12s  %9.2f sec, '
+        log.debug2('CPU time for ao2mo pass2     %12s  %9.2f sec, '
                    'wall time  %9.2f sec', tname, *tspan)
     for tspan,tname in zip(tspans,tnames):
         if 'ki,kj' in tname or 'kj,ki' in tname:
             tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
-            log.debug1('CPU time for ao2mo pass2 avg %12s  %9.2f sec, '
+            log.debug2('CPU time for ao2mo pass2 avg %12s  %9.2f sec, '
                        'wall time  %9.2f sec', tname, *tspan_avg)
 
     t0 = log.timer_debug1('ao2mo pass2', *t0)

@@ -267,7 +267,7 @@ def kernel_s2(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, ver
                     gdi = gxi = None
 
             cput1 = log.timer_debug1('(ki,ka) = (%d,%d)'%(ki,ka), *cput1)
-            log.debug2('E_corr so far = %.15g (SS)  %.15g (OS)  %.15g',
+            log.debug2('So far E_corr = %.15g (SS)  %.15g (OS)  %.15g',
                        emp2_ss/nkpts, emp2_os/nkpts, (emp2_ss+emp2_os)/nkpts)
 
     log.timer(mp.__class__.__name__, *cput0)
@@ -427,9 +427,8 @@ def kernel_s2_incore(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_
                         eos += edi*0.5
                         gdi = gxi = None
 
-                cput1 = log.timer_debug1('(ki,ka) = (%d,%d)'%(ki,ka), *cput1)
-                log.debug2('E_corr so far = %.15g (SS)  %.15g (OS)  %.15g',
-                           emp2_ss/nkpts, emp2_os/nkpts, (emp2_ss+emp2_os)/nkpts)
+                if log.verbose >= logger.DEBUG2:
+                    cput1 = log.timer('(ki,ka) = (%d,%d)'%(ki,ka), *cput1)
         return ess, eos
 
     cput1 = (logger.process_clock(), logger.perf_counter())
@@ -453,7 +452,11 @@ def kernel_s2_incore(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_
             emp2_os += eos
             cderi2 = None
 
-            cput1 = log.timer_debug1('occblk [%d:%d,%d:%d]'%(*oslice,*oslice2), *cput1)
+            cput1 = log.timer('occblk [%d:%d,%d:%d]'%(*oslice,*oslice2), *cput1)
+            log.debug1('    CPU time for occblk')
+            log.debug1('Accum E_corr for occblk [%d:%d,%d:%d]  %.15g (SS)  %.15g (OS)  '
+                       '%.15g', *oslice, *oslice2, emp2_ss/nkpts, emp2_os/nkpts,
+                       (emp2_ss+emp2_os)/nkpts)
         cderi = None
 
     log.timer(mp.__class__.__name__, *cput0)
