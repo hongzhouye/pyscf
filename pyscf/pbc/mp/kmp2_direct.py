@@ -365,18 +365,12 @@ def kernel_s2_incore(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_
     noccblksize = min(nocc, max(1,int(np.floor(mem_avail*0.6/
                                                (2*naux*nvir*nkpts**2*16/1e6)))))
     if noccblksize >= nocc*0.5: noccblksize = nocc
-    # >>>>>
-    noccblksize = 1
-    # <<<<<
     occslices = [(i0,i1) for i0,i1 in lib.prange(0,nocc,noccblksize)]
     noccblk = len(occslices)
     log.info('noccblksize= %d  noccblk= %d', noccblksize, noccblk)
     log.debug('occslices= %s', occslices)
     # ovv-type intermidiate tensors: gdi, gxi, ejab, t2i
     blksize = int(np.floor(mem_avail*0.3 / (noccblksize*nvir**2.*4 * 16/1e6)))
-    # >>>>>
-    blksize = 1
-    # <<<<<
     cache_eris = not (mp.with_df_ints or mp.less_mem)
     emp2_ss = emp2_os = 0.
     kilist = range(nkpts) if mp.kilist is None else mp.kilist
