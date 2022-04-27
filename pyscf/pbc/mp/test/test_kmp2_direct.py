@@ -21,10 +21,10 @@ from pyscf.pbc import gto, scf, mp
 from pyscf import lib
 
 
-atom = 'He 0 0 0; He 1 0 0'
+atom = 'He1 0 0 0; He2 1 0 0'
 a = np.eye(3) * 3
-basis = 'cc-pvdz'
-verbose = 6
+basis = {'He1': 'cc-pvdz', 'He2': '6-31g'}
+verbose = 0
 cell = gto.Cell(atom=atom, a=a, basis=basis).set(verbose=verbose)
 cell.build()
 
@@ -53,7 +53,7 @@ class KnownValues(unittest.TestCase):
         mmp_direct = run_mp2(mf_direct)
 
         self.assertAlmostEqual(mmp._scf.e_tot, mmp_direct._scf.e_tot, 8)
-        self.assertAlmostEqual(mmp.e_corr, mmp_direct.e_corr, 8)
+        self.assertAlmostEqual(mmp.e_corr, mmp_direct.e_corr, 7)
 
     def test_211_restart(self):
         kmesh = (2,1,1)
@@ -124,6 +124,21 @@ class KnownValues(unittest.TestCase):
         ecorr2 += mmp2.e_corr
 
         self.assertAlmostEqual(mmp1.e_corr, ecorr2, 8)
+
+    def test_211_incore(self):
+        kmesh = (2,1,1)
+
+        mf = run_scf(kmesh)
+        mmp = run_mp2(mf)
+
+        dm0 = mf.make_rdm1()
+        mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
+        mmp_direct = mp.KMP2(mf_direct)
+        mmp_direct.incore_anyway = True
+        mmp_direct.kernel(with_t2=False)
+
+        self.assertAlmostEqual(mmp._scf.e_tot, mmp_direct._scf.e_tot, 8)
+        self.assertAlmostEqual(mmp.e_corr, mmp_direct.e_corr, 7)
 
 
 if __name__ == '__main__':
