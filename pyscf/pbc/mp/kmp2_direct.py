@@ -372,7 +372,6 @@ def kernel_s2_incore(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_
     # ovv-type intermidiate tensors: gdi, gxi, ejab, t2i
     blksize = int(np.floor(mem_avail*0.3 / (noccblksize*nvir**2.*4 * 16/1e6)))
     cache_eris = not (mp.with_df_ints or mp.less_mem)
-    emp2_ss = emp2_os = 0.
     kilist = range(nkpts) if mp.kilist is None else mp.kilist
 
     def _get_di(eris, cderi):
@@ -433,6 +432,7 @@ def kernel_s2_incore(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_
 
     cput1 = (logger.process_clock(), logger.perf_counter())
 
+    emp2_ss = emp2_os = 0.
     for ind,oslice in enumerate(occslices):
         cderi = eris.init_eris(mp, oslice=oslice)
         for jnd,oslice2 in enumerate(occslices):
@@ -453,7 +453,6 @@ def kernel_s2_incore(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_
             cderi2 = None
 
             cput1 = log.timer('occblk [%d:%d,%d:%d]'%(*oslice,*oslice2), *cput1)
-            log.debug1('    CPU time for occblk')
             log.debug1('Accum E_corr for occblk [%d:%d,%d:%d]  %.15g (SS)  %.15g (OS)  '
                        '%.15g', *oslice, *oslice2, emp2_ss/nkpts, emp2_os/nkpts,
                        (emp2_ss+emp2_os)/nkpts)

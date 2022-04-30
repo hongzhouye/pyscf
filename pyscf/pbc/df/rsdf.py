@@ -479,6 +479,7 @@ cell.dimension=3 with large vacuum.""")
 
         # integral-direct
         self.direct = False
+        self.semidirect = False
 
         # if True and kpts are gamma-inclusive, RSDF will use the bvk cell
         # trick for computing both j3c_SR and j3c_LR. If kpts are not
@@ -537,6 +538,7 @@ cell.dimension=3 with large vacuum.""")
         log.info('cell num shells = %d, num cGTOs = %d, num pGTOs = %d',
                  cell.nbas, cell.nao_nr(), cell.npgto_nr())
         log.info('direct = %s', self.direct)
+        log.info('semidirect = %s', self.semidirect)
         log.info('use_bvk = %s', self.use_bvk)
         log.info('precision_R = %s', self.precision_R)
         log.info('precision_G = %s', self.precision_G)
@@ -749,15 +751,17 @@ cell.dimension=3 with large vacuum.""")
         else:
             bvk_kmesh = None
 
+        semidirect = self.semidirect
+
         if kpts.shape == (3,):
             bvk_kmesh_ = None if kpts_band is None else bvk_kmesh
-            return rsdf_direct_jk.get_jk(mydf, dm, hermi, kpt, kpts_band, bvk_kmesh_,
-                                         exxdiv, with_j, with_k)
+            return rsdf_direct_jk.get_jk(mydf, dm, hermi, kpt, kpts_band, exxdiv,
+                                         with_j, with_k, bvk_kmesh_, semidirect)
 
         vj = vk = None
         if with_k:
             vk = rsdf_direct_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv,
-                                           bvk_kmesh=bvk_kmesh)
+                                           bvk_kmesh=bvk_kmesh, semidirect=semidirect)
         if with_j:
             vj = rsdf_direct_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band,
                                            bvk_kmesh=bvk_kmesh)

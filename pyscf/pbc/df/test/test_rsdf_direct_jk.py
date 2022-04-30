@@ -77,7 +77,7 @@ def test_j(kmesh, scaled_center):
 
     return np.asarray(errs), same_shape
 
-def test_k(kmesh, scaled_center):
+def test_k(kmesh, scaled_center, mydf2_kwargs):
     nao = cell.nao_nr()
     kpts = cell.make_kpts(kmesh, scaled_center=scaled_center)
     nkpts = len(kpts)
@@ -94,7 +94,7 @@ def test_k(kmesh, scaled_center):
 
     vk_ref_kpts = mydf.get_jk(dm_kpts, kpts=kpts, with_j=False, with_k=True)[1]
 
-    mydf2 = df.RSDF(cell, kpts)
+    mydf2 = df.RSDF(cell, kpts).set(**mydf2_kwargs)
     mydf2.direct = True
     mydf2.build()
 
@@ -183,6 +183,16 @@ class KnownValues(unittest.TestCase):
         kmesh = [3,2,1]
         scaled_center = scaled_center1
         errs, same_shape = test_k(kmesh, scaled_center)
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
+
+    def test_k_kpt_unshifted_semidirect(self):
+        ''' Gamma, semidirect
+        '''
+        kmesh = [1,1,1]
+        scaled_center = scaled_center0
+        errs, same_shape = test_k(kmesh, scaled_center, {'semidirect':True})
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)
         self.assertTrue(same_shape)

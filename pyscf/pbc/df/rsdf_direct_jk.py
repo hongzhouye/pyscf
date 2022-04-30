@@ -10,6 +10,8 @@ from pyscf.pbc.lib.kpts_helper import is_zero, gamma_point, member, unique
 from pyscf import __config__
 
 EIGH_DM_THRESH = getattr(__config__, 'pbc_gto_df_rsdf_jk_direct_eigh_dm_thresh', 1e-10)
+MAX_DISK_QUOTA = getattr(__config__, 'pbc_gto_df_rsdf_jk_direct_max_disk_quota', 1e6)
+                                                                        # 1e6 MB = 1TB
 REAL = np.float64
 COMPLEX = np.complex128
 
@@ -31,6 +33,7 @@ r''' Needed functions
 [x] get_k gamma uses ijL
 [x] get_k complex swap ij and ji
 [x] add a wrapper for single kpt
+[ ] get_k semi-direct
 '''
 
 
@@ -290,6 +293,139 @@ def get_k_kpts_gamma(mydf, smo):
     log.timer_debug1('get_k_kpts', *t0)
 
     return vk_kpts
+def get_k_kpts_gamma_semidirect(mydf, smo, max_disk_quota=MAX_DISK_QUOTA):
+    ''' Half-transformed 3c integrals are stored on disk
+    '''
+    t0 = (logger.process_clock(), logger.perf_counter())
+
+    cell = mydf.cell
+    log = logger.Logger(mydf.stdout, mydf.verbose)
+    verbose1 = mydf.verbose - 2
+
+    nset = len(smo)
+    nao = smo[0].shape[0]
+    naux = mydf.auxcell.nao_nr()
+    nmomax = np.max([mo.shape[1] for mo in smo])
+
+    j3c_dtype,j3c_dsize = REAL,8
+    vs_dtype,vs_dsize = REAL,8
+
+    vs = np.zeros((nset,nao,nao))
+
+    j2c = get_j2c(mydf, kpts=np.zeros((1,3)), verbose=verbose1)[0]
+    j2c, j2c_negative, j2ctag = cholesky_decomposed_metric(mydf, j2c, j2c_eig_always=True)
+    nauxcd = naux if j2ctag == 'CD' else j2c.shape[0]
+    t1 = log.timer_debug1('get_k_kpts j2c', *t0)
+
+# estimate minimum memory requirement for j3c
+    ao_loc = mydf.cell.ao_loc_nr()
+    naoshlmax = np.max(ao_loc[1:] - ao_loc[:-1])
+    j3cblksizemin = 2*naux*naoshlmax*nao
+    mem_j3cblk = j3cblksizemin*j3c_dsize/1e6
+
+# buffer for kXip and kYip
+    disk_avail = max_disk_quota
+    XYblksizemin = nset*naux*nao
+    disk_XYblk = XYblksizemin*vs_dsize/1e6
+    nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
+    log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
+    log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
+               nmomax//nmoblksize+nmomax%nmoblksize>0)
+    if nmoblksize < 1:
+        disk_need = disk_XYblk
+        log.error('Caching (L|[p]q) and (L|p[i]) needs at least %.1f MB of disk space, '
+                  'which exceeds the available disk quota %.1f MB', disk_need, disk_avail)
+        raise MemoryError
+
+# shranges for j3c
+    mem_avail = mydf.max_memory - lib.current_memory()[0]
+    j3cblksize = 2*naux
+    hxj3cblksize = 2*nmoblksize # 'hx' = half-xformed
+    mem_j3cblk = j3cblksize*j3c_dsize/1e6
+    aopblksize = min(nao*nao, int(np.floor(mem_avail*0.8*j3cblksize/
+                                           (j3cblksize+hxj3cblksize)/mem_j3cblk)))
+    shranges = _guess_shell_ranges(mydf.cell, aopblksize, 's1')
+    nstep = len(shranges)
+    aoloc = np.cumsum([0] + [x[2]//nao for x in shranges])
+    aopblksize = np.max([x[2] for x in shranges])
+    pblksize = aopblksize // nao
+    log.debug1('get_k mem_avail= %.2f MB  memj3cblk= %.2f MB', mem_avail, mem_j3cblk)
+    log.debug1('get_k aopblksize= %d  pblksize= %d  nblk= %d', aopblksize, pblksize,
+               len(shranges))
+    log.debug1('get_k shranges= %s', shranges)
+    buf_Lpi = np.empty(naux*pblksize*nmoblksize, dtype=REAL)
+    buf_Xip = np.empty(naux*pblksize*nmoblksize, dtype=REAL)
+    buf_Xiq = buf_Lpi
+
+    for i0,i1 in lib.prange(0,nmomax,nmoblksize):
+        di = i1 - i0
+
+        feri = lib.H5TmpFile()
+        spiX = feri.create_group('spiX')
+
+        istep = 0
+        for kcpqL in loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1',
+                              j3c_order='ijL', partition_iorj='j', shranges=shranges,
+                              verbose=verbose1):
+            dq = shranges[istep][2] // nao
+
+            pqL = kcpqL[0][0].reshape(nao,-1)
+            iqL = np.ndarray((di,naux*dq), dtype=REAL, buffer=buf_Lpi)
+            for iset in range(nset):
+                mo = smo[iset][:,i0:i1]
+                if j2ctag == 'CD':
+                    lib.ddot(mo.T, pqL, c=iqL)
+                    scipy.linalg.solve_triangular(j2c, iqL.reshape(di*dq,naux).T,
+                                                  lower=True, overwrite_b=True)
+                    piX = iqL
+                    spiX[f'{iset}/{istep}'] = piX.reshape(di,dq,nauxcd).\
+                                                  transpose(1,0,2).reshape(dq,di*nauxcd)
+                    piX = None
+                else:
+                    piX = np.ndarray((di*dq,nauxcd), dtype=REAL, buffer=buf_Xip)
+                    lib.ddot(mo.T, pqL, c=iqL)
+                    lib.ddot(iqL.reshape(di*dq,naux), j2c.T, c=piX)
+                    spiX[f'{iset}/{istep}'] = piX.reshape(di,dq,nauxcd).\
+                                                  transpose(1,0,2).reshape(dq,di*nauxcd)
+                    piX = None
+            pqL = iqL = kcpqL = None
+
+            istep += 1
+
+        t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 1'%(i0,i1), *t1)
+
+        for iset in range(nset):
+            for istep in range(nstep):
+                dp = shranges[istep][2] // nao
+                p0,p1 = aoloc[istep:istep+2]
+                piX = np.ndarray((dp,di*nauxcd), dtype=REAL, buffer=buf_Xip)
+                piX[:] = spiX[f'{iset}/{istep}'][()]
+                for jstep in range(istep,nstep):
+                    dq = shranges[jstep][2] // nao
+                    q0,q1 = aoloc[jstep:jstep+2]
+                    if jstep == istep:
+                        qiX = piX
+                    else:
+                        qiX = np.ndarray((dq,di*nauxcd), dtype=REAL, buffer=buf_Xiq)
+                        qiX[:] = spiX[f'{iset}/{jstep}'][()]
+                    vpq = lib.ddot(piX, qiX.T)
+                    vs[iset][p0:p1,q0:q1] += vpq
+                    if jstep != istep:
+                        vs[iset][q0:q1,p0:p1] += vpq.T
+
+                    qiX = None
+                piX = None
+        spiX = None
+
+        feri.close()
+
+        t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 2'%(i0,i1), *t1)
+
+    vk_kpts = vs.reshape((nset,1,nao,nao))
+
+    log.timer_debug1('get_k_kpts', *t0)
+
+    return vk_kpts
 def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     t0 = (logger.process_clock(), logger.perf_counter())
 
@@ -522,7 +658,7 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     return vk_kpts
 
 def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exxdiv=None,
-               bvk_kmesh=None):
+               bvk_kmesh=None, semidirect=False):
     r'''
 
     dm_kpts = (nset,nkpts,nao,nao) or (nset*nkpts,nao,nao)
@@ -589,36 +725,42 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exx
     j3c_isreal = gamma_point(kpts) and gamma_point(kpts_band)
     if mo_isreal and j3c_isreal and nkpts == 1: # gamma point
         smo = [kmoR[0] for kmoR in skmoR]
-        vk_kpts = get_k_kpts_gamma(mydf, smo)
+        if semidirect:
+            vk_kpts = get_k_kpts_gamma_semidirect(mydf, smo)
+        else:
+            vk_kpts = get_k_kpts_gamma(mydf, smo)
     else:
         if mo_isreal:
             skmoI = [[np.zeros_like(moR) for moR in kmoR] for kmoR in skmoR]
-        vk_kpts = get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=bvk_kmesh)
+        if semidirect:
+            raise NotImplementedError
+        else:
+            vk_kpts = get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=bvk_kmesh)
 
     if exxdiv == 'ewald':
         _ewald_exxdiv_for_G0(cell, kpts, dms, vk_kpts, kpts_band)
 
     return _format_jks(vk_kpts, dm_kpts, input_band, kpts)
-def get_k(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None, bvk_kmesh=None,
-          exxdiv=None):
+def get_k(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None, exxdiv=None,
+          bvk_kmesh=None, semidirect=False):
     kpts = np.asarray(kpt).reshape(1,3)
     dms = np.asarray(dm)
     vks = get_k_kpts(mydf, dm, hermi=hermi, kpts=kpts, kpts_band=kpts_band,
-                     bvk_kmesh=bvk_kmesh, exxdiv=exxdiv)
+                     exxdiv=exxdiv, bvk_kmesh=bvk_kmesh, semidirect=semidirect)
     if kpts_band is None:
         vks = vks.reshape(dms.shape)
     return vks
 
 ''' Wrapper for single kpt
 '''
-def get_jk(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None, bvk_kmesh=None,
-           exxdiv=None, with_j=True, with_k=True):
+def get_jk(mydf, dm, hermi=1, kpt=np.zeros(3), kpts_band=None, exxdiv=None,
+           with_j=True, with_k=True, bvk_kmesh=None, semidirect=False):
     vj = vk = None
     if with_j:
         vj = get_j(mydf, dm, hermi=hermi, kpt=kpt, kpts_band=kpts_band)
     if with_k:
         vk = get_k(mydf, dm, hermi=hermi, kpt=kpt, kpts_band=kpts_band,
-                   bvk_kmesh=bvk_kmesh, exxdiv=exxdiv)
+                   exxdiv=exxdiv, bvk_kmesh=bvk_kmesh, semidirect=semidirect)
     return vj, vk
 
 
