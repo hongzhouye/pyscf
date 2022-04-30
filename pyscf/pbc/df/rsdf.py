@@ -755,7 +755,7 @@ cell.dimension=3 with large vacuum.""")
 
         if kpts.shape == (3,):
             bvk_kmesh_ = None if kpts_band is None else bvk_kmesh
-            return rsdf_direct_jk.get_jk(mydf, dm, hermi, kpt, kpts_band, exxdiv,
+            return rsdf_direct_jk.get_jk(self, dm, hermi, kpts, kpts_band, exxdiv,
                                          with_j, with_k, bvk_kmesh_, semidirect)
 
         vj = vk = None
