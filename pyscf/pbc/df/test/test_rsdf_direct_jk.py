@@ -77,7 +77,7 @@ def test_j(kmesh, scaled_center):
 
     return np.asarray(errs), same_shape
 
-def test_k(kmesh, scaled_center, mydf2_kwargs):
+def test_k(kmesh, scaled_center, mydf2_kwargs={}):
     nao = cell.nao_nr()
     kpts = cell.make_kpts(kmesh, scaled_center=scaled_center)
     nkpts = len(kpts)
@@ -192,6 +192,36 @@ class KnownValues(unittest.TestCase):
         '''
         kmesh = [1,1,1]
         scaled_center = scaled_center0
+        errs, same_shape = test_k(kmesh, scaled_center, {'semidirect':True})
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
+
+    def test_k_kpt_shifted_semidirect(self):
+        ''' Single twisted angle, semidirect
+        '''
+        kmesh = [1,1,1]
+        scaled_center = scaled_center1
+        errs, same_shape = test_k(kmesh, scaled_center, {'semidirect':True})
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
+
+    def test_k_kpts_unshifted_semidirect(self):
+        ''' Gamma-included kmesh, semidirect
+        '''
+        kmesh = [3,2,1]
+        scaled_center = scaled_center0
+        errs, same_shape = test_k(kmesh, scaled_center, {'semidirect':True})
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
+
+    def test_k_kpts_shifted_semidirect(self):
+        ''' Twisted kmesh, semidirect
+        '''
+        kmesh = [3,2,1]
+        scaled_center = scaled_center1
         errs, same_shape = test_k(kmesh, scaled_center, {'semidirect':True})
         err = np.max(errs)
         self.assertAlmostEqual(err, 0., 10)

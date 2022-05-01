@@ -33,7 +33,9 @@ r''' Needed functions
 [x] get_k gamma uses ijL
 [x] get_k complex swap ij and ji
 [x] add a wrapper for single kpt
-[ ] get_k semi-direct
+[x] get_k semi-direct for Gamma point
+[x] get_k semi-direct for general k-point(s)
+[ ] get_k and get_j together for Gamma point
 '''
 
 
@@ -656,6 +658,348 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     log.timer_debug1('get_k_kpts', *t0)
 
     return vk_kpts
+def get_k_kpts_complex_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
+                                  max_disk_quota=MAX_DISK_QUOTA):
+    t0 = (logger.process_clock(), logger.perf_counter())
+
+    cell = mydf.cell
+    log = logger.Logger(mydf.stdout, mydf.verbose)
+    verbose1 = mydf.verbose - 2
+
+    nset = len(skmoR)
+    nkpts = len(kpts)
+    nband = nkpts
+    nao = skmoR[0][0].shape[0]
+    naux = mydf.auxcell.nao_nr()
+    nmomax = np.max([moR.shape[1] for kmoR in skmoR for moR in kmoR])
+
+    j3c_dtype,j3c_dsize = COMPLEX,16
+    vk_dtype,vk_dsize = COMPLEX,16
+
+    vkR = np.zeros((nset,nband,nao,nao))
+    vkI = np.zeros((nset,nband,nao,nao))
+
+    kptij_lst = get_kptij_lst(kpts)
+    nkptij = len(kptij_lst)
+    uniq_q_loop = [x for x in loop_uniq_q(mydf, kptij_lst=kptij_lst, verbose=0)]
+    uniq_kpts = [x[0] for x in uniq_q_loop]
+    nkpts_uniq = len(uniq_kpts)
+    nkptjmax = np.max([len(x[1]) for x in uniq_q_loop])
+    nkptijswap = sum([1 for x in uniq_q_loop for kptj in x[1]
+                      if _safe_member(kptj, kpts)!=_safe_member(kptj-x[0], kpts)])
+
+# evaluate and invert j2c
+    kj2c = get_j2c(mydf, kpts=uniq_kpts, verbose=verbose1)
+    kj2c_negative = [None] * nkpts_uniq
+    kj2ctag = [None] * nkpts_uniq
+    knauxcd = [None] * nkpts_uniq
+    for k,kpt in enumerate(uniq_kpts):
+        j2c, kj2c_negative[k], kj2ctag[k] = cholesky_decomposed_metric(mydf, kj2c[k])
+        if kj2ctag[k] == 'CD':
+            kj2c[k] = j2c
+        else:
+            kj2c[k] = (np.asarray(j2c.real, order='C'), np.asarray(j2c.imag, order='C'))
+        knauxcd[k] = j2c.shape[0]
+        j2c = None
+
+    t1 = log.timer_debug1('get_k_kpts j2c', *t0)
+
+# estimate minimum memory requirement for j3c
+    ao_loc = mydf.cell.ao_loc_nr()
+    naoshlmax = np.max(ao_loc[1:] - ao_loc[:-1])
+    j3cblksizemin = (nkptij+nkptjmax)*naux*naoshlmax*nao
+    mem_j3cblk = j3cblksizemin*j3c_dsize/1e6
+
+# buffer for kXip and kYip
+    # mem_avail = mydf.max_memory - lib.current_memory()[0] - mem_j3cblk
+    disk_avail = max_disk_quota
+    XYblksizemin = (nset*(nkptij+nkptijswap)+2)*naux*nao    # add 2 for Lpi, Xpi
+    disk_XYblk = XYblksizemin*vk_dsize/1e6
+    nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
+    log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
+    log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
+               nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
+    if nmoblksize < 1:
+        disk_need = disk_XYblk
+        log.error('Caching (L|[p]q) and (L|p[i]) needs at least %.1f MB of disk space, '
+                  'which exceeds the available disk quota %.1f MB', disk_need, disk_avail)
+        raise MemoryError
+
+# shranges for j3c
+    mem_avail = mydf.max_memory - lib.current_memory()[0]
+    j3cblksize = (nkptij+nkptjmax+1)*naux # add 1 for Lpq
+    if nkptijswap > 0:
+        j3cblksize += naux # add 1 for Lqp
+    mem_j3cblk = j3cblksize*j3c_dsize/1e6
+    aopblksize = min(nao*nao, mem_avail*0.7/mem_j3cblk)
+    shranges = _guess_shell_ranges(mydf.cell, aopblksize, 's1')
+    nstep = len(shranges)
+    aoloc = np.cumsum([0] + [x[2]//nao for x in shranges])
+    aopblksize = np.max([x[2] for x in shranges])
+    pblksize = aopblksize // nao
+    log.debug1('get_k mem_avail= %.2f MB  memj3cblk= %.2f MB', mem_avail, mem_j3cblk)
+    log.debug1('get_k aopblksize= %d  pblksize= %d  nblk= %d', aopblksize, pblksize,
+               len(shranges))
+    log.debug1('get_k shranges= %s', shranges)
+
+    def split_bufC(bufC):
+        bufR = np.ndarray(bufC.size*2, dtype=REAL, buffer=bufC)
+        bufI = bufR[bufC.size:]
+        return bufR, bufI
+
+    ''' Notations:
+        L: naux
+        A | a: nao | naoblksize == pblksize
+        O | o: nmo | nmoblksize
+        r: nmoblksize_ijswap
+    '''
+    size_LAa = naux*nao*pblksize
+    buf_LAaC = np.empty(size_LAa, dtype=COMPLEX)
+    buf_LAaR, buf_LAaI = split_bufC(buf_LAaC)
+    size_Lao = naux*pblksize*nmoblksize
+    buf_LaoC = np.empty(size_Lao, dtype=COMPLEX)
+    buf_LaoR, buf_LaoI = split_bufC(buf_LaoC)
+    buf2_LaoC = np.empty(size_Lao, dtype=COMPLEX)
+    buf2_LaoR, buf2_LaoI = split_bufC(buf2_LaoC)
+    size_aa = pblksize*pblksize
+    buf_aaC = np.empty(size_aa, dtype=COMPLEX)
+    buf_aaR, buf_aaI = split_bufC(buf_aaC)
+
+    if nkptijswap > 0:
+        buf2_LAaC = np.empty(size_LAa, dtype=COMPLEX)
+        buf2_LAaR, buf2_LAaI = split_bufC(buf2_LAaC)
+
+        mem_avail = mydf.max_memory - lib.current_memory()[0]
+        nmoblksize_ijswap = min(nmoblksize,
+                                int(np.floor(mem_avail*0.7/(3*naux*nao*j3c_dsize/1e6))))
+        size_LAr = naux*nao*nmoblksize_ijswap
+        buf_LArC = np.empty(size_LAr, dtype=COMPLEX)
+        buf_LArR, buf_LArI = split_bufC(buf_LArC)
+        buf2_LArC = np.empty(size_LAr, dtype=COMPLEX)
+        buf2_LArR, buf2_LArI = split_bufC(buf2_LArC)
+
+    for i0,i1 in lib.prange(0,nmomax,nmoblksize):
+        di = i1 - i0
+
+        feri = lib.H5TmpFile()
+        kXipR = feri.create_group('kXipR')
+        kXipI = feri.create_group('kXipI')
+        kYipR = feri.create_group('kYipR')
+        kYipI = feri.create_group('kYipI')
+
+        tspans = np.zeros((9,2))
+        tnames = ['buffer', 'Lpq ji', 'Lpi ji', 'kXip ji', 'Lpq ij', 'Lpi ij', 'kXip ij',
+                  'j3c', 'xform']
+        tick_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
+
+        istep = -1
+        for kcLpq in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='i',
+                              j3c_order='Lij', shranges=shranges, bvk_kmesh=bvk_kmesh,
+                              verbose=verbose1):
+            istep += 1
+            dp = shranges[istep][2] // nao
+            p0,p1 = aoloc[istep:istep+2]
+
+            tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+
+            LpqR = np.ndarray((naux,dp,nao), dtype=REAL, buffer=buf_LAaR)
+            LpqI = np.ndarray((naux,dp,nao), dtype=REAL, buffer=buf_LAaI)
+            LpiR = np.ndarray((naux*dp,di), dtype=REAL, buffer=buf_LaoR)
+            LpiI = np.ndarray((naux*dp,di), dtype=REAL, buffer=buf_LaoI)
+            if nkptijswap > 0:
+                LqpR = np.ndarray((naux,nao,dp), dtype=REAL, buffer=buf2_LAaR)
+                LqpI = np.ndarray((naux,nao,dp), dtype=REAL, buffer=buf2_LAaI)
+
+            tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+            tspans[0] += tock - tick
+
+            ijswap = -1
+            kq = -1
+            for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
+                kq += 1
+                j2c = kj2c[kq]
+                j2ctag = kj2ctag[kq]
+                for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
+                    kj = _safe_member(kptj, kpts)
+                    ki = _safe_member(kptj-kpt, kpts)
+                    tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    LpqR[:] = kcLpq[ji][0].real.reshape(naux,dp,nao)
+                    LpqI[:] = kcLpq[ji][0].imag.reshape(naux,dp,nao)
+                    tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[4] += tock - tick
+                    for iset in range(nset):
+                        moR = skmoR[iset][kj][:,i0:i1]
+                        moI = skmoI[iset][kj][:,i0:i1]
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        zdotNN(LpqR.reshape(-1,nao), LpqI.reshape(-1,nao), moR, moI,
+                               1, LpiR, LpiI)
+                        tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[5] += tock - tick
+                        key = f'{ji}/{iset}/{istep}'
+                        if j2ctag == 'CD':
+                            Xip = np.ndarray((naux,di*dp), dtype=COMPLEX,
+                                             buffer=buf2_LaoC)
+                            Xip.real = LpiR.reshape(naux,dp,di).\
+                                            transpose(0,2,1).reshape(naux,di*dp)
+                            Xip.imag = LpiI.reshape(naux,dp,di).\
+                                            transpose(0,2,1).reshape(naux,di*dp)
+                            Xip = scipy.linalg.solve_triangular(j2c, Xip, lower=True)
+                            kXipR[key] = Xip.real.reshape(naux*di,dp)
+                            kXipI[key] = Xip.imag.reshape(naux*di,dp)
+                            Xip = None
+                        else:
+                            XpiR = np.ndarray((naux,di*dp), dtype=REAL, buffer=buf2_LaoR)
+                            XpiI = np.ndarray((naux,di*dp), dtype=REAL, buffer=buf2_LaoI)
+                            j2cR, j2cI = j2c
+                            zdotNN(j2cR, j2cI, LpiR.reshape(naux,-1),
+                                   LpiI.reshape(naux,-1), 1, XpiR, XpiI)
+                            kXipR[key] = XpiR.reshape(naux,dp,di).\
+                                              transpose(0,2,1).reshape(-1,dp)
+                            kXipI[key] = XpiI.reshape(naux,dp,di).\
+                                              transpose(0,2,1).reshape(-1,dp)
+                            j2cR = j2cI = XpiR = XpiI = None
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[6] += tick - tock
+                    if ki != kj:
+                        ijswap += 1
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        LqpR[:] = LpqR.transpose(0,2,1)
+                        LqpI[:] = LpqI.transpose(0,2,1)
+                        tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[1] += tock - tick
+                        rstep = -1
+                        for ri0,ri1 in lib.prange(0,di,nmoblksize_ijswap):
+                            rstep += 1
+                            dr = ri1 - ri0
+                            r0 = ri0 + i0
+                            r1 = ri1 + i0
+                            LqrR = np.ndarray((naux*nao,dr), dtype=REAL, buffer=buf_LArR)
+                            LqrI = np.ndarray((naux*nao,dr), dtype=REAL, buffer=buf_LArI)
+                            for iset in range(nset):
+                                moR = skmoR[iset][ki][p0:p1,r0:r1]
+                                moI = skmoI[iset][ki][p0:p1,r0:r1]
+                                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                                zdotNC(LqpR.reshape(-1,dp), LqpI.reshape(-1,dp), moR, moI,
+                                       1, LqrR, LqrI)
+                                tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                                tspans[2] += tock - tick
+                                key = f'{ijswap}/{iset}/{rstep}'
+                                if key not in kYipR:
+                                    kYipR[key] = LqrR.reshape(naux,nao,dr).\
+                                                      transpose(0,2,1).reshape(naux,-1)
+                                    kYipI[key] = LqrI.reshape(naux,nao,dr).\
+                                                      transpose(0,2,1).reshape(naux,-1)
+                                else:
+                                    kYipR[key][()] += LqrR.reshape(naux,nao,dr).\
+                                                           transpose(0,2,1).reshape(naux,-1)
+                                    kYipI[key][()] += LqrI.reshape(naux,nao,dr).\
+                                                           transpose(0,2,1).reshape(naux,-1)
+                                tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                                tspans[3] += tick - tock
+                            LqrR = LqrI = None
+
+            kcLpq = None
+            LpqR = LpqI = LpiR = LpiI = None
+            LqpR = LqpI = None
+
+        tock_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
+        tspans[8] = tspans[:7].sum(axis=0)
+        tspans[7] += tock_tot - tick_tot - tspans[8]
+
+        for tspan,tname in zip(tspans,tnames):
+            log.debug2('CPU time for get_k_kpts pass 1     %10s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan)
+        for tspan,tname in zip(tspans,tnames):
+            if 'ij' in tname or 'ji' in tname:
+                tspan_avg = tspan / max(1, nkptij if 'ji' in tname else nkptijswap)
+                log.debug2('CPU time for get_k_kpts pass 1 avg %10s  %9.2f sec, '
+                           'wall time  %9.2f sec', tname, *tspan_avg)
+
+        t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 1'%(i0,i1), *t1)
+
+        kq = -1
+        ijswap = -1
+        for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
+            kq += 1
+            if nkptijswap > 0:
+                j2c = kj2c[kq]
+                j2ctag = kj2ctag[kq]
+            for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
+                kj = _safe_member(kptj, kpts)
+                ki = _safe_member(kptj-kpt, kpts)
+                for iset in range(nset):
+                    for istep in range(nstep):
+                        dp = shranges[istep][2] // nao
+                        p0,p1 = aoloc[istep:istep+2]
+                        XipR = np.ndarray((naux*di,dp), dtype=REAL, buffer=buf_LaoR)
+                        XipI = np.ndarray((naux*di,dp), dtype=REAL, buffer=buf_LaoI)
+                        XipR[:] = kXipR[f'{ji}/{iset}/{istep}'][()]
+                        XipI[:] = kXipI[f'{ji}/{iset}/{istep}'][()]
+                        for jstep in range(istep,nstep):
+                            dq = shranges[jstep][2] // nao
+                            q0,q1 = aoloc[jstep:jstep+2]
+                            vktmpR = np.ndarray((dp,dq), dtype=REAL, buffer=buf_aaR)
+                            vktmpI = np.ndarray((dp,dq), dtype=REAL, buffer=buf_aaI)
+                            if istep == jstep:
+                                XiqR = XipR
+                                XiqI = XipI
+                            else:
+                                XiqR = np.ndarray((naux*di,dq), dtype=REAL,
+                                                  buffer=buf2_LaoR)
+                                XiqI = np.ndarray((naux*di,dq), dtype=REAL,
+                                                  buffer=buf2_LaoI)
+                                XiqR[:] = kXipR[f'{ji}/{iset}/{jstep}'][()]
+                                XiqI[:] = kXipI[f'{ji}/{iset}/{jstep}'][()]
+                            zdotNC(XipR.T, XipI.T, XiqR, XiqI, 1, vktmpR, vktmpI, 0)
+                            vkR[iset,ki][p0:p1,q0:q1] += vktmpR
+                            vkI[iset,ki][p0:p1,q0:q1] += vktmpI
+                            if istep != jstep:
+                                vkR[iset,ki][q0:q1,p0:p1] += vktmpR.T
+                                vkI[iset,ki][q0:q1,p0:p1] -= vktmpI.T
+                            vktmpR = vktmpI = XiqR = XiqI = None
+                        XipR = XipI = None
+                if ki != kj:
+                    ijswap += 1
+                    for iset in range(nset):
+                        rstep = -1
+                        for ri0,ri1 in lib.prange(0,di,nmoblksize_ijswap):
+                            rstep += 1
+                            dr = ri1 - ri0
+                            YrpR = np.ndarray((naux*dr,nao), dtype=REAL, buffer=buf_LArR)
+                            YrpI = np.ndarray((naux*dr,nao), dtype=REAL, buffer=buf_LArI)
+                            key = f'{ijswap}/{iset}/{rstep}'
+                            if j2ctag == 'CD':
+                                Yrp = np.ndarray((naux,dr*nao), dtype=COMPLEX,
+                                                 buffer=buf2_LArC)
+                                Yrp.real = kYipR[key][()]
+                                Yrp.imag = kYipI[key][()]
+                                Yrp = scipy.linalg.solve_triangular(j2c, Yrp, lower=True)
+                                YrpR[:] = Yrp.real.reshape(-1,nao)
+                                YrpI[:] = Yrp.imag.reshape(-1,nao)
+                                Yrp = None
+                            else:
+                                Yrp2R = np.ndarray((naux*dr,nao), dtype=REAL,
+                                                  buffer=buf2_LArR)
+                                Yrp2I = np.ndarray((naux*dr,nao), dtype=REAL,
+                                                  buffer=buf2_LArI)
+                                Yrp2R = kYipR[key][()]
+                                Yrp2I = kYipI[key][()]
+                                j2cR, j2cI = j2c
+                                zdotNN(j2cR, j2cI, Yrp2R, Yrp2I, 1,
+                                       YrpR.reshape(naux,-1), YrpI.reshape(naux,-1))
+                                j2cR = j2cI = Yrp2R = Yrp2I = None
+                            zdotCN(YrpR.T, YrpI.T, YrpR, YrpI, 1, vkR[iset,kj],
+                                   vkI[iset,kj], 1)
+                            YrpR = YrpI = None
+
+        t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 2'%(i0,i1), *t1)
+
+    vk_kpts = vkR + vkI * 1j
+    vk_kpts *= 1./nkpts
+
+    log.timer_debug1('get_k_kpts', *t0)
+
+    return vk_kpts
 
 def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exxdiv=None,
                bvk_kmesh=None, semidirect=False):
@@ -733,7 +1077,8 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exx
         if mo_isreal:
             skmoI = [[np.zeros_like(moR) for moR in kmoR] for kmoR in skmoR]
         if semidirect:
-            raise NotImplementedError
+            vk_kpts = get_k_kpts_complex_semidirect(mydf, skmoR, skmoI, kpts,
+                                                    bvk_kmesh=bvk_kmesh)
         else:
             vk_kpts = get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=bvk_kmesh)
 
