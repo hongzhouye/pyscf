@@ -190,6 +190,12 @@ def get_j2c_lr(mydf, auxcell=None, kpts=None, omega=None, mesh=None, out=None,
     return out
 def get_j2c(mydf, auxcell=None, kpts=None, omega=None, mesh=None, exxdiv=None,
             verbose=None):
+    if auxcell is None: auxcell = mydf.auxcell
+    if kpts is None: kpts = np.zeros((1,3))
+    if verbose is None: verbose = mydf.verbose
+    if omega is None: omega = mydf.omega_j2c
+    omega_j2c = abs(omega)
+    
     j2c = get_j2c_sr(mydf, auxcell=auxcell, kpts=kpts, omega=omega, verbose=verbose)
     j2c = remove_j2c_sr_G0_(mydf, j2c, kpts=kpts, auxcell=auxcell, omega=omega,
                             exxdiv=exxdiv)
