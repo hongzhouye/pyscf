@@ -16,14 +16,14 @@ J3C_ORDER = getattr(__config__, 'pbc_df_rsdf_direct_helper_j3c_order', 'Lij')
 
 ''' These functions exist in previous implementations but are updated here.
 '''
-def get_aux_chg(auxcell):
+def get_aux_chg(auxcell, shls_slice=None):
     r""" Compute charge of the auxiliary basis, \int_Omega dr chi_P(r)
 
     Returns:
         The function returns a 1d numpy array of size auxcell.nao_nr().
     """
     G0 = np.zeros((1, 3))
-    return ft_ao.ft_ao(auxcell, G0)[0].real
+    return ft_ao.ft_ao(auxcell, G0, shls_slice=shls_slice)[0].real
 
 
 ''' Needed functions
@@ -44,6 +44,7 @@ def get_aux_chg(auxcell):
 [x] support different j3c order
 [x] support aosym='s2' for j_only mode
 [ ] support separation of real and imag of j3c
+[x] omega optimizer
 '''
 
 def kpts_to_kmesh(cell, kpts, kint_max=KINT_MAX):
@@ -195,7 +196,7 @@ def get_j2c(mydf, auxcell=None, kpts=None, omega=None, mesh=None, exxdiv=None,
     if verbose is None: verbose = mydf.verbose
     if omega is None: omega = mydf.omega_j2c
     omega_j2c = abs(omega)
-    
+
     j2c = get_j2c_sr(mydf, auxcell=auxcell, kpts=kpts, omega=omega, verbose=verbose)
     j2c = remove_j2c_sr_G0_(mydf, j2c, kpts=kpts, auxcell=auxcell, omega=omega,
                             exxdiv=exxdiv)
@@ -426,7 +427,7 @@ def remove_j3c_sr_G0_q_(mydf, j3c, shls_slice, kptij_lst, cell=None, auxcell=Non
             assert(nao_pair_j3c == nao_pair)
 
             g0 = np.pi/omega**2./cell.vol
-            qaux = get_aux_chg(auxcell)
+            qaux = get_aux_chg(auxcell, shls_slice=shls_slice[-2:])
             verbose_loop = mydf.verbose - 2 # print only if verbose>=8
             for q, adapted_kptjs, adapted_ji_idx in loop_uniq_q(mydf,
                                                                 kptij_lst=kptij_lst,
@@ -821,6 +822,102 @@ def loop_j3c(mydf, kptij_lst=np.zeros((1,2,3)), aosym='s1', j3c_order=J3C_ORDER,
 
         yield j3c
         j3c = None
+
+def search_best_omega(mydf, omega_mesh=None, nsample=3, kptij_lst=np.zeros((1,2,3)),
+                      verbose=None):
+    log = logger.new_logger(mydf, verbose)
+
+    if omega_mesh is None: omega_mesh = np.arange(0.1,0.41,0.1)
+    log.debug('Searching best omega from %s', omega_mesh)
+    n = len(omega_mesh)
+
+    aosym = 's1'
+    j3c_order = 'Lij'
+    cell = mydf.cell
+    auxcell = mydf.auxcell
+    nao = cell.nao_nr()
+    naoaux = auxcell.nao_nr()
+
+    nkptij = len(kptij_lst)
+    xs = [x for x in loop_uniq_q(mydf, kptij_lst=kptij_lst, verbose=0)]
+    uniq_kpts = np.asarray([x[0] for x in xs])
+    xs = None
+
+    if isinstance(mydf.use_bvk, bool):
+        use_bvk_R = use_bvk_G = mydf.use_bvk
+    else:
+        use_bvk_R,  use_bvk_G = mydf.use_bvk
+    if use_bvk_R or use_bvk_G:
+        from pyscf.pbc.df.rsdf_direct_helper import kpts_to_kmesh
+        bvk_kmesh0 = kpts_to_kmesh(cell, mydf.kpts)
+        bvk_kmesh = [bvk_kmesh0 if use_bvk_R else None,
+                     bvk_kmesh0 if use_bvk_G else None]
+    else:
+        bvk_kmesh = None
+    if hasattr(bvk_kmesh, '__len__') and len(bvk_kmesh) == 2:
+        bvk_kmesh_R , bvk_kmesh_G = bvk_kmesh
+    else:
+        bvk_kmesh_R = bvk_kmesh_G = bvk_kmesh
+
+# determine shls_slice
+    nbas = cell.nbas
+    nbasaux = auxcell.nbas
+    mauxshl = 10
+    ishls = np.random.randint(nbas, size=nsample)
+    jshls = np.random.randint(nbas, size=nsample)
+    kshls = np.random.randint(nbasaux-mauxshl, size=nsample)
+    shls_slice_list = [(ishl,ishl+1,jshl,jshl+1,kshl,kshl+mauxshl)
+                       for ishl,jshl,kshl in zip(ishls,jshls,kshls)]
+    log.debug('Using shls_slice= %s for timing', shls_slice_list)
+
+    dts = np.zeros((n,2))
+    for i,omega in enumerate(omega_mesh):
+        with lib.temporary_env(mydf.cell, verbose=0):
+            mydf_ = df.RSDF(mydf.cell, mydf.kpts).set(direct=mydf.direct,
+                                                      use_bvk=mydf.use_bvk,
+                                                      precision_R=mydf.precision_R,
+                                                      precision_G=mydf.precision_G,
+                                                      omega=omega, verbose=0,
+                                                      auxbasis=mydf.auxcell._basis)
+            mydf_.build()
+        # precompute int3c
+        int3c = get_int3c(cell, auxcell, mydf_.omega,
+                          precision=mydf_.precision_R,
+                          kptij_lst=kptij_lst, verbose=0,
+                          bvk_kmesh=bvk_kmesh_R,
+                          aosym=aosym, j3c_order=j3c_order)
+        # precompute kgLR/I
+        mesh = mydf_.mesh_compact
+        b = cell.reciprocal_vectors()
+        Gv, Gvbase, kws = cell.get_Gv_weights(mesh)
+        gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
+        ngrids = gxyz.shape[0]
+        aux_loc = auxcell.ao_loc_nr()
+        # timing ints
+        for shls_slice in shls_slice_list:
+            # precompute kgLR/I
+            auxshls_slice = shls_slice[-2:]
+            naoaux_blk = aux_loc[auxshls_slice[1]] - aux_loc[auxshls_slice[0]]
+            kgLRI = np.empty((len(uniq_kpts),2,ngrids,naoaux_blk), dtype=np.float64)
+            for k,kpt in enumerate(uniq_kpts):
+                Gaux = ft_ao.ft_ao(auxcell, Gv, auxshls_slice, b, gxyz, Gvbase, kpt)
+                wcoulG_lr = mydf_.weighted_coulG(omega, kpt, False, mesh)
+                Gaux *= wcoulG_lr.reshape(-1,1)
+                kgLRI[k,0] = Gaux.real
+                kgLRI[k,1] = Gaux.imag
+                Gaux = None
+            t0 = np.asarray((logger.process_clock(), logger.perf_counter()))
+            get_j3c(mydf_, kptij_lst=kptij_lst, shls_slice=shls_slice,
+                    aosym=aosym, j3c_order=j3c_order, bvk_kmesh_R=bvk_kmesh_R,
+                    bvk_kmesh_G=bvk_kmesh_G, verbose=0, int3c=int3c, kgLRI=kgLRI)
+            t1 = np.asarray((logger.process_clock(), logger.perf_counter()))
+            dts[i] += t1 - t0
+        log.debug('omega= %5.2f   tcpu= %9.6f sec  twall= %9.6f sec', omega, *dts[i])
+    imin = np.argmin(dts[:,1])
+    omega = omega_mesh[imin]
+    log.info('Optimal omega= %5.2f', omega)
+
+    return omega
 
 
 def get_kptij_lst(kpts, kpts_band=None, j_only=False):
