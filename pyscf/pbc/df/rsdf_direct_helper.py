@@ -920,7 +920,7 @@ def search_best_omega(mydf, omega_mesh=None, nsample=3, kptij_lst=np.zeros((1,2,
     return omega
 
 
-def get_kptij_lst(kpts, kpts_band=None, j_only=False):
+def get_kptij_lst(kpts, kpts_band=None, j_only=False, ksym='s2'):
     uniq_idx = unique(kpts)[1]
     kpts = np.asarray(kpts)[uniq_idx]
     if kpts_band is None:
@@ -931,7 +931,10 @@ def get_kptij_lst(kpts, kpts_band=None, j_only=False):
         kall = np.vstack([kpts,kband_uniq])
         kptij_lst = np.hstack((kall,kall)).reshape(-1,2,3)
     else:
-        kptij_lst = [(ki, kpts[j]) for i, ki in enumerate(kpts) for j in range(i+1)]
+        if ksym == 's2':
+            kptij_lst = [(ki, kpts[j]) for i, ki in enumerate(kpts) for j in range(i+1)]
+        else:
+            kptij_lst = [(ki, kj) for ki in kpts for kj in kpts]
         kptij_lst.extend([(ki, kj) for ki in kband_uniq for kj in kpts])
         kptij_lst.extend([(ki, ki) for ki in kband_uniq])
         kptij_lst = np.asarray(kptij_lst)

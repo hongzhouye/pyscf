@@ -480,6 +480,7 @@ cell.dimension=3 with large vacuum.""")
         # integral-direct
         self.direct = False
         self.semidirect = False
+        self.ksym = 's2' # TODO: make it method specific (e.g., ksym for exx, ao2mo etc.)
 
         # if True and kpts are gamma-inclusive, RSDF will use the bvk cell
         # trick for computing both j3c_SR and j3c_LR. If kpts are not
@@ -752,6 +753,7 @@ cell.dimension=3 with large vacuum.""")
             bvk_kmesh = None
 
         semidirect = self.semidirect
+        ksym = self.ksym
 
         if kpts.shape == (3,):
             bvk_kmesh_ = None if kpts_band is None else bvk_kmesh
@@ -761,7 +763,8 @@ cell.dimension=3 with large vacuum.""")
         vj = vk = None
         if with_k:
             vk = rsdf_direct_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv,
-                                           bvk_kmesh=bvk_kmesh, semidirect=semidirect)
+                                           bvk_kmesh=bvk_kmesh, semidirect=semidirect,
+                                           ksym=ksym)
         if with_j:
             vj = rsdf_direct_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band,
                                            bvk_kmesh=bvk_kmesh)
