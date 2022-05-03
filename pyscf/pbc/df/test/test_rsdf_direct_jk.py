@@ -257,6 +257,36 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(err, 0., 10)
         self.assertTrue(same_shape)
 
+    def test_k_kpt_shifted_ks1_semidirect(self):
+        ''' Single twisted angle, s1 symm for kptij, semidirect
+        '''
+        kmesh = [1,1,1]
+        scaled_center = scaled_center1
+        errs, same_shape = test_k(kmesh, scaled_center, {'ksym':'s1','semidirect':True})
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
+
+    def test_k_kpts_unshifted_ks1_semidirect(self):
+        ''' Gamma-included kmesh, s1 symm for kptij, semidirect
+        '''
+        kmesh = [3,2,1]
+        scaled_center = scaled_center0
+        errs, same_shape = test_k(kmesh, scaled_center, {'ksym':'s1','semidirect':True})
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
+
+    def test_k_kpts_shifted_ks1_semidirect(self):
+        ''' Gamma-included kmesh, s1 symm for kptij, semidirect
+        '''
+        kmesh = [3,2,1]
+        scaled_center = scaled_center1
+        errs, same_shape = test_k(kmesh, scaled_center, {'ksym':'s1','semidirect':True})
+        err = np.max(errs)
+        self.assertAlmostEqual(err, 0., 10)
+        self.assertTrue(same_shape)
+
 
 if __name__ == '__main__':
     print("Full Tests for rsdf_direct")

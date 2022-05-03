@@ -1489,6 +1489,255 @@ def get_k_kpts_complex_ks1(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     log.timer_debug1('get_k_kpts', *t0)
 
     return vk_kpts
+def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
+                                      max_disk_quota=MAX_DISK_QUOTA):
+    t0 = (logger.process_clock(), logger.perf_counter())
+
+    cell = mydf.cell
+    log = logger.Logger(mydf.stdout, mydf.verbose)
+    verbose1 = mydf.verbose - 2
+
+    nset = len(skmoR)
+    nkpts = len(kpts)
+    nband = nkpts
+    nao = skmoR[0][0].shape[0]
+    naux = mydf.auxcell.nao_nr()
+    nmomax = np.max([moR.shape[1] for kmoR in skmoR for moR in kmoR])
+
+    j3c_dtype,j3c_dsize = COMPLEX,16
+    vk_dtype,vk_dsize = COMPLEX,16
+
+    vkR = np.zeros((nset,nband,nao,nao))
+    vkI = np.zeros((nset,nband,nao,nao))
+
+    kptij_lst = get_kptij_lst(kpts, ksym='s1')
+    nkptij = len(kptij_lst)
+    uniq_q_loop = [x for x in loop_uniq_q(mydf, kptij_lst=kptij_lst, verbose=0)]
+    uniq_kpts = [x[0] for x in uniq_q_loop]
+    nkpts_uniq = len(uniq_kpts)
+    nkptjmax = np.max([len(x[1]) for x in uniq_q_loop])
+
+# evaluate and invert j2c
+    kj2c = get_j2c(mydf, kpts=uniq_kpts, verbose=verbose1)
+    kj2c_negative = [None] * nkpts_uniq
+    kj2ctag = [None] * nkpts_uniq
+    knauxcd = [None] * nkpts_uniq
+    for k,kpt in enumerate(uniq_kpts):
+        j2c, kj2c_negative[k], kj2ctag[k] = cholesky_decomposed_metric(mydf, kj2c[k])
+        if kj2ctag[k] == 'CD':
+            kj2c[k] = j2c
+        else:
+            raise NotImplementedError
+            kj2c[k] = (np.asarray(j2c.real, order='C'), np.asarray(j2c.imag, order='C'))
+        knauxcd[k] = j2c.shape[0]
+        j2c = None
+
+    t1 = log.timer_debug1('get_k_kpts j2c', *t0)
+
+# estimate minimum memory requirement for j3c
+    ao_loc = mydf.cell.ao_loc_nr()
+    naoshlmax = np.max(ao_loc[1:] - ao_loc[:-1])
+    j3cblksizemin = (nkptij+nkptjmax)*naux*naoshlmax*nao
+    mem_j3cblk = j3cblksizemin*j3c_dsize/1e6
+
+    def split_bufC(bufC):
+        bufR = np.ndarray(bufC.size*2, dtype=REAL, buffer=bufC)
+        bufI = bufR[bufC.size:]
+        return bufR, bufI
+
+    ''' Notations:
+        S: nset
+        K: nkptij
+        L: naux
+        A | a: nao | naoblksize == pblksize
+        O | o: nmo | nmoblksize
+    '''
+
+# buffer for kXip and kYip
+    disk_avail = max_disk_quota
+    XYblksizemin = (nset*nkptij+2)*naux*nao    # add 2 for Lpi, Xpi
+    disk_XYblk = XYblksizemin*vk_dsize/1e6
+    nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
+    log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
+    log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
+               nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
+    if nmoblksize < 1:
+        disk_need = disk_XYblk
+        log.error('Caching (L|[p]q) and (L|p[i]) needs at least %.1f MB of disk space, '
+                  'which exceeds the available disk quota %.1f MB', disk_need, disk_avail)
+        raise MemoryError
+
+# shranges for j3c
+    mem_avail = mydf.max_memory - lib.current_memory()[0]
+    j3cblksize = (nkptij+nkptjmax+1)*naux # add 1 for Lpq
+    mem_j3cblk = j3cblksize*j3c_dsize/1e6
+    aopblksize = min(nao*nao, int(np.floor(mem_avail*0.7/mem_j3cblk)))
+    shranges = _guess_shell_ranges(mydf.cell, aopblksize, 's1')
+    aopblksize = np.max([x[2] for x in shranges])
+    pblksize = aopblksize // nao
+    log.debug1('get_k mem_avail= %.2f MB  memj3cblk= %.2f MB', mem_avail, mem_j3cblk)
+    log.debug1('get_k aopblksize= %d  pblksize= %d  nblk= %d', aopblksize, pblksize,
+               len(shranges))
+    log.debug1('get_k shranges= %s', shranges)
+
+    size_LAa = naux*nao*pblksize
+    buf_LAaC = np.empty(size_LAa, dtype=COMPLEX)
+    buf_LAaR, buf_LAaI = split_bufC(buf_LAaC)
+    size_Lao = naux*pblksize*nmoblksize
+    buf_LaoC = np.empty(size_Lao, dtype=COMPLEX)
+    buf_LaoR, buf_LaoI = split_bufC(buf_LaoC)
+    buf2_LaoC = np.empty(size_Lao, dtype=COMPLEX)
+    buf2_LaoR, buf2_LaoI = split_bufC(buf2_LaoC)
+    size_aa = pblksize*pblksize
+    buf_aaC = np.empty(size_aa, dtype=COMPLEX)
+    buf_aaR, buf_aaI = split_bufC(buf_aaC)
+
+    for i0,i1 in lib.prange(0,nmomax,nmoblksize):
+        di = i1 - i0
+        feri = lib.H5TmpFile()
+        kpiXR = feri.create_group('kpiXR')
+        kpiXI = feri.create_group('kpiXI')
+
+        tspans = np.zeros((9,2))
+        tnames = ['Lpq ij', 'Lpi ij', 'kXip ij', 'j3c', 'xform']
+        tick_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
+
+        istep = -1
+        p1 = 0
+        for kcpqL in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='j',
+                              j3c_order='ijL', shranges=shranges, bvk_kmesh=bvk_kmesh,
+                              verbose=verbose1):
+            istep += 1
+            dp = kcpqL.shape[-2] // nao
+            assert(dp*nao == kcpqL.shape[-2])
+            p0 = p1
+            p1 += dp
+
+            pqLR = np.ndarray((nao,dp,naux), dtype=REAL, buffer=buf_LAaR)
+            pqLI = np.ndarray((nao,dp,naux), dtype=REAL, buffer=buf_LAaI)
+            ipLR = np.ndarray((di,dp*naux), dtype=REAL, buffer=buf_LaoR)
+            ipLI = np.ndarray((di,dp*naux), dtype=REAL, buffer=buf_LaoI)
+
+            kq = -1
+            for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
+                kq += 1
+                j2c = kj2c[kq]
+                j2ctag = kj2ctag[kq]
+                for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
+                    kj = _safe_member(kptj, kpts)
+                    ki = _safe_member(kptj-kpt, kpts)
+                    tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    pqLR[:] = kcpqL[ji][0].real.reshape(nao,dp,naux)
+                    pqLI[:] = kcpqL[ji][0].imag.reshape(nao,dp,naux)
+                    tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[0] += tock - tick
+                    for iset in range(nset):
+                        moR = skmoR[iset][ki][:,i0:i1]
+                        moI = skmoI[iset][ki][:,i0:i1]
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        zdotCN(moR.T, moI.T, pqLR.reshape(nao,-1), pqLI.reshape(nao,-1),
+                               1, ipLR, ipLI)
+                        tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[1] += tock - tick
+                        if j2ctag == 'CD':
+                            piX = np.ndarray((dp*di,naux), dtype=COMPLEX,
+                                             buffer=buf2_LaoC)
+                            piX.real = ipLR.reshape(di,dp,naux).\
+                                            transpose(1,0,2).reshape(-1,naux)
+                            piX.imag = ipLI.reshape(di,dp,naux).\
+                                            transpose(1,0,2).reshape(-1,naux)
+                            piX[:] = scipy.linalg.solve_triangular(j2c, piX.T,
+                                                                   lower=True).T
+                            key = f'{ji}/{iset}/{istep}'
+                            kpiXR[key] = piX.real.reshape(dp,di*naux)
+                            kpiXI[key] = piX.imag.reshape(dp,di*naux)
+                            piX = None
+                        else:
+                            piXR_ = np.ndarray((dp*di,naux),dtype=REAL, buffer=buf2_LaoR)
+                            piXI_ = np.ndarray((dp*di,naux),dtype=REAL, buffer=buf2_LaoI)
+                            piXR_[:] = pLiR.reshape(dp,naux,di).\
+                                            transpose(0,2,1).reshape(dp*di,naux)
+                            piXI_[:] = pLiI.reshape(dp,naux,di).\
+                                            transpose(0,2,1).reshape(dp*di,naux)
+                            piXR = np.ndarray((dp*di,naux),dtype=REAL, buffer=buf_LaoR)
+                            piXI = np.ndarray((dp*di,naux),dtype=REAL, buffer=buf_LaoI)
+                            j2cR, j2cI = j2c
+                            zdotNN(piXR_, piXI_, j2cR.T, j2cI.T, 1, piXR, piXI)
+                            kpiXR[iset,ji,p0:p1] = piXR.reshape(dp,di*naux)
+                            kpiXI[iset,ji,p0:p1] = piXI.reshape(dp,di*naux)
+                            piXR_ = piXI_ = piXR = piXI = None
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[2] += tick - tock
+
+            pqLR = pqLI = ipLR = ipLI = None
+
+        tock_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
+        tspans[4] = tspans[:3].sum(axis=0)
+        tspans[3] += tock_tot - tick_tot - tspans[4]
+
+        for tspan,tname in zip(tspans,tnames):
+            log.debug2('CPU time for get_k_kpts pass 1     %10s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan)
+        for tspan,tname in zip(tspans,tnames):
+            tspan_avg = tspan / nkptij
+            log.debug2('CPU time for get_k_kpts pass 1 avg %10s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan_avg)
+
+        t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 1'%(i0,i1), *t1)
+
+        for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
+            for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
+                kj = _safe_member(kptj, kpts)
+                ki = _safe_member(kptj-kpt, kpts)
+                for iset in range(nset):
+                    pi = -1
+                    for p0,p1 in lib.prange(0,nao,pblksize):
+                        istep += 1
+                        pi += 1
+                        dp = p1 - p0
+                        piXR = np.ndarray((dp,naux*di), dtype=REAL, buffer=buf_LaoR)
+                        piXI = np.ndarray((dp,naux*di), dtype=REAL, buffer=buf_LaoI)
+                        key = f'{ji}/{iset}/{pi}'
+                        piXR[:] = kpiXR[key][()]
+                        piXI[:] = kpiXI[key][()]
+                        qi = -1
+                        for q0,q1 in lib.prange(0,nao,pblksize):
+                            qi += 1
+                            dq = q1 - q0
+                            if pi > qi: continue
+                            if pi == qi:
+                                qiXR = piXR
+                                qiXI = piXI
+                            else:
+                                qiXR = np.ndarray((dq,naux*di), dtype=REAL,
+                                                  buffer=buf2_LaoR)
+                                qiXI = np.ndarray((dq,naux*di), dtype=REAL,
+                                                  buffer=buf2_LaoI)
+                                key = f'{ji}/{iset}/{qi}'
+                                qiXR[:] = kpiXR[key][()]
+                                qiXI[:] = kpiXI[key][()]
+                            vpqR = np.ndarray((dp,dq), dtype=REAL, buffer=buf_aaR)
+                            vpqI = np.ndarray((dp,dq), dtype=REAL, buffer=buf_aaI)
+                            zdotCN(piXR, piXI, qiXR.T, qiXI.T, 1, vpqR, vpqI)
+                            vkR[iset,kj,p0:p1,q0:q1] += vpqR
+                            vkI[iset,kj,p0:p1,q0:q1] += vpqI
+                            if pi != qi:
+                                vkR[iset,kj,q0:q1,p0:p1] += vpqR.T
+                                vkI[iset,kj,q0:q1,p0:p1] -= vpqI.T
+                            qiXR = qiXI = vpqR = vpqI = None
+                        piXR = piXI = None
+
+        kpiXR = kpiXI = None
+        feri.close()
+
+        t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 2'%(i0,i1), *t1)
+
+    vk_kpts = vkR + vkI * 1j
+    vk_kpts *= 1./nkpts
+
+    log.timer_debug1('get_k_kpts', *t0)
+
+    return vk_kpts
 
 def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exxdiv=None,
                bvk_kmesh=None, semidirect=False, ksym='s2'):
@@ -1567,7 +1816,7 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None, exx
             skmoI = [[np.zeros_like(moR) for moR in kmoR] for kmoR in skmoR]
         if ksym=='s1':
             if semidirect:
-                raise NotImplementedError
+                fgetk = get_k_kpts_complex_ks1_semidirect
             else:
                 fgetk = get_k_kpts_complex_ks1
         else:
