@@ -24,9 +24,9 @@ from pyscf import lib
 from pyscf.pbc import gto, df
 
 
-atom = 'He 0 0 0; He 1 0 0'
+atom = 'He1 0 0 0; He2 1 0 0'
 a = np.eye(3) * 3
-basis = 'cc-pvdz'
+basis = {'He1': 'cc-pvdz', 'He2': '6-31g'}
 
 cell = gto.Cell(atom=atom, basis=basis, a=a)
 cell.build()
@@ -95,6 +95,7 @@ def test_k(kmesh, scaled_center, mydf2_kwargs={}):
     vk_ref_kpts = mydf.get_jk(dm_kpts, kpts=kpts, with_j=False, with_k=True)[1]
 
     mydf2 = df.RSDF(cell, kpts).set(**mydf2_kwargs)
+    mydf2.use_bvk = [True, False]
     mydf2.direct = True
     mydf2.build()
 

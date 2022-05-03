@@ -1575,6 +1575,8 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
     shranges = _guess_shell_ranges(mydf.cell, aopblksize, 's1')
     aopblksize = np.max([x[2] for x in shranges])
     pblksize = aopblksize // nao
+    ploc = np.cumsum([0] + [x[2]//nao for x in shranges])
+    pranges = np.vstack((ploc[:-1],ploc[1:])).T
     log.debug1('get_k mem_avail= %.2f MB  memj3cblk= %.2f MB', mem_avail, mem_j3cblk)
     log.debug1('get_k aopblksize= %d  pblksize= %d  nblk= %d', aopblksize, pblksize,
                len(shranges))
@@ -1603,15 +1605,13 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
         tick_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
 
         istep = -1
-        p1 = 0
         for kcpqL in loop_j3c(mydf, kptij_lst=kptij_lst, aosym='s1', partition_iorj='j',
                               j3c_order='ijL', shranges=shranges, bvk_kmesh=bvk_kmesh,
                               verbose=verbose1):
             istep += 1
-            dp = kcpqL.shape[-2] // nao
-            assert(dp*nao == kcpqL.shape[-2])
-            p0 = p1
-            p1 += dp
+            p0, p1 = pranges[istep]
+            dp = p1 - p0
+            assert(dp == kcpqL.shape[-2]//nao)
 
             pqLR = np.ndarray((nao,dp,naux), dtype=REAL, buffer=buf_LAaR)
             pqLI = np.ndarray((nao,dp,naux), dtype=REAL, buffer=buf_LAaI)
@@ -1690,19 +1690,16 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
                 kj = _safe_member(kptj, kpts)
                 ki = _safe_member(kptj-kpt, kpts)
                 for iset in range(nset):
-                    pi = -1
-                    for p0,p1 in lib.prange(0,nao,pblksize):
-                        istep += 1
-                        pi += 1
+                    for pi,prange in enumerate(pranges):
+                        p0,p1 = prange
                         dp = p1 - p0
                         piXR = np.ndarray((dp,naux*di), dtype=REAL, buffer=buf_LaoR)
                         piXI = np.ndarray((dp,naux*di), dtype=REAL, buffer=buf_LaoI)
                         key = f'{ji}/{iset}/{pi}'
                         piXR[:] = kpiXR[key][()]
                         piXI[:] = kpiXI[key][()]
-                        qi = -1
-                        for q0,q1 in lib.prange(0,nao,pblksize):
-                            qi += 1
+                        for qi,qrange in enumerate(pranges):
+                            q0,q1 = qrange
                             dq = q1 - q0
                             if pi > qi: continue
                             if pi == qi:
