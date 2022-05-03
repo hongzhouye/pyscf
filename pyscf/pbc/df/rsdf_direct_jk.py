@@ -227,6 +227,8 @@ def get_k_kpts_gamma(mydf, smo):
     XYblksizemin = (nset+2)*naux*nao    # add 2 for Lpi, Xpi
     mem_XYblk = XYblksizemin*vs_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
+    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
+    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+nmomax%nmoblksize>0)
@@ -332,6 +334,8 @@ def get_k_kpts_gamma_semidirect(mydf, smo, max_disk_quota=MAX_DISK_QUOTA):
     XYblksizemin = nset*naux*nao
     disk_XYblk = XYblksizemin*vs_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
+    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
+    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
     log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+nmomax%nmoblksize>0)
@@ -479,6 +483,8 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     XYblksizemin = (nset*(nkptij+nkptijswap)+2)*naux*nao    # add 2 for Lpi, Xpi
     mem_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
+    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
+    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
@@ -718,6 +724,8 @@ def get_k_kpts_complex_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
     XYblksizemin = (nset*(nkptij+nkptijswap)+2)*naux*nao    # add 2 for Lpi, Xpi
     disk_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
+    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
+    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
     log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
@@ -1070,6 +1078,8 @@ def get_k_kpts_complex_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
 #     XYblksizemin = (nset*nkptij+2)*naux*nao    # add 2 for Lpi, Xpi
 #     mem_XYblk = XYblksizemin*vk_dsize/1e6
 #     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
+#     nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
+#     nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
 #     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
 #     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
 #                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
@@ -1314,6 +1324,8 @@ def get_k_kpts_complex_ks1(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     XYblksizemin = (nset*nkptij+2)*naux*nao    # add 2 for Lpi, Xpi
     mem_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
+    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
+    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
@@ -1558,6 +1570,8 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
     XYblksizemin = (nset*nkptij+2)*naux*nao    # add 2 for Lpi, Xpi
     disk_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
+    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
+    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
     log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
