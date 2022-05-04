@@ -1589,14 +1589,6 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
                len(shranges))
     log.debug1('get_k shranges= %s', shranges)
 
-    size_LAa = naux*nao*pblksize
-    buf_LAaC = np.empty(size_LAa, dtype=COMPLEX)
-    buf_LAaR, buf_LAaI = split_bufC(buf_LAaC)
-    size_Lao = naux*pblksize*nmoblksize
-    buf_LaoC = np.empty(size_Lao, dtype=COMPLEX)
-    buf_LaoR, buf_LaoI = split_bufC(buf_LaoC)
-    buf2_LaoC = np.empty(size_Lao, dtype=COMPLEX)
-    buf2_LaoR, buf2_LaoI = split_bufC(buf2_LaoC)
     size_aa = pblksize*pblksize
     buf_aaC = np.empty(size_aa, dtype=COMPLEX)
     buf_aaR, buf_aaI = split_bufC(buf_aaC)
@@ -1607,7 +1599,18 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
         kpiXR = feri.create_group('kpiXR')
         kpiXI = feri.create_group('kpiXI')
 
-        tspans = np.zeros((9,2))
+        ''' Create buffer for first pass
+        '''
+        size_LAa = naux*nao*pblksize
+        buf_LAaC = np.empty(size_LAa, dtype=COMPLEX)
+        buf_LAaR, buf_LAaI = split_bufC(buf_LAaC)
+        size_Lao = naux*pblksize*di
+        buf_LaoC = np.empty(size_Lao, dtype=COMPLEX)
+        buf_LaoR, buf_LaoI = split_bufC(buf_LaoC)
+        buf2_LaoC = np.empty(size_Lao, dtype=COMPLEX)
+        buf2_LaoR, buf2_LaoI = split_bufC(buf2_LaoC)
+
+        tspans = np.zeros((5,2))
         tnames = ['Lpq ij', 'Lpi ij', 'kXip ij', 'j3c', 'xform']
         tick_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
 
@@ -1683,58 +1686,76 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
         tspans[3] += tock_tot - tick_tot - tspans[4]
 
         for tspan,tname in zip(tspans,tnames):
-            log.debug2('CPU time for get_k_kpts pass 1     %10s  %9.2f sec, '
+            log.debug2('CPU time for get_k_kpts pass1     %10s  %9.2f sec, '
                        'wall time  %9.2f sec', tname, *tspan)
         for tspan,tname in zip(tspans,tnames):
-            tspan_avg = tspan / nkptij
-            log.debug2('CPU time for get_k_kpts pass 1 avg %10s  %9.2f sec, '
-                       'wall time  %9.2f sec', tname, *tspan_avg)
+            if 'ij' in tname:
+                tspan_avg = tspan / nkptij
+                log.debug2('CPU time for get_k_kpts pass1 avg %10s  %9.2f sec, '
+                           'wall time  %9.2f sec', tname, *tspan_avg)
 
-        t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 1'%(i0,i1), *t1)
+        t1 = log.timer_debug1('get_k_kpts pass1 occblk [%d:%d]'%(i0,i1), *t1)
 
-        for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
-            for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
-                kj = _safe_member(kptj, kpts)
-                ki = _safe_member(kptj-kpt, kpts)
-                for iset in range(nset):
-                    for pi,prange in enumerate(pranges):
-                        p0,p1 = prange
-                        dp = p1 - p0
-                        piXR = np.ndarray((dp,naux*di), dtype=REAL, buffer=buf_LaoR)
-                        piXI = np.ndarray((dp,naux*di), dtype=REAL, buffer=buf_LaoI)
-                        key = f'{ji}/{iset}/{pi}'
-                        piXR[:] = kpiXR[key][()]
-                        piXI[:] = kpiXI[key][()]
-                        for qi,qrange in enumerate(pranges):
-                            q0,q1 = qrange
-                            dq = q1 - q0
-                            if pi > qi: continue
-                            if pi == qi:
-                                qiXR = piXR
-                                qiXI = piXI
-                            else:
-                                qiXR = np.ndarray((dq,naux*di), dtype=REAL,
-                                                  buffer=buf2_LaoR)
-                                qiXI = np.ndarray((dq,naux*di), dtype=REAL,
-                                                  buffer=buf2_LaoI)
-                                key = f'{ji}/{iset}/{qi}'
-                                qiXR[:] = kpiXR[key][()]
-                                qiXI[:] = kpiXI[key][()]
-                            vpqR = np.ndarray((dp,dq), dtype=REAL, buffer=buf_aaR)
-                            vpqI = np.ndarray((dp,dq), dtype=REAL, buffer=buf_aaI)
-                            zdotCN(piXR, piXI, qiXR.T, qiXI.T, 1, vpqR, vpqI)
-                            vkR[iset,kj,p0:p1,q0:q1] += vpqR
-                            vkI[iset,kj,p0:p1,q0:q1] += vpqI
-                            if pi != qi:
-                                vkR[iset,kj,q0:q1,p0:p1] += vpqR.T
-                                vkI[iset,kj,q0:q1,p0:p1] -= vpqI.T
-                            qiXR = qiXI = vpqR = vpqI = None
-                        piXR = piXI = None
+        ''' Release buffer for first pass
+        '''
+        buf_LAaC = buf_LAaR = buf_LAaI = \
+        buf_LaoC = buf_LaoR = buf_LaoI = \
+        buf2_LaoC = buf2_LaoR = buf2_LaoI = None
+
+        ''' Create buffer for second pass
+        '''
+        size_itmd0 = nao * naux
+        mem_itmd0 = size_itmd0 * j3c_dsize / 1e6
+        riblksize = min(di, int(np.floor(mem_avail*0.5/mem_itmd0)))
+        riblksize = _balance_blksize(di, riblksize)
+
+        size_LAr = naux*nao*riblksize
+        buf_LArC = np.empty(size_LAr, dtype=COMPLEX)
+        buf_LArR, buf_LArI = split_bufC(buf_LArC)
+
+        tspans = np.zeros((2,2))
+        tnames = ['prX ij', 'vk ij']
+
+        for ri0,ri1 in lib.prange(0,di,riblksize):
+            dri = ri1 - ri0
+            prXR = np.ndarray((nao,dri*naux), dtype=REAL, buffer=buf_LArR)
+            prXI = np.ndarray((nao,dri*naux), dtype=REAL, buffer=buf_LArI)
+            for kpt,adapted_kptjs,adapted_ji_idx in uniq_q_loop:
+                for kptj,ji in zip(adapted_kptjs,adapted_ji_idx):
+                    kj = _safe_member(kptj, kpts)
+                    ki = _safe_member(kptj-kpt, kpts)
+                    for iset in range(nset):
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        for pi,prange in enumerate(pranges):
+                            p0,p1 = prange
+                            key = f'{ji}/{iset}/{pi}'
+                            prXR[p0:p1] = kpiXR[key][:,ri0*naux:ri1*naux]
+                            prXI[p0:p1] = kpiXI[key][:,ri0*naux:ri1*naux]
+                        tock = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[0] += tock - tick
+                        zdotCN(prXR, prXI, prXR.T, prXI.T, 1,
+                               vkR[iset,kj], vkI[iset,kj], 1)
+                        tick = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[1] += tick - tock
+            prXR = prXI = None
+
+        for tspan,tname in zip(tspans,tnames):
+            log.debug2('CPU time for get_k_kpts pass2     %10s  %9.2f sec, '
+                       'wall time  %9.2f sec', tname, *tspan)
+        for tspan,tname in zip(tspans,tnames):
+            if 'ij' in tname:
+                tspan_avg = tspan / nkptij
+                log.debug2('CPU time for get_k_kpts pass2 avg %10s  %9.2f sec, '
+                           'wall time  %9.2f sec', tname, *tspan_avg)
+
+        t1 = log.timer_debug1('get_k_kpts pass2 occblk [%d:%d]'%(i0,i1), *t1)
+
+        ''' Release buffer for second pass
+        '''
+        buf_LArC = buf_LArR = buf_LArI = None
 
         kpiXR = kpiXI = None
         feri.close()
-
-        t1 = log.timer_debug1('get_k_kpts occblk [%d:%d] pass 2'%(i0,i1), *t1)
 
     vk_kpts = vkR + vkI * 1j
     vk_kpts *= 1./nkpts

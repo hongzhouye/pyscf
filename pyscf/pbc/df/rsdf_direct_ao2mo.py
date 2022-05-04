@@ -796,9 +796,10 @@ def ao2mo_e2_ijL_kernel1_ks1_semidirect(mydf, mo_coeffs, kpts, bvk_kmesh=None, o
             log.debug2('CPU time for ao2mo pass1     %10s  %9.2f sec, '
                        'wall time  %9.2f sec', tname, *tspan)
         for tspan,tname in zip(tspans,tnames):
-            tspan_avg = tspan / nkptij
-            log.debug2('CPU time for ao2mo pass1 avg %10s  %9.2f sec, '
-                       'wall time  %9.2f sec', tname, *tspan_avg)
+            if 'ji' in tname:
+                tspan_avg = tspan / nkptij
+                log.debug2('CPU time for ao2mo pass1 avg %10s  %9.2f sec, '
+                           'wall time  %9.2f sec', tname, *tspan_avg)
 
         t1 = log.timer_debug1('ao2mo pass1 mo1blk [%d:%d]'%(i0,i1), *t1)
 
@@ -890,9 +891,10 @@ def ao2mo_e2_ijL_kernel1_ks1_semidirect(mydf, mo_coeffs, kpts, bvk_kmesh=None, o
             log.debug2('CPU time for ao2mo pass2     %10s  %9.2f sec, '
                        'wall time  %9.2f sec', tname, *tspan)
         for tspan,tname in zip(tspans,tnames):
-            tspan_avg = tspan / nkptij
-            log.debug2('CPU time for ao2mo pass2 avg %10s  %9.2f sec, '
-                       'wall time  %9.2f sec', tname, *tspan_avg)
+            if 'ji' in tname:
+                tspan_avg = tspan / nkptij
+                log.debug2('CPU time for ao2mo pass2 avg %10s  %9.2f sec, '
+                           'wall time  %9.2f sec', tname, *tspan_avg)
 
         t1 = log.timer_debug1('ao2mo pass2 mo1blk [%d:%d]'%(i0,i1), *t1)
 
