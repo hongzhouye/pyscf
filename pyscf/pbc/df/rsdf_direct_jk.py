@@ -227,8 +227,7 @@ def get_k_kpts_gamma(mydf, smo):
     XYblksizemin = (nset+2)*naux*nao    # add 2 for Lpi, Xpi
     mem_XYblk = XYblksizemin*vs_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
-    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
-    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
+    nmoblksize = _balance_blksize(nmomax, nmoblksize)
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+nmomax%nmoblksize>0)
@@ -334,8 +333,7 @@ def get_k_kpts_gamma_semidirect(mydf, smo, max_disk_quota=MAX_DISK_QUOTA):
     XYblksizemin = nset*naux*nao
     disk_XYblk = XYblksizemin*vs_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
-    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
-    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
+    nmoblksize = _balance_blksize(nmomax, nmoblksize)
     log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+nmomax%nmoblksize>0)
@@ -483,8 +481,7 @@ def get_k_kpts_complex(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     XYblksizemin = (nset*(nkptij+nkptijswap)+2)*naux*nao    # add 2 for Lpi, Xpi
     mem_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
-    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
-    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
+    nmoblksize = _balance_blksize(nmomax, nmoblksize)
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
@@ -719,13 +716,11 @@ def get_k_kpts_complex_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
     mem_j3cblk = j3cblksizemin*j3c_dsize/1e6
 
 # buffer for kXip and kYip
-    # mem_avail = mydf.max_memory - lib.current_memory()[0] - mem_j3cblk
     disk_avail = max_disk_quota
-    XYblksizemin = (nset*(nkptij+nkptijswap)+2)*naux*nao    # add 2 for Lpi, Xpi
+    XYblksizemin = (nset*(nkptij+nkptijswap))*naux*nao
     disk_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
-    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
-    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
+    nmoblksize = _balance_blksize(nmomax, nmoblksize)
     log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
@@ -1324,8 +1319,7 @@ def get_k_kpts_complex_ks1(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
     XYblksizemin = (nset*nkptij+2)*naux*nao    # add 2 for Lpi, Xpi
     mem_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(mem_avail*0.7/mem_XYblk)))
-    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
-    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
+    nmoblksize = _balance_blksize(nmomax, nmoblksize)
     log.debug1('get_k mem_avail= %.2f MB  mem_XYblk= %.2f MB', mem_avail, mem_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
@@ -1570,8 +1564,7 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
     XYblksizemin = (nset*nkptij)*naux*nao
     disk_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
-    nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
-    nmoblksize = nmomax//nmoblk+(nmomax%nmoblk>0)
+    nmoblksize = _balance_blksize(nmomax, nmoblksize)
     log.debug1('get_k disk_avail= %.2f MB  disk_XYblk= %.2f MB', disk_avail, disk_XYblk)
     log.debug1('get_k nmomax= %d  nmoblksize= %d  nblk= %d', nmomax, nmoblksize,
                nmomax//nmoblksize+(1 if nmomax%nmoblksize>0 else 0))
@@ -1898,3 +1891,7 @@ def _format_mo_coeff(mo_coeff, mo_occ, order='C'):
         if kmoI is not None:
             kmoI[k][:,:nmok] = mo.imag
     return kmoR, kmoI
+def _balance_blksize(ntot, nblksize):
+    nblk = ntot//nblksize+(ntot%nblksize>0)
+    nblksize = ntot//nblk+(ntot%nblk>0)
+    return nblksize
