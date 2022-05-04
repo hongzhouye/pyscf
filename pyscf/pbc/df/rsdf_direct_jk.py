@@ -1567,7 +1567,7 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
 
 # buffer for kXip and kYip
     disk_avail = max_disk_quota
-    XYblksizemin = (nset*nkptij+2)*naux*nao    # add 2 for Lpi, Xpi
+    XYblksizemin = (nset*nkptij)*naux*nao
     disk_XYblk = XYblksizemin*vk_dsize/1e6
     nmoblksize = min(nmomax, int(np.floor(disk_avail/disk_XYblk)))
     nmoblk = nmomax//nmoblksize+(nmomax%nmoblksize>0)
@@ -1583,7 +1583,7 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
 
 # shranges for j3c
     mem_avail = mydf.max_memory - lib.current_memory()[0]
-    j3cblksize = (nkptij+nkptjmax+1)*naux # add 1 for Lpq
+    j3cblksize = (nkptij+nkptjmax+1+2*nmoblksize/float(nao))*naux
     mem_j3cblk = j3cblksize*j3c_dsize/1e6
     aopblksize = min(nao*nao, int(np.floor(mem_avail*0.7/mem_j3cblk)))
     shranges = _guess_shell_ranges(mydf.cell, aopblksize, 's1')
