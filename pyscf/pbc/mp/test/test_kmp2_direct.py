@@ -65,12 +65,14 @@ class KnownValues(unittest.TestCase):
         mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
 
         ftemp = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
-        mf_direct.max_memory = 0.05
+        mf_direct.max_memory = 0.01
         mmp1 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp1.verbose = 4
         mmp1._cderi_to_save = ftemp.name
         mmp1.kernel(with_t2=with_t2)
 
         mmp2 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp2.verbose = 4
         mmp2._cderi = ftemp.name
         mmp2.kernel(with_t2=with_t2)
 
@@ -86,13 +88,15 @@ class KnownValues(unittest.TestCase):
         mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
 
         ftemp = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
-        mf_direct.max_memory = 0.05
+        mf_direct.max_memory = 0.01
         mmp1 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp1.verbose = 4
         mmp1.j3c_order = 'ijL'
         mmp1._cderi_to_save = ftemp.name
         mmp1.kernel(with_t2=with_t2)
 
         mmp2 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp2.verbose = 4
         mmp2.j3c_order = 'ijL'
         mmp2._cderi = ftemp.name
         mmp2.kernel(with_t2=with_t2)
@@ -107,14 +111,15 @@ class KnownValues(unittest.TestCase):
         mf = run_scf(kmesh)
         dm0 = mf.make_rdm1()
         mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
-        mf_direct.verbose = 7
+        mf_direct.verbose = 4
 
         nkpts = len(mf.kpts)
         mmp1 = mp.KMP2(mf_direct, frozen=frozen)
-        mmp1.verbose = 7
+        mmp1.verbose = 4
         mmp1.kernel(with_t2=with_t2)
 
         mmp2 = mp.KMP2(mf_direct, frozen=frozen)
+        mmp2.verbose = 4
         mmp2.kilist = range(nkpts//2)
         mmp2.kernel(with_t2=with_t2)
         ecorr2 = mmp2.e_corr
@@ -135,6 +140,24 @@ class KnownValues(unittest.TestCase):
         mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
         mmp_direct = mp.KMP2(mf_direct)
         mmp_direct.incore_anyway = True
+        mmp_direct.kernel(with_t2=False)
+
+        self.assertAlmostEqual(mmp._scf.e_tot, mmp_direct._scf.e_tot, 8)
+        self.assertAlmostEqual(mmp.e_corr, mmp_direct.e_corr, 7)
+
+    def test_211_energy_ks1_semidirect(self):
+        kmesh = (2,1,1)
+
+        mf = run_scf(kmesh)
+        mmp = run_mp2(mf)
+
+        dm0 = mf.make_rdm1()
+        mf_direct = run_scf(kmesh, direct=True, dm0=dm0)
+        mf_direct.with_df.ksym = 's1'
+        mf_direct.with_df.semidirect = True
+        mf_direct.with_df.use_bvk = [True, False]
+        mmp_direct = mp.KMP2(mf_direct)
+        mmp_direct.j3c_order = 'ijL'
         mmp_direct.kernel(with_t2=False)
 
         self.assertAlmostEqual(mmp._scf.e_tot, mmp_direct._scf.e_tot, 8)
