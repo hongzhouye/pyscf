@@ -37,7 +37,7 @@ r''' Needed functions
 [x] get_k semi-direct for general k-point(s)
 [ ] get_k and get_j together for Gamma point
 [x] get_k_complex_ks1
-[ ] get_k_complex_ks1_semidirect
+[x] get_k_complex_ks1_semidirect
 '''
 
 
@@ -1431,6 +1431,7 @@ def get_k_kpts_complex_ks1(mydf, skmoR, skmoI, kpts, bvk_kmesh=None):
                         tspans[2] += tick - tock
 
             pqLR = pqLI = ipLR = ipLI = None
+        kcpqL = None
 
         tock_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
         tspans[4] = tspans[:3].sum(axis=0)
@@ -1680,6 +1681,7 @@ def get_k_kpts_complex_ks1_semidirect(mydf, skmoR, skmoI, kpts, bvk_kmesh=None,
                         tspans[2] += tick - tock
 
             pqLR = pqLI = ipLR = ipLI = None
+        kcpqL = None
 
         tock_tot = np.asarray((logger.process_clock(), logger.perf_counter()))
         tspans[4] = tspans[:3].sum(axis=0)

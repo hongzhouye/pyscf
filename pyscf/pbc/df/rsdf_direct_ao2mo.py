@@ -783,6 +783,7 @@ def ao2mo_e2_ijL_kernel1_ks1_semidirect(mydf, mo_coeffs, kpts, bvk_kmesh=None, o
                     tspans[2] += tock - tick
 
             pqLR = pqLI = ipLR = ipLI = None
+        kcpqL = None
 
         ''' release buffer for first pass
         '''
