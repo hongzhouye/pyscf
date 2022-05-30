@@ -56,6 +56,7 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2,
         logger.debug(mp, 'Load cderi step %d', istep)
         p0, p1 = p1, p1 + qov.shape[0]
         Lov[p0:p1] = qov
+        qov = None
 
     emp2 = 0
 
@@ -69,6 +70,7 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2,
         emp2 -= numpy.einsum('jab,jba', t2i, gi)
         if with_t2:
             t2[i] = t2i
+        buf = gi = t2i = None
 
     return emp2, t2
 
@@ -99,10 +101,11 @@ class DFMP2(mp2.MP2):
         mem_now = lib.current_memory()[0]
         max_memory = max(2000, self.max_memory*.9-mem_now)
         blksize = int(min(naux, max(with_df.blockdim,
-                                    (max_memory*1e6/8-nocc*nvir**2*2)/(nocc*nvir))))
+                                    (max_memory*1e6/8-naux*nocc*nvir)*0.4/(nocc*nvir))))
         for eri1 in with_df.loop(blksize=blksize):
             Lov = _ao2mo.nr_e2(eri1, mo, ijslice, aosym='s2', out=Lov)
             yield Lov
+            Lov = eri1 = None
 
     def ao2mo(self, mo_coeff=None):
         eris = mp2._ChemistsERIs()
