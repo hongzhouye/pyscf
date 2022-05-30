@@ -58,7 +58,6 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp, verbose)
 
-    mp.dump_flags()
     nmo = mp.nmo
     nocc = mp.nocc
     nvir = tuple([nmo[s] - nocc[s] for s in [0,1]])
@@ -173,7 +172,7 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
 
             cput1 = log.timer_debug1('(ki,kj) = (%d,%d)'%(ki,kj), *cput1)
 
-    log.timer("KMP2", *cput0)
+    log.timer(mp.__class__.__name__, *cput0)
 
     emp2_ss /= nkpts
     emp2_os /= nkpts
@@ -598,6 +597,8 @@ class KUMP2(kmp2.KMP2):
             raise MemoryError
 
     def ao2mo(self, mo_coeff=None):
+        log = logger.new_logger(self)
+        nao = self.mol.nao_nr()
         nocc = self.nocc
         nvir = [self.nmo[s] - nocc[s] for s in [0,1]]
         noccmax = max(nocc)
@@ -616,12 +617,15 @@ class KUMP2(kmp2.KMP2):
                 naux = mydf.auxcell.nao_nr()
             nov = [nocc[s]*nvir[s] for s in [0,1]]
             mem_usage += (nkpts**2 * naux * sum(nov)) * 16 / 1e6
+            mem_usage += naux * nao**2 * 16 / 1e6 # for loading Lpq of 1 kpt-pair in xform
             mem_avail = self.max_memory - lib.current_memory()[0]
+            log.debug('est mem use for DF integral xform %.1f MB '
+                      '(currently available %.1f MB)', mem_usage, mem_avail)
             if mem_usage > mem_avail:
-                logger.info(self, 'Holding DF integrals outcore.')
+                log.info('Holding DF integrals outcore.')
                 return _make_df_eris_outcore(self, mo_coeff)
             else:
-                logger.info(self, 'Holding DF integrals incore.')
+                log.info('Holding DF integrals incore.')
                 return _make_df_eris_incore(self, mo_coeff)
         else:
             return _make_eris_incore(self, mo_coeff)
@@ -809,19 +813,27 @@ if __name__ == '__main__':
 
         cell = gto.Cell()
         cell.atom='''
-        C 0.000000000000   0.000000000000   0.000000000000
-        C 1.685068664391   1.685068664391   1.685068664391
+        C 0 0 0
         '''
-        cell.basis = 'gth-szv'
-        cell.pseudo = 'gth-pade'
-        cell.a = '''
-        0.000000000, 3.370137329, 3.370137329
-        3.370137329, 0.000000000, 3.370137329
-        3.370137329, 3.370137329, 0.000000000'''
-        cell.unit = 'B'
-        cell.mesh = [15,15,15]  # small PW mesh to save cost
+        cell.basis = '''
+        C  S
+            9.031436   -1.960629e-02
+            3.821255   -1.291762e-01
+            0.473725    5.822572e-01
+        C  S
+            0.149679    1.000000e+00
+        C  P
+            4.353457    8.730943e-02
+            1.266307    2.797034e-01
+            0.398715    5.024424e-01
+        C  P
+            0.124238    1.000000e+00
+        '''
+        cell.pseudo = 'gth-hf-rev'
+        cell.a = np.eye(3) * 3
+        cell.mesh = [21]*3
         cell.build()
-        cell.verbose = 7
+        cell.verbose = 6
 
         # Running HF and MP2 with 1x1x2 Monkhorst-Pack k-point mesh
         kmf = scf.KUHF(cell, kpts=cell.make_kpts([1,1,2]), exxdiv=None)
@@ -830,7 +842,7 @@ if __name__ == '__main__':
 
         mymp = mp.KUMP2(kmf)
         emp2, t2 = mymp.kernel()
-        print(emp2 - -0.204722601007946)
+        print(emp2 - -0.0443318084113812)
     else:
         r''' For relatively large box size, KUMP2 should match molecular UMP2 energy
         '''
@@ -857,6 +869,6 @@ if __name__ == '__main__':
         ump = molmp.UMP2(umf).set(verbose=3)
         eump2 = ump.kernel()[0]
 
-        print('PBC KUMP2     = % .10f  % .3g' % (ekump2, ekump2 - -0.3465896981))
+        print('PBC KUMP2     = % .10f  % .3g' % (ekump2, ekump2 - -0.34658969808607))
         print('Mol  UMP2     = % .10f' % eump2)
         print('PBC/Mol diff  = % .10f' % (ekump2 - eump2))
