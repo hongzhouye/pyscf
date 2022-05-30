@@ -57,7 +57,6 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbos
     cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp, verbose)
 
-    mp.dump_flags()
     nmo = mp.nmo
     nocc = mp.nocc
     nvir = nmo - nocc
@@ -746,17 +745,18 @@ class KMP2(mp2.MP2):
     make_rdm2 = make_rdm2
 
     def dump_flags(self):
-        logger.info(self, "")
-        logger.info(self, "******** %s ********", self.__class__)
-        logger.info(self, "nkpts = %d", self.nkpts)
-        logger.info(self, "nocc = %s", self.nocc)
-        logger.info(self, "nmo = %s", self.nmo)
-        logger.info(self, "with_df_ints = %s", self.with_df_ints)
-        logger.info(self, "less_mem = %r", self.less_mem)
+        log = logger.new_logger(self)
+        log.info("")
+        log.info("******** %s ********", self.__class__)
+        log.info("nkpts = %d", self.nkpts)
+        log.info("nocc = %s", self.nocc)
+        log.info("nmo = %s", self.nmo)
+        log.info("with_df_ints = %s", self.with_df_ints)
+        log.info("less_mem = %r", self.less_mem)
 
         if self.frozen is not None:
-            logger.info(self, "frozen orbitals = %s", self.frozen)
-        logger.info(self, "max_memory %d MB (current use %d MB)",
+            log.info("frozen orbitals = %s", self.frozen)
+        log.info("max_memory %d MB (current use %d MB)",
                     self.max_memory, lib.current_memory()[0],
         )
         return self
@@ -784,10 +784,11 @@ class KMP2(mp2.MP2):
 
     def _finalize(self):
         '''Hook for dumping results and clearing up the object.'''
-        logger.note(self, 'E(%s) = %.15g  E_corr = %.15g',
-                    self.__class__.__name__, self.e_tot, self.e_corr)
-        logger.info(self, 'E_corr(same-spin) = %.15g', self.e_corr_ss)
-        logger.info(self, 'E_corr(oppo-spin) = %.15g', self.e_corr_os)
+        log = logger.new_logger(self)
+        log.note('E(%s) = %.15g  E_corr = %.15g',
+                 self.__class__.__name__, self.e_tot, self.e_corr)
+        log.note('E_corr(same-spin) = %.15g', self.e_corr_ss)
+        log.note('E_corr(oppo-spin) = %.15g', self.e_corr_os)
         return self
 
     def e_corr_scs(self, pss, pos):
@@ -800,6 +801,7 @@ class KMP2(mp2.MP2):
         return self.e_tot_scs(0., pos)
 
     def _memory_sanity_check(self, with_t2):
+        log = logger.new_logger(self)
         nocc = self.nocc
         nvir = self.nmo - nocc
         nkpts = len(self.kpts)
@@ -813,11 +815,15 @@ class KMP2(mp2.MP2):
 
         mem_avail = self.max_memory - lib.current_memory()[0]
         if mem_usage > mem_avail:
-            logger.error(self, 'Insufficient memory! MP2 memory usage %.1f MB '
-                         '(currently available %.1f MB)', mem_usage, mem_avail)
+            log.error('Insufficient memory! MP2 memory usage %.1f MB '
+                      '(currently available %.1f MB).', mem_usage, mem_avail)
+            if with_t2:
+                log.error('If T2 is not needed, try reruning with kernel(with_t2=False).')
             raise MemoryError
 
     def ao2mo(self, mo_coeff=None):
+        log = logger.new_logger(self)
+        nao = self.mol.nao_nr()
         nocc = self.nocc
         nvir = self.nmo - nocc
         nkpts = len(self.kpts)
@@ -833,12 +839,15 @@ class KMP2(mp2.MP2):
             else:
                 naux = mydf.auxcell.nao_nr()
             mem_usage += (nkpts**2 * naux * nocc * nvir) * 16 / 1e6
+            mem_usage += naux * nao**2 * 16 / 1e6 # for loading Lpq of 1 kpt-pair in xform
             mem_avail = self.max_memory - lib.current_memory()[0]
+            log.debug('est mem use for DF integral xform %.1f MB '
+                      '(currently available %.1f MB)', mem_usage, mem_avail)
             if mem_usage > mem_avail:
-                logger.info(self, 'Holding DF integrals outcore.')
+                log.info('Holding DF integrals outcore.')
                 return _make_df_eris_outcore(self, mo_coeff)
             else:
-                logger.info(self, 'Holding DF integrals incore.')
+                log.info('Holding DF integrals incore.')
                 return _make_df_eris_incore(self, mo_coeff)
         else:
             return _make_eris_incore(self, mo_coeff)
@@ -1067,7 +1076,7 @@ def ao2mo_df(cderi, mo_coeff, nocc, kpts, Lov=None):
                     out = _ao2mo.nr_e2(Lpq_ao, mo, (bra_start, bra_end, ket_start, ket_end), aosym='s2')
                 else:
                     #Note: Lpq.shape[0] != naux if linear dependency is found in auxbasis
-                    if Lpq_ao[0].size != nao**2:  # aosym = 's2'
+                    if Lpq_ao[1].size != nao**2:  # aosym = 's2'
                         Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
                     out = _ao2mo.r_e2(Lpq_ao, mo, (bra_start, bra_end, ket_start, ket_end), tao, ao_loc)
                 if isinstance(Lov, np.ndarray):
@@ -1123,19 +1132,27 @@ if __name__ == '__main__':
 
     cell = gto.Cell()
     cell.atom='''
-    C 0.000000000000   0.000000000000   0.000000000000
-    C 1.685068664391   1.685068664391   1.685068664391
+    C 0 0 0
     '''
-    cell.basis = 'gth-szv'
-    cell.pseudo = 'gth-pade'
-    cell.a = '''
-    0.000000000, 3.370137329, 3.370137329
-    3.370137329, 0.000000000, 3.370137329
-    3.370137329, 3.370137329, 0.000000000'''
-    cell.unit = 'B'
-    cell.mesh = [15,15,15]  # small PW mesh to save cost
+    cell.basis = '''
+C  S
+    9.031436   -1.960629e-02
+    3.821255   -1.291762e-01
+    0.473725    5.822572e-01
+C  S
+    0.149679    1.000000e+00
+C  P
+    4.353457    8.730943e-02
+    1.266307    2.797034e-01
+    0.398715    5.024424e-01
+C  P
+    0.124238    1.000000e+00
+'''
+    cell.pseudo = 'gth-hf-rev'
+    cell.a = np.eye(3) * 3
+    cell.mesh = [21]*3
     cell.build()
-    cell.verbose = 7
+    cell.verbose = 6
 
     # Running HF and MP2 with 1x1x2 Monkhorst-Pack k-point mesh
     kmf = scf.KRHF(cell, kpts=cell.make_kpts([1,1,2]), exxdiv=None)
@@ -1144,7 +1161,7 @@ if __name__ == '__main__':
 
     mymp = mp.KMP2(kmf)
     emp2, t2 = mymp.kernel()
-    print(emp2 - -0.204722601007946)
+    print(emp2 - -0.0443318084113812)
 
     mymp.t2 = None
     dm1_with_t2 = mymp.make_rdm1(t2=t2)
