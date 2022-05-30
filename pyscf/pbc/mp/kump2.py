@@ -176,9 +176,9 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
 
     emp2_ss /= nkpts
     emp2_os /= nkpts
-    emp2 = emp2_ss + emp2_os
+    emp2 = lib.tag_array(emp2_ss+emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
 
-    return emp2, t2, emp2_ss, emp2_os
+    return emp2, t2
 
 def padding_k_idx(mp, kind="split"):
     """For a description, see `padding_k_idx` in kmp2.py.
@@ -568,8 +568,10 @@ class KUMP2(kmp2.KMP2):
         if self.e_hf is None:
             self.e_hf = self._scf.e_tot
 
-        self.e_corr, self.t2, self.e_corr_ss, self.e_corr_os = \
-                    kernel(self, mo_energy, mo_coeff, eris, with_t2)
+        self.e_corr, self.t2 = kernel(self, mo_energy, mo_coeff, eris, with_t2)
+
+        self.e_corr_ss = getattr(self.e_corr, 'e_corr_ss', 0)
+        self.e_corr_os = getattr(self.e_corr, 'e_corr_os', 0)
 
         self._finalize()
 

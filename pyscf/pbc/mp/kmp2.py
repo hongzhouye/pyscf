@@ -152,9 +152,9 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbos
 
     emp2_ss /= nkpts
     emp2_os /= nkpts
-    emp2 = emp2_ss + emp2_os
+    emp2 = lib.tag_array(emp2_ss+emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
 
-    return emp2, t2, emp2_ss, emp2_os
+    return emp2, t2
 
 def _padding_k_idx(nmo, nocc, kind="split"):
     """A convention used for padding vectors, matrices and tensors in case when occupation numbers depend on the
@@ -775,30 +775,14 @@ class KMP2(mp2.MP2):
         if self.e_hf is None:
             self.e_hf = self._scf.e_tot
 
-        self.e_corr, self.t2, self.e_corr_ss, self.e_corr_os = \
-                    kernel(self, mo_energy, mo_coeff, eris, with_t2)
+        self.e_corr, self.t2 = kernel(self, mo_energy, mo_coeff, eris, with_t2)
+
+        self.e_corr_ss = getattr(self.e_corr, 'e_corr_ss', 0)
+        self.e_corr_os = getattr(self.e_corr, 'e_corr_os', 0)
 
         self._finalize()
 
         return self.e_corr, self.t2
-
-    def _finalize(self):
-        '''Hook for dumping results and clearing up the object.'''
-        log = logger.new_logger(self)
-        log.note('E(%s) = %.15g  E_corr = %.15g',
-                 self.__class__.__name__, self.e_tot, self.e_corr)
-        log.note('E_corr(same-spin) = %.15g', self.e_corr_ss)
-        log.note('E_corr(oppo-spin) = %.15g', self.e_corr_os)
-        return self
-
-    def e_corr_scs(self, pss, pos):
-        return self.e_corr_ss*pss + self.e_corr_os*pos
-    def e_tot_scs(self, pss, pos):
-        return self.e_tot-self.e_corr + self.e_corr_scs(pss,pos)
-    def e_corr_sos(self, pos):
-        return self.e_corr_scs(0., pos)
-    def e_tot_sos(self, pos):
-        return self.e_tot_scs(0., pos)
 
     def _memory_sanity_check(self, with_t2):
         log = logger.new_logger(self)
