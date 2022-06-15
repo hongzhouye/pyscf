@@ -36,6 +36,7 @@ from pyscf.scf import chkfile
 from pyscf.data import nist
 from pyscf import __config__
 
+
 WITH_META_LOWDIN = getattr(__config__, 'scf_analyze_with_meta_lowdin', True)
 PRE_ORTH_METHOD = getattr(__config__, 'scf_analyze_pre_orth_method', 'ANO')
 MO_BASE = getattr(__config__, 'MO_BASE', 1)
@@ -1476,9 +1477,7 @@ class SCF(lib.StreamObject):
 
         log.info('\n')
         log.info('******** %s ********', self.__class__)
-        method = [cls.__name__ for cls in self.__class__.__mro__
-                  if issubclass(cls, SCF) and cls != SCF]
-        log.info('method = %s', '-'.join(method))
+        log.info('method = %s', self._method_name())
         log.info('initial guess = %s', self.init_guess)
         log.info('damping factor = %g', self.damp)
         log.info('level_shift factor = %s', self.level_shift)
@@ -1948,8 +1947,27 @@ class SCF(lib.StreamObject):
         mf.converged = False
         return mf
 
+    def _method_name(self):
+        if isinstance(self, KohnShamDFT):
+            method = [cls.__name__ for cls in self.__class__.__mro__
+                      if issubclass(cls, KohnShamDFT) and cls is not KohnShamDFT]
+        else:
+            method = [cls.__name__ for cls in self.__class__.__mro__
+                      if issubclass(cls, SCF) and cls is not SCF]
+        return '-'.join(method)
 
-############
+    def __repr__(self):
+        cls = self.__class__
+        return f'{self._method_name()} object of {cls}'
+
+
+class KohnShamDFT:
+    '''A mock DFT base class
+
+    The base class KohnShamDFT is defined in the dft.rks module. This class can
+    be used to verify if an SCF object is a Hartree-Fock method or a DFT method.
+    It should be overwritten by the actual KohnShamDFT class when loading dft module.
+    '''
 
 
 class RHF(SCF):
@@ -2036,6 +2054,19 @@ class RHF(SCF):
     def nuc_grad_method(self):
         from pyscf.grad import rhf
         return rhf.Gradients(self)
+
+
+def _hf1e_scf(mf, *args):
+    logger.info(mf, '\n')
+    logger.info(mf, '******** 1 electron system ********')
+    mf.converged = True
+    h1e = mf.get_hcore(mf.mol)
+    s1e = mf.get_ovlp(mf.mol)
+    mf.mo_energy, mf.mo_coeff = mf.eig(h1e, s1e)
+    mf.mo_occ = mf.get_occ(mf.mo_energy, mf.mo_coeff)
+    mf.e_tot = mf.mo_energy[mf.mo_occ>0][0].real + mf.mol.energy_nuc()
+    mf._finalize()
+    return mf.e_tot
 
 
 del(WITH_META_LOWDIN, PRE_ORTH_METHOD)

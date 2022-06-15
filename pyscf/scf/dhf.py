@@ -659,18 +659,7 @@ UHF = UDHF = DHF
 
 
 class HF1e(DHF):
-    def scf(self, *args):
-        logger.info(self, '\n')
-        logger.info(self, '******** 1 electron system ********')
-        self.converged = True
-        h1e = self.get_hcore(self.mol)
-        s1e = self.get_ovlp(self.mol)
-        self.mo_energy, self.mo_coeff = self.eig(h1e, s1e)
-        self.mo_occ = self.get_occ(self.mo_energy, self.mo_coeff)
-        self.e_tot = (self.mo_energy[self.mo_occ>0][0] +
-                      self.mol.energy_nuc()).real
-        self._finalize()
-        return self.e_tot
+    scf = hf._hf1e_scf
 
     def _eigh(self, h, s):
         if zquatev:
@@ -782,8 +771,12 @@ def _call_veff_ssss(mol, dm, hermi=1, mf_opt=None):
 
 def _call_veff_gaunt_breit(mol, dm, hermi=1, mf_opt=None, with_breit=False):
     if with_breit:
+        # integral function int2e_breit_ssp1ssp2_spinor evaluates
+        # -1/2[alpha1*alpha2/r12 + (alpha1*r12)(alpha2*r12)/r12^3]
         intor_prefix = 'int2e_breit_'
     else:
+        # integral function int2e_ssp1ssp2_spinor evaluates only
+        # alpha1*alpha2/r12. Minus sign was not included.
         intor_prefix = 'int2e_'
     if isinstance(dm, numpy.ndarray) and dm.ndim == 2:
         n_dm = 1
