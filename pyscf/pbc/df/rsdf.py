@@ -49,8 +49,12 @@ from pyscf.df.outcore import _guess_shell_ranges
 from pyscf.pbc import tools as pbctools
 from pyscf.pbc.lib.kpts_helper import (is_zero, gamma_point, member, unique,
                                        KPT_DIFF_TOL)
+from pyscf.pbc.df import aft
+from pyscf.pbc.df.aft import _sub_df_jk_
 from pyscf import lib
 from pyscf.lib import logger
+
+LONGRANGE_AFT_TURNOVER_THRESHOLD = 2.5
 
 
 def kpts_to_kmesh(cell, kpts):
@@ -730,7 +734,25 @@ cell.dimension=3 with large vacuum.""")
         # Integral-direct JK starts here
         from pyscf.pbc.df import rsdf_direct_jk
         if omega is not None:  # J/K for RSH functionals
-            raise NotImplementedError
+            cell = self.cell
+            # * AFT is computationally more efficient than GDF if the Coulomb
+            #   attenuation tends to the long-range role (i.e. small omega).
+            # * Note: changing to AFT integrator may cause small difference to
+            #   the GDF integrator. If a very strict GDF result is desired,
+            #   we can disable this trick by setting
+            #   LONGRANGE_AFT_TURNOVER_THRESHOLD to 0.
+            # * The sparse mesh is not appropriate for low dimensional systems
+            #   with infinity vacuum since the ERI may require large mesh to
+            #   sample density in vacuum.
+            if (omega < LONGRANGE_AFT_TURNOVER_THRESHOLD and
+                cell.dimension >= 2 and cell.low_dim_ft_type != 'inf_vacuum'):
+                mydf = aft.AFTDF(cell, self.kpts)
+                mydf.ke_cutoff = aft.estimate_ke_cutoff_for_omega(cell, omega)
+                mydf.mesh = pbctools.cutoff_to_mesh(cell.lattice_vectors(), mydf.ke_cutoff)
+            else:
+                mydf = self
+            return _sub_df_jk_(mydf, dm, hermi, kpts, kpts_band,
+                               with_j, with_k, omega, exxdiv)
 
         if kpts is None:
             if np.all(self.kpts == 0):
