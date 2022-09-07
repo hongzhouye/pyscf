@@ -1891,7 +1891,7 @@ def _eigh_rdm1(dm_kpts, thr_nonzero=EIGH_DM_THRESH):
         if np.any(e < -thr_nonzero):
             raise RuntimeError('Input dm is not PSD.')
         idx1 = np.where(e > thr_nonzero)[0]
-        idx2 = np.asarray([i for i in range(len(e)) if i not in idx1])
+        idx2 = np.asarray([i for i in range(len(e)) if i not in idx1], dtype=int)
         mo_occ[k] = np.concatenate([e[idx1], np.zeros_like(e[idx2])])
         mo_coeff[k] = np.hstack([u[:,idx1], u[:,idx2]])
     return mo_coeff, mo_occ
