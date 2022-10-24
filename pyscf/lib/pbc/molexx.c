@@ -672,7 +672,7 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
     const double *kj_q_cond, *kj_ext_cond, *kj_R_cond;
     const double *lk_mdm_cond;
     const double *cond_R_bra, *cond_R_ket;
-    double cond_mdm, R_bra_ket, denom, numer;
+    double cond_mdm, il_q_dm_cond, R_bra_ket, denom, numer;
 
     double *mdm_pL, *pL, *pL2;
     double vtmp1[3], vtmp2[3];
@@ -703,6 +703,7 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
                 bvk_ij_out = ij_out + bvk_jL*Nao*Nao;
                 for (mdm_iL = 0; mdm_iL < mdm_nimgs; mdm_iL++) {
                     mdm_pL = mdm_Ls + mdm_iL*3;
+                    // mdm cond
                     cond_mdm = lk_mdm_cond[mdm_iL];
                     if (cond_mdm < thresh_K) {
                         continue;
@@ -711,10 +712,12 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
                         eri[i] = 0.;
                     }
                     for (iL = 0; iL < nimgs; iL++) {
+                        // q_bra cond
                         if (il_q_cond[iL] < thresh_K) {
                             continue;
                         }
                         cond_R_bra = il_R_cond + iL*3;
+                        il_q_dm_cond = il_q_cond[iL] * cond_mdm;
                         bvk_iL = bvkidx_by_mdmcell[mdm_iL*nimgs+iL];
                         bvk_kL = bbvk_loc[bvk_jL*bvk_nimgs+bvk_iL];
                         pL = Ls + iL*3;
@@ -725,6 +728,7 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
                         shift_bas(env_loc, env, vtmp1, kptrxyz, 0);
                         for (jL = bvk_cell_loc[bvk_kL];
                              jL < bvk_cell_loc[bvk_kL+1]; jL++) {
+                            // q_ket cond
                             if (kj_q_cond[jL] < thresh_K) {
                                 continue;
                             }
@@ -733,7 +737,7 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
                             R_bra_ket = vec3_dist(cond_R_bra, cond_R_ket);
                             denom = MAX(R_bra_ket-il_ext_cond[iL]-kj_ext_cond[jL],
                                         1.);
-                            numer = il_q_cond[iL] * kj_q_cond[jL] * cond_mdm;
+                            numer = il_q_dm_cond * kj_q_cond[jL];
                             if (numer/denom < thresh_K) {
                                 continue;
                             }
