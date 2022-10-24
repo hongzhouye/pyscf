@@ -667,7 +667,7 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
     double *lk_mdm, *bvk_ij_out;
 
     size_t lsh, lshr, laor, ksh, kshr, kaor, il_shift, kj_shift, i;
-    size_t mdm_iL, iL, jL, bvk_iL, bvk_jL, bvk_kL, idx_iL, bvk_iL_mdm_shift;
+    size_t mdm_iL, iL, jL, bvk_iL, bvk_jL, bvk_kL;
     const double *il_q_cond, *il_ext_cond, *il_R_cond;
     const double *kj_q_cond, *kj_ext_cond, *kj_R_cond;
     const double *lk_mdm_cond;
@@ -675,7 +675,7 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
     double cond_mdm, R_bra_ket, denom, numer;
 
     double *mdm_pL, *pL, *pL2;
-    double vtmp1[3], vtmp2[3], vtmp3[3];
+    double vtmp1[3], vtmp2[3];
 
     for (lshr = 0; lshr < Nbas; lshr++) {
         lsh = lshr + lsh0;
@@ -700,17 +700,21 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
             kj_R_cond = R_cond + kj_shift*3;
             lk_mdm_cond = mdm_cond + (lshr*Nbas+kshr) * mdm_nimgs;
             for (bvk_jL = 0; bvk_jL < bvk_nimgs; bvk_jL++) {
-                // printf("bvk_jL= %d\n", bvk_jL);
                 bvk_ij_out = ij_out + bvk_jL*Nao*Nao;
                 for (mdm_iL = 0; mdm_iL < mdm_nimgs; mdm_iL++) {
-                    // printf("  mdm_iL= %d\n", mdm_iL);
                     mdm_pL = mdm_Ls + mdm_iL*3;
                     cond_mdm = lk_mdm_cond[mdm_iL];
+                    if (cond_mdm < thresh_K) {
+                        continue;
+                    }
                     for (i = 0; i < dilkj; i++) {
                         eri[i] = 0.;
                     }
                     for (iL = 0; iL < nimgs; iL++) {
-                        // printf("    iL= %d\n", iL);
+                        if (il_q_cond[iL] < thresh_K) {
+                            continue;
+                        }
+                        cond_R_bra = il_R_cond + iL*3;
                         bvk_iL = bvkidx_by_mdmcell[mdm_iL*nimgs+iL];
                         bvk_kL = bbvk_loc[bvk_jL*bvk_nimgs+bvk_iL];
                         pL = Ls + iL*3;
@@ -721,9 +725,10 @@ void contract_eri_dm_3(int (*intor)(), double *ij_out, CINTOpt *cintopt,
                         shift_bas(env_loc, env, vtmp1, kptrxyz, 0);
                         for (jL = bvk_cell_loc[bvk_kL];
                              jL < bvk_cell_loc[bvk_kL+1]; jL++) {
-                            // printf("    jL= %d\n", jL);
+                            if (kj_q_cond[jL] < thresh_K) {
+                                continue;
+                            }
                             // qqr cond
-                            cond_R_bra = il_R_cond + iL*3;
                             cond_R_ket = kj_R_cond + jL*3;
                             R_bra_ket = vec3_dist(cond_R_bra, cond_R_ket);
                             denom = MAX(R_bra_ket-il_ext_cond[iL]-kj_ext_cond[jL],
