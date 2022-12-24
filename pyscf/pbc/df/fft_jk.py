@@ -27,6 +27,7 @@ from pyscf.lib import logger
 from pyscf.pbc import tools
 from pyscf.pbc.df.df_jk import _format_dms, _format_kpts_band, _format_jks
 from pyscf.pbc.df.df_jk import _ewald_exxdiv_for_G0
+from pyscf.pbc.df.df_jk import _mo_from_dm
 from pyscf.pbc.lib.kpts_helper import is_zero, gamma_point
 
 
@@ -214,6 +215,9 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
     dms = _format_dms(dm_kpts, kpts)
     nset, nkpts, nao = dms.shape[:3]
 
+    if nset == 1 and hermi == 1 and mo_coeff is None:
+        mo_coeff, mo_occ = _mo_from_dm(dms.reshape(-1,nao,nao), cell.precision)
+
     weight = 1./nkpts * (cell.vol/ngrids)
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
@@ -321,6 +325,9 @@ def get_k_e1_kpts(mydf, dm_kpts, kpts=np.zeros((1,3)), kpts_band=None,
     dm_kpts = lib.asarray(dm_kpts, order='C')
     dms = _format_dms(dm_kpts, kpts)
     nset, nkpts, nao = dms.shape[:3]
+
+    if nset == 1 and mo_coeff is None:
+        mo_coeff, mo_occ = _mo_from_dm(dms.reshape(-1,nao,nao), cell.precision)
 
     weight = 1./nkpts * (cell.vol/ngrids)
 
