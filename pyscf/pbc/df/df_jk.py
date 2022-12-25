@@ -182,13 +182,15 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
                                        shape=(nset,nkpts), order='F',
                                        precision=cell.precision)
             if skmoR is None:
-                log.debug1('Eigh fails for input dm due to non-PSD. Try SVD instead.')
+                log.debug1('get_k_kpts: Eigh fails for input dm due to non-PSD. '
+                           'Try SVD instead.')
         if skmoR is None:
             skmoR, skmoI, skmo2R, skmo2I = _mo_from_dm(dms.reshape(-1,nao,nao),
                                                    method='svd', shape=(nset,nkpts),
                                                    order='F', precision=cell.precision)
             if skmoR[0,0].shape[1] > nao//2:
-                log.debug1('rank(dm) > 2*nao. Fall back to DM-based build.')
+                log.debug1('get_k_kpts: rank(dm) = %d exceeds half of nao = %d. '
+                           'Fall back to DM-based build.', skmoR[0,0].shape[1], nao)
                 skmoR = skmo2R = None
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
@@ -297,7 +299,7 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
     elif skmo2R is None:
         log.debug2('get_k_kpts: build K from symm mo coeff')
         nmo = skmoR[0,0].shape[1]
-        log.debug2('rank(dm) = %d / %d', nmo, nao)
+        log.debug2('get_k_kpts: rank(dm) = %d / %d', nmo, nao)
         skmoI_mask = numpy.asarray([[abs(skmoI[i,k]).max() > cell.precision
                                      for k in range(nkpts)] for i in range(nset)])
         bufR = numpy.empty((mydf.blockdim*nao**2))
@@ -377,7 +379,7 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
         skmo1R = skmoR
         skmo1I = skmoI
         nmo = skmoR[0,0].shape[1]
-        log.debug2('rank(dm) = %d / %d', nmo, nao)
+        log.debug2('get_k_kpts: rank(dm) = %d / %d', nmo, nao)
         skmoI_mask = numpy.asarray([[max(abs(skmo1I[i,k]).max(),
                                          abs(skmo2I[i,k]).max()) > cell.precision
                                      for k in range(nkpts)] for i in range(nset)])
@@ -600,13 +602,15 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                 smoR, smoI = _mo_from_dm(dms.reshape(-1,nao,nao), method='eigh',
                                            order='F', precision=cell.precision)
                 if smoR is None:
-                    log.debug1('Eigh fails for input dm due to non-PSD. Try SVD instead.')
+                    log.debug1('get_jk: Eigh fails for input dm due to non-PSD. '
+                               'Try SVD instead.')
             if smoR is None:
                 smoR, smoI, smo2R, smo2I = _mo_from_dm(dms.reshape(-1,nao,nao),
                                                        method='svd', order='F',
                                                        precision=cell.precision)
                 if smoR[0].shape[1] > nao//2:
-                    log.debug1('rank(dm) > 2*nao. Fall back to DM-based build.')
+                    log.debug1('get_jk: rank(dm) = %d exceeds half of nao = %d. '
+                               'Fall back to DM-based build.', smoR[0].shape[1], nao)
                     smoR = smo2R = None
 
         vkR = numpy.zeros((nset,nao,nao))
@@ -645,7 +649,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
         elif smo2R is None:
             log.debug2('get_jk: build K from symm mo coeff')
             nmo = smoR[0].shape[1]
-            log.debug2('rank(dm) = %d / %d', nmo, nao)
+            log.debug2('get_jk: rank(dm) = %d / %d', nmo, nao)
             smoI_mask = numpy.asarray([abs(moI).max() > cell.precision for moI in smoI])
             k_real = gamma_point(kpt) and not numpy.any(smoI_mask)
             buf2R = numpy.empty((mydf.blockdim*nao*nmo))
@@ -677,7 +681,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
             smo1R = smoR
             smo1I = smoI
             nmo = smo1R[0].shape[1]
-            log.debug2('rank(dm) = %d / %d', nmo, nao)
+            log.debug2('get_jk: rank(dm) = %d / %d', nmo, nao)
             smoI_mask = numpy.asarray([max(abs(mo1I).max(),
                                            abs(mo2I).max()) > cell.precision
                                        for mo1I,mo2I in zip(smo1I,smo2I)])
@@ -716,7 +720,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                                sign, vkR[i], vkI[i], 1)
                     tmp1R = tmp1I = tmp2R = tmp2I = None
         max_memory *= .5
-    log.debug1('max_memory = %d MB (%d in use)', max_memory, mem_now)
+    log.debug1('get_jk: max_memory = %d MB (%d in use)', max_memory, mem_now)
 
     tspans = numpy.zeros((3,2))
     tspannames = ['  load', 'with_j', 'with_k']
