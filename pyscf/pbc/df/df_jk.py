@@ -33,7 +33,7 @@ from pyscf.pbc.lib.kpts import KPoints
 from pyscf.pbc.lib.kpts_helper import is_zero, gamma_point, member
 from pyscf import __config__
 
-EIGH_DM_THRESH = getattr(__config__, 'pbc_gto_df_df_jk_eigh_dm_thresh', 1e-10)
+DM2MO_PREC = getattr(__config__, 'pbc_gto_df_df_jk_dm2mo_prec', 1e-10)
 
 def density_fit(mf, auxbasis=None, mesh=None, with_df=None):
     '''Generte density-fitting SCF object
@@ -175,12 +175,21 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
     dms = _format_dms(dm_kpts, kpts)
     nset, nkpts, nao = dms.shape[:3]
 
-    if not mydf.force_dm_kbuild and hermi == 1:
-        mos, moccs = _mo_from_dm(dms.reshape(-1,nao,nao), cell.precision)
-        if mos is None:
-            log.warn('Input dm is not Hermitian. K-build will be proceeded with dm.')
-    else:
-        mos = moccs = None
+    skmoR = skmo2R = None
+    if not mydf.force_dm_kbuild:
+        if hermi == 1:
+            skmoR, skmoI = _mo_from_dm(dms.reshape(-1,nao,nao), method='eigh',
+                                       shape=(nset,nkpts), order='F',
+                                       precision=cell.precision)
+            if skmoR is None:
+                log.debug1('Eigh fails for input dm due to non-PSD. Try SVD instead.')
+        if skmoR is None:
+            skmoR, skmoI, skmo2R, skmo2I = _mo_from_dm(dms.reshape(-1,nao,nao),
+                                                   method='svd', shape=(nset,nkpts),
+                                                   order='F', precision=cell.precision)
+            if skmoR[0,0].shape[1] > nao//2:
+                log.debug1('rank(dm) > 2*nao. Fall back to DM-based build.')
+                skmoR = skmo2R = None
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     nband = len(kpts_band)
@@ -194,23 +203,34 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
     K(p,q; k2 from k1)
         = V(r k1, q k2, p k2, s k1) * D(s,r; k1)
         = V(L, r k1, q k2) * V(L, s k1, p k2).conj() * D(s,r; k1)         eqn (1)
+    --> in case of Hermitian & PSD DM
         = ( V(L, s k1, p k2) * C(s,i; k1).conj() ).conj()
           * V(L, r k1, q k2) * C(r,i; k1).conj()                          eqn (2)
         = W(L, i k1, p k2).conj() * W(L, i k1, q k2)                      eqn (3)
+    --> in case of non-Hermitian or non-PSD DM
+        = ( V(L, s k1, p k2) * A(s,i; k1).conj() ).conj()
+          * V(L, r k1, q k2) * B(r,i; k1).conj()                          eqn (4)
+        = X(L, i k1, p k2).conj() * Y(L, i k1, q k2)                      eqn (5)
 
     if swap_2e:
-        K(p,q; k1 from k2)
-            = V(p k1, s k2, r k2, q k1) * D(s,r; k2)
-            = V(L, p k1, s k2) * V(L, q k1, r k2).conj() * D(s,r; k2)         eqn (1')
-            = V(L, p k1, s k2) * C(s,i; k2)
-              * ( V(L, q k1, r k2) * C(r,i; k2) ).conj()                      eqn (2')
-            = W(L, p k1, i k2) * W(L, q k1, i k2).conj()                      eqn (3')
+    K(p,q; k1 from k2)
+        = V(p k1, s k2, r k2, q k1) * D(s,r; k2)
+        = V(L, p k1, s k2) * V(L, q k1, r k2).conj() * D(s,r; k2)         eqn (1')
+    --> in case of Hermitian & PSD DM
+        = V(L, p k1, s k2) * C(s,i; k2)
+          * ( V(L, q k1, r k2) * C(r,i; k2) ).conj()                      eqn (2')
+        = W(L, p k1, i k2) * W(L, q k1, i k2).conj()                      eqn (3')
+    --> in case of non-Hermitian or non-PSD DM
+        = V(L, p k1, s k2) * A(s,i; k2)
+          * ( V(L, q k1, r k2) * B(r,i; k2) ).conj()                      eqn (4')
+        = X(L, p k1, i k2) * Y(L, q k1, i k2).conj()                      eqn (5')
 
-    DM-based K-build uses eqn (1) and eqn (1')
-    MO-based K-build uses eqns (2,3) and eqns (2',3')
+    Mode 1: DM-based K-build uses eqn (1) and eqn (1')
+    Mode 2: Symm MO-based K-build uses eqns (2,3) and eqns (2',3')
+    Mode 3: Asymm MO-based K-build uses eqns (4,5) and eqns (4',5')
     '''
     # K_pq = ( p{k1} i{k2} | i{k2} q{k1} )
-    if mos is None: # input dm is not Hermitian --> build K from dm
+    if skmoR is None: # input dm is not Hermitian/PSD --> build K from dm
         log.debug2('get_k_kpts: build K from dm')
         dmsR = numpy.asarray(dms.real, order='C')
         dmsI = numpy.asarray(dms.imag, order='C')
@@ -274,9 +294,8 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
                 tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
 
                 LpqR = LpqI = pLqR = pLqI = tmpR = tmpI = None
-    else:
-        log.debug2('get_k_kpts: build K from mo coeff')
-        skmoR, skmoI = _format_mos(mos, moccs, order='C', shape=(nset,nkpts))
+    elif skmo2R is None:
+        log.debug2('get_k_kpts: build K from symm mo coeff')
         nmo = skmoR[0,0].shape[1]
         log.debug2('rank(dm) = %d / %d', nmo, nao)
         skmoI_mask = numpy.asarray([[abs(skmoI[i,k]).max() > cell.precision
@@ -317,9 +336,9 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
                         lib.ddot(moR.T, pLqI.reshape(nao,-1), 1, tmpI)
                     tick = numpy.asarray((logger.process_clock(), logger.perf_counter()))
                     tspans[1] += tick - tock
-                    tmpR = tmpR.reshape(-1,nao)
-                    tmpI = tmpI.reshape(-1,nao)
-                    zdotCN(tmpR.T, tmpI.T, tmpR, tmpI, sign, vkR[i,kj], vkI[i,kj], 1)
+                    zdotCN(tmpR.reshape(-1,nao).T, tmpI.reshape(-1,nao).T,
+                           tmpR.reshape(-1,nao), tmpI.reshape(-1,nao),
+                           sign, vkR[i,kj], vkI[i,kj], 1)
                     tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
                     tspans[2] += tock - tick
 
@@ -344,9 +363,8 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
                             lib.ddot(pLqI.reshape(-1,nao), moR, 1, tmpI)
                         tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
                         tspans[4] += tock - tick
-                        tmpR = tmpR.reshape(nao,-1)
-                        tmpI = tmpI.reshape(nao,-1)
-                        zdotNC(tmpR, tmpI, tmpR.T, tmpI.T,
+                        zdotNC(tmpR.reshape(nao,-1), tmpI.reshape(nao,-1),
+                               tmpR.reshape(nao,-1).T, tmpI.reshape(nao,-1).T,
                                sign, vkR[i,ki_tmp], vkI[i,ki_tmp], 1)
                         tick = numpy.asarray((logger.process_clock(), logger.perf_counter()))
                         tspans[5] += tick - tock
@@ -354,6 +372,105 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
                 tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
 
                 LpqR = LpqI = pLqR = pLqI = tmpR = tmpI = None
+    else:
+        log.debug2('get_k_kpts: build K from asymm mo coeff')
+        skmo1R = skmoR
+        skmo1I = skmoI
+        nmo = skmoR[0,0].shape[1]
+        log.debug2('rank(dm) = %d / %d', nmo, nao)
+        skmoI_mask = numpy.asarray([[max(abs(skmo1I[i,k]).max(),
+                                         abs(skmo2I[i,k]).max()) > cell.precision
+                                     for k in range(nkpts)] for i in range(nset)])
+        bufR = numpy.empty((mydf.blockdim*nao**2))
+        bufI = numpy.empty((mydf.blockdim*nao**2))
+        max_memory = max(2000, mydf.max_memory-lib.current_memory()[0])
+        def make_kpt(ki, kj, swap_2e, inverse_idx=None):
+            kpti = kpts[ki]
+            kptj = kpts_band[kj]
+
+            tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+
+            for LpqR, LpqI, sign in mydf.sr_loop((kpti,kptj), max_memory, False):
+                nrow = LpqR.shape[0]
+
+                tick = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[6] += tick - tock
+
+                pLqR = numpy.ndarray((nao,nrow,nao), buffer=bufR)
+                pLqI = numpy.ndarray((nao,nrow,nao), buffer=bufI)
+                tmp1R = numpy.ndarray((nmo,nrow*nao), buffer=LpqR)
+                tmp1I = numpy.ndarray((nmo,nrow*nao), buffer=LpqI)
+                tmp2R = numpy.ndarray((nmo,nrow*nao),
+                                      buffer=LpqR.reshape(-1)[tmp1R.size:])
+                tmp2I = numpy.ndarray((nmo,nrow*nao),
+                                      buffer=LpqI.reshape(-1)[tmp1I.size:])
+                pLqR[:] = LpqR.reshape(-1,nao,nao).transpose(1,0,2)
+                pLqI[:] = LpqI.reshape(-1,nao,nao).transpose(1,0,2)
+
+                tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+                tspans[0] += tock - tick
+
+                for i in range(nset):
+                    mo1R = skmo1R[i,ki]
+                    mo2R = skmo2R[i,ki]
+                    if skmoI_mask[i,ki]:
+                        mo1I = skmo1I[i,ki]
+                        mo2I = skmo2I[i,ki]
+                        zdotCN(mo1R.T, mo1I.T, pLqR.reshape(nao,-1), pLqI.reshape(nao,-1),
+                               1, tmp1R, tmp1I)
+                        zdotCN(mo2R.T, mo2I.T, pLqR.reshape(nao,-1), pLqI.reshape(nao,-1),
+                               1, tmp2R, tmp2I)
+                    else:
+                        lib.ddot(mo1R.T, pLqR.reshape(nao,-1), 1, tmp1R)
+                        lib.ddot(mo1R.T, pLqI.reshape(nao,-1), 1, tmp1I)
+                        lib.ddot(mo2R.T, pLqR.reshape(nao,-1), 1, tmp2R)
+                        lib.ddot(mo2R.T, pLqI.reshape(nao,-1), 1, tmp2I)
+                    tick = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[1] += tick - tock
+                    zdotCN(tmp1R.reshape(-1,nao).T, tmp1I.reshape(-1,nao).T,
+                           tmp2R.reshape(-1,nao), tmp2I.reshape(-1,nao),
+                           sign, vkR[i,kj], vkI[i,kj], 1)
+                    tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[2] += tock - tick
+
+                if swap_2e:
+                    tmp1R = tmp1R.reshape(nrow*nao,nmo)
+                    tmp1I = tmp1I.reshape(nrow*nao,nmo)
+                    tmp2R = tmp2R.reshape(nrow*nao,nmo)
+                    tmp2I = tmp2I.reshape(nrow*nao,nmo)
+                    tick = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[3] += tick - tock
+                    ki_tmp = ki
+                    kj_tmp = kj
+                    if inverse_idx:
+                        ki_tmp = inverse_idx[0]
+                        kj_tmp = inverse_idx[1]
+                    for i in range(nset):
+                        mo1R = skmo1R[i,kj_tmp]
+                        mo2R = skmo2R[i,kj_tmp]
+                        if skmoI_mask[i,kj_tmp]:
+                            mo1I = skmo1I[i,kj_tmp]
+                            mo2I = skmo2I[i,kj_tmp]
+                            zdotNN(pLqR.reshape(-1,nao), pLqI.reshape(-1,nao), mo1R, mo1I,
+                                   1, tmp1R, tmp1I)
+                            zdotNN(pLqR.reshape(-1,nao), pLqI.reshape(-1,nao), mo2R, mo2I,
+                                   1, tmp2R, tmp2I)
+                        else:
+                            lib.ddot(pLqR.reshape(-1,nao), mo1R, 1, tmp1R)
+                            lib.ddot(pLqI.reshape(-1,nao), mo1R, 1, tmp1I)
+                            lib.ddot(pLqR.reshape(-1,nao), mo2R, 1, tmp2R)
+                            lib.ddot(pLqI.reshape(-1,nao), mo2R, 1, tmp2I)
+                        tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[4] += tock - tick
+                        zdotNC(tmp1R.reshape(nao,-1), tmp1I.reshape(nao,-1),
+                               tmp2R.reshape(nao,-1).T, tmp2I.reshape(nao,-1).T,
+                               sign, vkR[i,ki_tmp], vkI[i,ki_tmp], 1)
+                        tick = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[5] += tick - tock
+
+                tock = numpy.asarray((logger.process_clock(), logger.perf_counter()))
+
+                LpqR = LpqI = pLqR = pLqI = tmp1R = tmp1I = tmp2R = tmp2I = None
 
     t1 = (logger.process_clock(), logger.perf_counter())
     if kpts_band is kpts:  # normal k-points HF/DFT
@@ -455,26 +572,48 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
         vjI = numpy.zeros((nset,nao,nao))
     if with_k:
         ''' math
-        K(p,q)
-            = V(r,q,p,s) * D(s,r)
-            = V(L,r,q) * V(L,s,p).conj() * D(s,r)                             eqn (1)
-            = ( V(L,s,p) * C(s,i).conj() ).conj() * V(L,r,q) * C(r,i).conj()  eqn (2)
-            = W(L,i,p).conj() * W(L,i,q)                                      eqn (3)
+        Mode 1: DM-based K-build:
+            K(p,q)
+                = V(r,q,p,s) * D(s,r)
+                = V(L,r,q) * V(L,s,p).conj() * D(s,r)    eqn (1)
 
-        DM-based K-build uses eqn (1)
-        MO-based K-build uses eqns (2,3)
+        Mode 2: Symm MO-based K-build:
+        In case of Hermitian & PSD DM, eqn (1) can be rewritten as
+            K(p,q)
+                = W(L,i,p).conj() * W(L,i,q)
+        where
+            W(L,i,p) = V(L,s,p) * C(s,i).conj()
+            D(s,r) = C(s,i) * C(r,i).conj()
+
+        Mode 3: Asymm MO-based K-build:
+        In case of non-Hermitian or Hermitian but non-PSD DM, eqn (1) can be rewritten as
+            K(p,q)
+                = X(L,i,p).conj() * Y(L,i,q)
+            where
+                X(L,i,p) = V(L,s,p) * A(s,i).conj()
+                Y(L,i,q) = V(L,r,q) * B(r,i).conj()
+                D(s,r) = A(s,i) * B(r,i).conj()
         '''
-        if not mydf.force_dm_kbuild and hermi == 1:
-            mos, moccs = _mo_from_dm(dms.reshape(-1,nao,nao), cell.precision)
-            if mos is None:
-                log.warn('Input dm is not Hermitian. K-build will be proceeded with dm.')
-        else:
-            mos = moccs = None
+        smoR = smo2R = None
+        if not mydf.force_dm_kbuild:
+            if hermi == 1:
+                smoR, smoI = _mo_from_dm(dms.reshape(-1,nao,nao), method='eigh',
+                                           order='F', precision=cell.precision)
+                if smoR is None:
+                    log.debug1('Eigh fails for input dm due to non-PSD. Try SVD instead.')
+            if smoR is None:
+                smoR, smoI, smo2R, smo2I = _mo_from_dm(dms.reshape(-1,nao,nao),
+                                                       method='svd', order='F',
+                                                       precision=cell.precision)
+                if smoR[0].shape[1] > nao//2:
+                    log.debug1('rank(dm) > 2*nao. Fall back to DM-based build.')
+                    smoR = smo2R = None
+
         vkR = numpy.zeros((nset,nao,nao))
         vkI = numpy.zeros((nset,nao,nao))
         buf1R = numpy.empty((mydf.blockdim*nao**2))
         buf1I = numpy.zeros((mydf.blockdim*nao**2))
-        if mos is None:
+        if smoR is None:
             # K ~ 'iLj,lLk*,li->kj' + 'lLk*,iLj,li->kj'
             #:pLq = (LpqR + LpqI.reshape(-1,nao,nao)*1j).transpose(1,0,2)
             #:tmp = numpy.dot(dm, pLq.reshape(nao,-1))
@@ -503,9 +642,8 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                         zdotCN(pLqR.reshape(-1,nao).T, pLqI.reshape(-1,nao).T,
                                tmpR.reshape(-1,nao), tmpI.reshape(-1,nao),
                                sign, vkR[i], vkI[i], 1)
-        else:
-            log.debug2('get_jk: build K from mo coeff')
-            smoR, smoI = _format_mos(mos, moccs, order='F')
+        elif smo2R is None:
+            log.debug2('get_jk: build K from symm mo coeff')
             nmo = smoR[0].shape[1]
             log.debug2('rank(dm) = %d / %d', nmo, nao)
             smoI_mask = numpy.asarray([abs(moI).max() > cell.precision for moI in smoI])
@@ -517,8 +655,8 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                     tmpR = numpy.ndarray((nmo,nrow*nao), buffer=buf2R)
                     for i in range(nset):
                         lib.ddot(smoR[i].T, pLqR.reshape(nao,-1), 1, tmpR)
-                        tmpR = tmpR.reshape(-1,nao)
-                        lib.ddot(tmpR.T, tmpR, sign, vkR[i], 1)
+                        lib.ddot(tmpR.reshape(-1,nao).T, tmpR.reshape(-1,nao),
+                                 sign, vkR[i], 1)
                     tmpR = None
             else:
                 buf2I = numpy.empty((mydf.blockdim*nao*nmo))
@@ -530,10 +668,53 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                         zdotCN(smoR[i].T, smoI[i].T,
                                pLqR.reshape(nao,-1), pLqI.reshape(nao,-1),
                                1, tmpR, tmpI, 0)
-                        tmpR = tmpR.reshape(-1,nao)
-                        tmpI = tmpI.reshape(-1,nao)
-                        zdotCN(tmpR.T, tmpI.T, tmpR, tmpI, sign, vkR[i], vkI[i], 1)
+                        zdotCN(tmpR.reshape(-1,nao).T, tmpI.reshape(-1,nao).T,
+                               tmpR.reshape(-1,nao), tmpI.reshape(-1,nao),
+                               sign, vkR[i], vkI[i], 1)
                     tmpR = tmpI = None
+        else:
+            log.debug2('get_jk: build K from asymm mo coeff')
+            smo1R = smoR
+            smo1I = smoI
+            nmo = smo1R[0].shape[1]
+            log.debug2('rank(dm) = %d / %d', nmo, nao)
+            smoI_mask = numpy.asarray([max(abs(mo1I).max(),
+                                           abs(mo2I).max()) > cell.precision
+                                       for mo1I,mo2I in zip(smo1I,smo2I)])
+            k_real = gamma_point(kpt) and not numpy.any(smoI_mask)
+            buf2R = numpy.empty((mydf.blockdim*nao*nmo*2))
+            buf3R = buf2R[buf2R.size//2:]
+            if k_real:
+                def contract_k(pLqR, pLqI, sign):
+                    nrow = pLqR.shape[1]
+                    tmp1R = numpy.ndarray((nmo,nrow*nao), buffer=buf2R)
+                    tmp2R = numpy.ndarray((nmo,nrow*nao), buffer=buf3R)
+                    for i in range(nset):
+                        lib.ddot(smo1R[i].T, pLqR.reshape(nao,-1), 1, tmp1R)
+                        lib.ddot(smo2R[i].T, pLqR.reshape(nao,-1), 1, tmp2R)
+                        lib.ddot(tmp1R.reshape(-1,nao).T, tmp2R.reshape(-1,nao),
+                                 sign, vkR[i], 1)
+                    tmp1R = tmp2R = None
+            else:
+                buf2I = numpy.empty((mydf.blockdim*nao*nmo*2))
+                buf3I = buf2I[buf2I.size//2:]
+                def contract_k(pLqR, pLqI, sign):
+                    nrow = pLqR.shape[1]
+                    tmp1R = numpy.ndarray((nmo,nrow*nao), buffer=buf2R)
+                    tmp1I = numpy.ndarray((nmo,nrow*nao), buffer=buf2I)
+                    tmp2R = numpy.ndarray((nmo,nrow*nao), buffer=buf3R)
+                    tmp2I = numpy.ndarray((nmo,nrow*nao), buffer=buf3I)
+                    for i in range(nset):
+                        zdotCN(smo1R[i].T, smo1I[i].T,
+                               pLqR.reshape(nao,-1), pLqI.reshape(nao,-1),
+                               1, tmp1R, tmp1I, 0)
+                        zdotCN(smo2R[i].T, smo2I[i].T,
+                               pLqR.reshape(nao,-1), pLqI.reshape(nao,-1),
+                               1, tmp2R, tmp2I, 0)
+                        zdotCN(tmp1R.reshape(-1,nao).T, tmp1I.reshape(-1,nao).T,
+                               tmp2R.reshape(-1,nao), tmp2I.reshape(-1,nao),
+                               sign, vkR[i], vkI[i], 1)
+                    tmp1R = tmp1I = tmp2R = tmp2I = None
         max_memory *= .5
     log.debug1('max_memory = %d MB (%d in use)', max_memory, mem_now)
 
@@ -613,22 +794,74 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
     log.timer('sr jk', *t0)
     return vj, vk
 
-def _mo_from_dm(dms, thresh_eigval_discard=EIGH_DM_THRESH):
+def _mo_from_dm(dms, method='eigh', shape=None, order='C', precision=DM2MO_PREC):
     import scipy.linalg
     nkpts = len(dms)
-    mos = numpy.empty(nkpts, dtype=object)
-    moccs = numpy.empty(nkpts, dtype=object)
-    nonPSD = False
-    for k,dm in enumerate(dms):
-        e, u = scipy.linalg.eigh(dm)
-        if numpy.any(e < -thresh_eigval_discard):
-            nonPSD = True
-            break
-        idx = numpy.where(e > thresh_eigval_discard)[0]
-        mos[k] = u[:,idx]
-        moccs[k] = e[idx]
-    if nonPSD: mos = moccs = None
-    return mos, moccs
+
+    def sep_real_imag(a, ncolmax, order):
+        nrow = a.shape[0]
+        aR = numpy.zeros((nrow,ncolmax), dtype=numpy.float64)
+        aI = numpy.zeros((nrow,ncolmax), dtype=numpy.float64)
+        ncol = a.shape[1]
+        aR[:,:ncol] = numpy.asarray(a.real, order=order)
+        aI[:,:ncol] = numpy.asarray(a.imag, order=order)
+        return aR, aI
+
+    if method == 'eigh':
+        def feigh(dm):
+            e, u = scipy.linalg.eigh(dm)
+            if numpy.any(e < -precision): # PSD matrix
+                mo = None
+            else:
+                mask = e > precision
+                mo = u[:,mask] * e[mask]**0.5
+            return mo
+
+        mos = numpy.empty(nkpts, dtype=object)
+        for k,dm in enumerate(dms):
+            mo = feigh(dm)
+            if mo is None:
+                return None, None
+            mos[k] = mo
+
+        nmos = [mo.shape[1] for mo in mos]
+        nmomax = max(nmos)
+        nao = mos[0].shape[0]
+        moRs = numpy.empty(nkpts, dtype=object)
+        moIs = numpy.empty(nkpts, dtype=object)
+        for k,mo in enumerate(mos):
+            moRs[k], moIs[k] = sep_real_imag(mo, nmomax, order)
+        if shape is not None:
+            moRs = moRs.reshape(*shape)
+            moIs = moIs.reshape(*shape)
+        return moRs, moIs
+    elif method == 'svd':
+        def fsvd(dm):
+            u, e, vt = scipy.linalg.svd(dm)
+            mask = e > precision
+            mo1 = u[:,mask] * e[mask]
+            mo2 = vt[mask].T.conj()
+            return mo1, mo2
+
+        mos = [fsvd(dm) for k,dm in enumerate(dms)]
+        nmos = [x[0].shape[1] for x in mos]
+        nmomax = max(nmos)
+        nao = mos[0][0].shape[0]
+        mo1Rs = numpy.empty(nkpts, dtype=object)
+        mo1Is = numpy.empty(nkpts, dtype=object)
+        mo2Rs = numpy.empty(nkpts, dtype=object)
+        mo2Is = numpy.empty(nkpts, dtype=object)
+        for k,(mo1,mo2) in enumerate(mos):
+            mo1Rs[k], mo1Is[k] = sep_real_imag(mo1, nmomax, order)
+            mo2Rs[k], mo2Is[k] = sep_real_imag(mo2, nmomax, order)
+        if shape is not None:
+            mo1Rs = mo1Rs.reshape(*shape)
+            mo1Is = mo1Is.reshape(*shape)
+            mo2Rs = mo2Rs.reshape(*shape)
+            mo2Is = mo2Is.reshape(*shape)
+        return mo1Rs, mo1Is, mo2Rs, mo2Is
+    else:
+        raise RuntimeError('Unknown method %s' % method)
 
 def _format_dms(dm_kpts, kpts):
     nkpts = len(kpts)
@@ -637,29 +870,6 @@ def _format_dms(dm_kpts, kpts):
     if dms.dtype not in (numpy.double, numpy.complex128):
         dms = numpy.asarray(dms, dtype=numpy.double)
     return dms
-
-def _format_mos(mos, moccs, order='C', shape=None):
-    n = len(mos)
-    nao = mos[0].shape[0]
-    nmomax = max([numpy.count_nonzero(mocc) for mocc in moccs])
-    skmoR = numpy.empty(n, dtype=object)
-    skmoI = numpy.empty(n, dtype=object)
-    for k in range(n):
-        mo = mos[k]
-        mocc = moccs[k]
-        idx = numpy.where(mocc>0)[0]
-        nmo = len(idx)
-        mo1 = mo[:,idx] * mocc[idx]**0.5
-        mo1R = numpy.zeros((nao,nmomax))
-        mo1I = numpy.zeros((nao,nmomax))
-        mo1R[:,:nmo] = numpy.asarray(mo1.real, order=order)
-        mo1I[:,:nmo] = numpy.asarray(mo1.imag, order=order)
-        skmoR[k] = mo1R
-        skmoI[k] = mo1I
-    if shape is not None:
-        skmoR = skmoR.reshape(*shape)
-        skmoI = skmoI.reshape(*shape)
-    return skmoR, skmoI
 
 def _format_kpts_band(kpts_band, kpts):
     if kpts_band is None:
