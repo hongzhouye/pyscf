@@ -16,6 +16,7 @@
 from pyscf.pbc import scf
 from pyscf.pbc.mp import mp2
 from pyscf.pbc.mp import kmp2
+from pyscf.pbc.mp import kump2
 from pyscf.pbc.mp import kmp2_ksymm
 from pyscf.pbc.lib import kpts as libkpts
 
@@ -33,10 +34,16 @@ def GMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
     mf = scf.addons.convert_to_ghf(mf)
     return mp2.GMP2(mf, frozen, mo_coeff, mo_occ)
 
+# TODO: separate KRHF/KUHF etc like in molecular MP2
 def KRMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
     if isinstance(mf.kpts, libkpts.KPoints):
         return kmp2_ksymm.KRMP2(mf, frozen, mo_coeff, mo_occ)
     else:
-        return kmp2.KRMP2(mf, frozen, mo_coeff, mo_occ)
+        if isinstance(mf, scf.khf.KRHF):
+            return kmp2.KRMP2(mf, frozen, mo_coeff, mo_occ)
+        elif isinstance(mf, scf.kuhf.KUHF):
+            return kump2.KUMP2(mf, frozen, mo_coeff, mo_occ)
+        else:
+            raise NotImplementedError
 
 KMP2 = KRMP2
