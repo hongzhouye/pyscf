@@ -480,6 +480,11 @@ def kernel(mf, mo_coeff=None, mo_occ=None, dm=None,
     # call mf._scf.get_hcore, mf._scf.get_ovlp because they might be overloaded
     h1e = mf._scf.get_hcore(mol)
     s1e = mf._scf.get_ovlp(mol)
+    cond = lib.cond(s1e)
+    log.debug('cond(S) = %s', cond)
+    if numpy.max(cond)*1e-17 > conv_tol:
+        log.warn('Singularity detected in overlap matrix (condition number = %4.3g). '
+                 'SCF may be inaccurate and hard to converge.', numpy.max(cond))
 
     if mo_coeff is not None and mo_occ is not None:
         dm = mf.make_rdm1(mo_coeff, mo_occ)
