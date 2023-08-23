@@ -30,26 +30,29 @@ eri of size (nkpts,nocc,nocc,nvir,nvir)
 import numpy as np
 from scipy.linalg import block_diag
 import h5py
+import tempfile
 
 from pyscf import lib
 from pyscf.lib import logger, einsum
 from pyscf.mp import mp2
 from pyscf.pbc.df import df
 from pyscf.pbc.lib import kpts_helper
+from pyscf.pbc.lib.kpts_helper import gamma_point
 from pyscf.pbc.lib import kpts as libkpts
 from pyscf.lib.parameters import LARGE_DENOM
 from pyscf import __config__
 
 WITH_T2 = getattr(__config__, 'mp_mp2_with_t2', True)
 
-def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
+
+def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     """Computes k-point RMP2 energy.
 
     Args:
         mp (KMP2): an instance of KMP2
-        mo_energy (list): a list of numpy.ndarray. Each array contains MO energies of
+        mo_energy (list): a list of np.ndarray. Each array contains MO energies of
                           shape (Nmo,) for one kpt
-        mo_coeff (list): a list of numpy.ndarray. Each array contains MO coefficients
+        mo_coeff (list): a list of np.ndarray. Each array contains MO coefficients
                          of shape (Nao, Nmo) for one kpt
         verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
         with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to WITH_T2 (=True).
@@ -60,37 +63,19 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp, verbose)
 
-    mp.dump_flags()
+    if eris is None:
+        eris = mp.ao2mo(mo_coeff, with_t2)
+
+    if mo_energy is None:
+        mo_energy = eris.mo_energy
+
     nmo = mp.nmo
     nocc = mp.nocc
     nvir = nmo - nocc
     nkpts = mp.nkpts
 
-    with_df_ints = mp.with_df_ints and isinstance(mp._scf.with_df, df.GDF)
-
-    mem_avail = mp.max_memory - lib.current_memory()[0]
-    mem_usage = (nkpts * (nocc * nvir)**2) * 16 / 1e6
-    if with_df_ints:
-        mydf = mp._scf.with_df
-        if mydf.auxcell is None:
-            # Calculate naux based on precomputed GDF integrals
-            naux = mydf.get_naoaux()
-        else:
-            naux = mydf.auxcell.nao_nr()
-
-        mem_usage += (nkpts**2 * naux * nocc * nvir) * 16 / 1e6
-    if with_t2:
-        mem_usage += (nkpts**3 * (nocc * nvir)**2) * 16 / 1e6
-    if mem_usage > mem_avail:
-        raise MemoryError('Insufficient memory! MP2 memory usage %d MB (currently available %d MB)'
-                          % (mem_usage, mem_avail))
-
-    eia = np.zeros((nocc,nvir))
-    eijab = np.zeros((nocc,nocc,nvir,nvir))
-
-    fao2mo = mp._scf.with_df.ao2mo
     kconserv = mp.khelper.kconserv
-    oovv_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=mo_coeff[0].dtype)
+    ovov_ij = np.zeros((2,nocc,nvir,nocc,nvir), dtype=eris.dtype)
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -103,126 +88,71 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     else:
         t2 = None
 
-    # Build 3-index DF tensor Lov
-    if with_df_ints:
-        Lov = _init_mp_df_eris(mp)
+    def get_eia(ki, ka):
+        eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+        n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+        eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+        return eia
+
+    cput1 = (logger.process_clock(), logger.perf_counter())
 
     emp2_ss = emp2_os = 0.
     for ki in range(nkpts):
         for kj in range(nkpts):
+            done = {(ka,kconserv[ki,ka,kj]):False for ka in range(nkpts)}
             for ka in range(nkpts):
                 kb = kconserv[ki,ka,kj]
-                # (ia|jb)
-                if with_df_ints:
-                    oovv_ij[ka] = (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki, ka], Lov[kj, kb]).transpose(0,2,1,3)
+
+                if done[(ka,kb)] or done[(kb,ka)]:
+                    continue
+
+                ovov_ij[0] = eris.get_ovov((ki,ka,kj,kb))
+                if ka != kb:
+                    ovov_ij[1] = eris.get_ovov((ki,kb,kj,ka))
+                    fac_swap = 2
                 else:
-                    orbo_i = mo_coeff[ki][:,:nocc]
-                    orbo_j = mo_coeff[kj][:,:nocc]
-                    orbv_a = mo_coeff[ka][:,nocc:]
-                    orbv_b = mo_coeff[kb][:,nocc:]
-                    oovv_ij[ka] = fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
-                                         (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
-                                         compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
-            for ka in range(nkpts):
-                kb = kconserv[ki,ka,kj]
+                    ovov_ij[1] = ovov_ij[0]
+                    fac_swap = 1
 
-                # Remove zero/padded elements from denominator
-                eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
-                eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+                eia = get_eia(ki, ka)
+                ejb = get_eia(kj, kb)
+                eiajb = lib.direct_sum('ia,jb->iajb', eia, ejb)
 
-                ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
-                ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
-
-                eijab = lib.direct_sum('ia,jb->ijab',eia,ejb)
-                t2_ijab = np.conj(oovv_ij[ka]/eijab)
+                t2_iajb = np.conj(ovov_ij[0] / eiajb)
                 if with_t2:
-                    t2[ki, kj, ka] = t2_ijab
-                edi = einsum('ijab,ijab', t2_ijab, oovv_ij[ka]).real * 2
-                exi = -einsum('ijab,ijba', t2_ijab, oovv_ij[kb]).real
+                    t2[ki,kj,ka] = t2_iajb.transpose(0,2,1,3)
+
+                edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * 2
+                exi = -einsum('iajb,ibja', t2_iajb, ovov_ij[1]).real * fac_swap
                 emp2_ss += edi*0.5 + exi
                 emp2_os += edi*0.5
 
-    log.timer("KMP2", *cput0)
+                t2_iajb = None
+
+                if ka != kb:
+                    t2_ibja = np.conj(ovov_ij[1] / eiajb.transpose(0,3,2,1))
+                    if with_t2:
+                        t2[ki,kj,ka] = t2_ibja.transpose(0,2,1,3)
+
+                    edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2
+                    emp2_ss += edi*0.5
+                    emp2_os += edi*0.5
+
+                    t2_ibja = None
+
+                eiajb = None
+
+                done[(ka,kb)] = done[(kb,ka)] = True
+
+            log.timer_debug1('(ki,kj) = (%d,%d)' % (ki,kj), *cput1)
+
+    log.timer(mp.__class__.__name__, *cput0)
 
     emp2_ss /= nkpts
     emp2_os /= nkpts
     emp2 = lib.tag_array(emp2_ss+emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
 
     return emp2, t2
-
-
-def _init_mp_df_eris(mp):
-    """Compute 3-center electron repulsion integrals, i.e. (L|ov),
-    where `L` denotes DF auxiliary basis functions and `o` and `v` occupied and virtual
-    canonical crystalline orbitals. Note that `o` and `v` contain kpt indices `ko` and `kv`,
-    and the third kpt index `kL` is determined by the conservation of momentum.
-
-    Arguments:
-        mp (KMP2) -- A KMP2 instance
-
-    Returns:
-        Lov (numpy.ndarray) -- 3-center DF ints, with shape (nkpts, nkpts, naux, nocc, nvir)
-    """
-    from pyscf.ao2mo import _ao2mo
-    from pyscf.pbc.lib.kpts_helper import gamma_point
-
-    log = logger.Logger(mp.stdout, mp.verbose)
-
-    if mp._scf.with_df._cderi is None:
-        mp._scf.with_df.build()
-
-    cell = mp._scf.cell
-    if cell.dimension == 2:
-        # 2D ERIs are not positive definite. The 3-index tensors are stored in
-        # two part. One corresponds to the positive part and one corresponds
-        # to the negative part. The negative part is not considered in the
-        # DF-driven CCSD implementation.
-        raise NotImplementedError
-
-    nocc = mp.nocc
-    nmo = mp.nmo
-    nvir = nmo - nocc
-    nao = cell.nao_nr()
-
-    mo_coeff = _add_padding(mp, mp.mo_coeff, mp.mo_energy)[0]
-    kpts = mp.kpts
-    nkpts = len(kpts)
-    if gamma_point(kpts):
-        dtype = np.double
-    else:
-        dtype = np.complex128
-    dtype = np.result_type(dtype, *mo_coeff)
-    Lov = np.empty((nkpts, nkpts), dtype=object)
-
-    cput0 = (logger.process_clock(), logger.perf_counter())
-
-    bra_start = 0
-    bra_end = nocc
-    ket_start = nmo+nocc
-    ket_end = ket_start + nvir
-    with df.CDERIArray(mp._scf.with_df._cderi) as cderi_array:
-        tao = []
-        ao_loc = None
-        for ki in range(nkpts):
-            for kj in range(nkpts):
-                Lpq_ao = cderi_array[ki,kj]
-
-                mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
-                mo = np.asarray(mo, dtype=dtype, order='F')
-                if dtype == np.double:
-                    out = _ao2mo.nr_e2(Lpq_ao, mo, (bra_start, bra_end, ket_start, ket_end), aosym='s2')
-                else:
-                    #Note: Lpq.shape[0] != naux if linear dependency is found in auxbasis
-                    if Lpq_ao[0].size != nao**2:  # aosym = 's2'
-                        Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
-                    out = _ao2mo.r_e2(Lpq_ao, mo, (bra_start, bra_end, ket_start, ket_end), tao, ao_loc)
-                Lov[ki, kj] = out.reshape(-1, nocc, nvir)
-
-    log.timer_debug1("transforming DF-MP2 integrals", *cput0)
-
-    return Lov
 
 
 def _padding_k_idx(nmo, nocc, kind="split"):
@@ -742,8 +672,8 @@ class KMP2(mp2.MP2):
         logger.info(self, "")
         logger.info(self, "******** %s ********", self.__class__)
         logger.info(self, "nkpts = %d", self.nkpts)
-        logger.info(self, "nocc = %d", self.nocc)
-        logger.info(self, "nmo = %d", self.nmo)
+        logger.info(self, "nocc = %s", self.nocc)
+        logger.info(self, "nmo = %s", self.nmo)
         logger.info(self, "with_df_ints = %s", self.with_df_ints)
 
         if self.frozen is not None:
@@ -756,23 +686,26 @@ class KMP2(mp2.MP2):
         )
         return self
 
-    def kernel(self, mo_energy=None, mo_coeff=None, with_t2=WITH_T2):
-        if mo_energy is None:
-            mo_energy = self.mo_energy
-        if mo_coeff is None:
-            mo_coeff = self.mo_coeff
-        if mo_energy is None or mo_coeff is None:
-            log = logger.Logger(self.stdout, self.verbose)
-            log.warn('mo_coeff, mo_energy are not given.\n'
-                     'You may need to call mf.kernel() to generate them.')
-            raise RuntimeError
+    def kernel(self, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2):
+        '''
+        Args:
+            with_t2 : bool
+                Whether to generate and hold t2 amplitudes in memory.
+        '''
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+
+        self.dump_flags()
 
         self.e_hf = self.get_e_hf(mo_coeff=mo_coeff)
 
-        mo_coeff, mo_energy = _add_padding(self, mo_coeff, mo_energy)
+        if eris is None:
+            eris = self.ao2mo(mo_coeff, with_t2)
 
-        self.e_corr, self.t2 = \
-                kernel(self, mo_energy, mo_coeff, verbose=self.verbose, with_t2=with_t2)
+        if self._scf.converged:
+            self.e_corr, self.t2 = self.init_amps(mo_energy, mo_coeff, eris, with_t2)
+        else:
+            self.converged, self.e_corr, self.t2 = _iterative_kernel(self, eris)
 
         self.e_corr_ss = getattr(self.e_corr, 'e_corr_ss', 0)
         self.e_corr_os = getattr(self.e_corr, 'e_corr_os', 0)
@@ -781,6 +714,218 @@ class KMP2(mp2.MP2):
         self._finalize()
 
         return self.e_corr, self.t2
+
+    def ao2mo(self, mo_coeff=None, with_t2=WITH_T2):
+        return _make_df_eris(self, mo_coeff, with_t2, verbose=self.verbose)
+
+    # For non-canonical MP2
+    # energy = energy
+    # update_amps = update_amps
+    def init_amps(self, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2):
+        return kernel(self, mo_energy, mo_coeff, eris, with_t2)
+
+
+def _mem_usage(nocc, nvir, nkpts, with_t2=WITH_T2):
+    '''
+        basic   = t2 + 4*ovov
+        incore  = kLov + basic
+        outcore = basic
+    '''
+    nmo = nocc + nvir
+    dsize = 16
+    # 4 ovov for ovov(ka,kb), ovov(kb,ka), t2, eiajb
+    basic = (nocc*nvir)**2*4
+    if with_t2:
+        basic += nkpts**3*(nocc*nvir)**2
+    basic *= dsize/1e6
+    incore = nkpts**2*nocc*nvir*nmo * dsize/1e6 + basic
+    outcore = basic
+    return incore, outcore, basic
+
+class _ChemistsERIs:
+    def __init__(self, mol=None):
+        self.mol = mol
+        self.mo_coeff = None
+        self.nocc = None
+        self.fock = None
+        self._Lov_to_save = None
+        self.Lov = None
+        self._get_ovov = None
+        self.dtype = None
+
+    def _common_init_(self, mp, mo_coeff=None):
+        if mo_coeff is None:
+            mo_coeff = mp.mo_coeff
+        if mo_coeff is None:
+            raise RuntimeError('mo_coeff, mo_energy are not initialized.\n'
+                               'You may need to call mf.kernel() to generate them.')
+
+        self.mo_coeff = padded_mo_coeff(mp, mo_coeff)
+        self.mol = mp.mol
+
+        if gamma_point(mp._scf.kpts):
+            self.dtype = np.float64
+        else:
+            self.dtype = np.complex128
+
+        if mo_coeff is mp._scf.mo_coeff and mp._scf.converged:
+            # The canonical MP2 from a converged SCF result. Rebuilding fock can be skipped
+            self.mo_energy = padded_mo_energy(mp, mp._scf.mo_energy)
+            self.fock = [np.diag(moe) for moe in self.mo_energy]
+        else:
+            dm = mp._scf.make_rdm1(mo_coeff, mp.mo_occ)
+            vhf = mp._scf.get_veff(mp.mol, dm)
+            fockao = mp._scf.get_fock(vhf=vhf, dm=dm)
+            self.fock = [C.conj().T.dot(f).dot(C) for f,C in zip(fockao,mo_coeff)]
+            mo_energy = [f.diagonal().real for f in self.fock]
+
+            self.mo_energy = padded_mo_energy(mp, mo_energy)
+        return self
+
+    def get_ovov(self, kiajb):
+        return self._get_ovov(kiajb)
+
+
+def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
+    log = logger.new_logger(mymp, verbose)
+    time0 = (logger.process_clock(), logger.perf_counter())
+    eris = _ChemistsERIs()
+    eris._common_init_(mymp, mo_coeff)
+    mo_coeff = eris.mo_coeff
+    mf = mymp._scf
+    kpts = mf.kpts
+
+    # determine incore/outcore
+    nocc = mymp.nocc
+    nmo = mymp.nmo
+    nvir = nmo - nocc
+    nkpts = len(kpts)
+
+    with_df_ints = mymp.with_df_ints and isinstance(mymp._scf.with_df, df.GDF)
+
+    if with_df_ints:
+        mem_incore, mem_outcore, mem_basic = _mem_usage(nocc, nvir, nkpts, with_t2)
+        mem_now = lib.current_memory()[0]
+        max_memory = max(0, mymp.max_memory - mem_now)
+        if max_memory < mem_basic:
+            log.warn('Not enough memory for integral transformation. '
+                     'Available mem %s MB, required mem %s MB',
+                     max_memory, mem_basic)
+
+        if mem_incore < max_memory:
+            eris.Lov = np.ndarray((nkpts,nkpts), dtype=object)
+        else:
+            eris._Lov_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+            eris.Lov = h5py.File(eris._Lov_to_save, 'w')
+
+        Lov = _init_mp_df_eris(mymp, mo_coeff, eris.Lov)
+
+        def get_ovov(kiajb):
+            ki,ka,kj,kb = kiajb
+            if isinstance(Lov, np.ndarray):
+                ovov = einsum("Lia,Ljb->iajb", Lov[ki,ka], Lov[kj,kb]) / nkpts
+            else:
+                ovov = einsum("Lia,Ljb->iajb", Lov[f'{ki},{ka}'][()],
+                              Lov[f'{kj},{kb}'][()]) / nkpts
+            return ovov
+    else:
+        fao2mo = mymp._scf.with_df.ao2mo
+
+        def get_ovov(kiajb):
+            ki,ka,kj,kb = kiajb
+
+            orbo_i = mo_coeff[ki][:,:nocc]
+            orbo_j = mo_coeff[kj][:,:nocc]
+            orbv_a = mo_coeff[ka][:,nocc:]
+            orbv_b = mo_coeff[kb][:,nocc:]
+            ovov = fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
+                          (kpts[ki],kpts[ka],kpts[kj],kpts[kb]),
+                          compact=False) / nkpts
+            return ovov.reshape(nocc,nvir,nocc,nvir)
+
+    eris._get_ovov = get_ovov
+
+    log.timer('Integral transformation', *time0)
+    return eris
+
+def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
+    """Compute 3-center electron repulsion integrals, i.e. (L|ov),
+    where `L` denotes DF auxiliary basis functions and `o` and `v` occupied and virtual
+    canonical crystalline orbitals. Note that `o` and `v` contain kpt indices `ko` and `kv`,
+    and the third kpt index `kL` is determined by the conservation of momentum.
+
+    Arguments:
+        mp (KMP2) -- A KMP2 instance
+
+    Returns:
+        Lov (np.ndarray) -- 3-center DF ints, with shape (nkpts, nkpts, naux, nocc, nvir)
+    """
+    from pyscf.ao2mo import _ao2mo
+
+    log = logger.Logger(mymp.stdout, mymp.verbose)
+
+    if mymp._scf.with_df._cderi is None:
+        mymp._scf.with_df.build()
+
+    cell = mymp._scf.cell
+    if cell.dimension == 2:
+        # 2D ERIs are not positive definite. The 3-index tensors are stored in
+        # two part. One corresponds to the positive part and one corresponds
+        # to the negative part. The negative part is not considered in the
+        # DF-driven CCSD implementation.
+        raise NotImplementedError
+
+    nocc = mymp.nocc
+    nmo = mymp.nmo
+    nvir = nmo - nocc
+    nao = cell.nao_nr()
+    kpts = mymp.kpts
+    nkpts = len(kpts)
+
+    if mo_coeff is None:
+        mo_coeff = _add_padding(mp, mymp.mo_coeff, mymp.mo_energy)[0]
+
+    if gamma_point(kpts):
+        dtype = np.double
+    else:
+        dtype = np.complex128
+    dtype = np.result_type(dtype, *mo_coeff)
+
+    if Lov is None:
+        Lov = np.empty((nkpts, nkpts), dtype=object)
+
+    cput0 = (logger.process_clock(), logger.perf_counter())
+
+    bra_start = 0
+    bra_end = nocc
+    ket_start = nmo+nocc
+    ket_end = ket_start + nvir
+    braket = (bra_start, bra_end, ket_start, ket_end)
+    with df.CDERIArray(mymp._scf.with_df._cderi) as cderi_array:
+        tao = []
+        ao_loc = None
+        for ki in range(nkpts):
+            for kj in range(nkpts):
+                Lpq_ao = cderi_array[ki,kj]
+
+                mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
+                mo = np.asarray(mo, dtype=dtype, order='F')
+                if dtype == np.double:
+                    out = _ao2mo.nr_e2(Lpq_ao, mo, braket, aosym='s2')
+                else:
+                    #Note: Lpq.shape[0] != naux if linear dependency is found in auxbasis
+                    if Lpq_ao[0].size != nao**2:  # aosym = 's2'
+                        Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
+                    out = _ao2mo.r_e2(Lpq_ao, mo, braket, tao, ao_loc)
+                if isinstance(Lov, np.ndarray):
+                    Lov[ki, kj] = out.reshape(-1, nocc, nvir)
+                else:
+                    Lov[f'{ki},{kj}'] = out.reshape(-1, nocc, nvir)
+
+    log.timer_debug1("transforming DF-MP2 integrals", *cput0)
+
+    return Lov
+
 
 KRMP2 = KMP2
 
@@ -794,25 +939,51 @@ scf.krohf.KROHF.MP2 = None
 if __name__ == '__main__':
     from pyscf.pbc import gto, scf, mp
 
-    cell = gto.Cell()
-    cell.atom='''
-    C 0.000000000000   0.000000000000   0.000000000000
-    C 1.685068664391   1.685068664391   1.685068664391
+    atom = '''
+    O          0.00000        0.00000        0.11779
+    H          0.00000        0.75545       -0.47116
+    H          0.00000       -0.75545       -0.47116
     '''
-    cell.basis = 'gth-szv'
-    cell.pseudo = 'gth-pade'
-    cell.a = '''
-    0.000000000, 3.370137329, 3.370137329
-    3.370137329, 0.000000000, 3.370137329
-    3.370137329, 3.370137329, 0.000000000'''
-    cell.unit = 'B'
-    cell.verbose = 5
-    cell.build()
+    a = np.eye(3)*3
+    basis = 'cc-pvdz'
+    pseudo = None
+    kmesh = (2,1,1)
+    eref = -0.197262027865986
 
-    # Running HF and MP2 with 1x1x2 Monkhorst-Pack k-point mesh
-    kmf = scf.KRHF(cell, kpts=cell.make_kpts([1,1,2]), exxdiv=None)
-    ehf = kmf.kernel()
+    # a0 = 3.44
+    # atom = f'Li 0 0 0; Li {a0*0.5} {a0*0.5} {a0*0.5}'
+    # a = np.eye(3) * a0
+    # basis = '''
+    # Li  S
+    # 7.298459    2.818219e-01 -4.209100e-02
+    # 2.139580    4.562697e-01 -9.431562e-02
+    # 0.670836    3.831236e-01 -1.360431e-01
+    # Li  S
+    #     0.047832    1.000000e+00
+    # Li  P
+    #     7.853830    5.386932e-03
+    #     2.204330    7.604557e-03
+    #     0.513280    1.066386e-01
+    # Li  P
+    #     0.079100    1.000000e+00
+    # Li  D
+    #     0.100720    1.000000e+00
+    # '''
+    # pseudo = 'gth-hf-rev'
+    # kmesh = (2,2,1)
+    # eref = -0.0763713201505293
 
-    mymp = mp.KMP2(kmf)
-    emp2, t2 = mymp.kernel()
-    print(emp2 - -0.204721432828996)
+    cell = gto.M(atom=atom, a=a, basis=basis, pseudo=pseudo)
+    kpts = cell.make_kpts(kmesh)
+
+    mf = scf.KRHF(cell, kpts).rs_density_fit()
+    mf.kernel()
+
+    mymp = mp.KMP2(mf, frozen=0)
+    mymp.kernel(with_t2=False)
+    print(mymp.e_corr - eref)
+
+    # test calc mo_energy from given mo_coeff
+    mo_coeff = [c.copy() for c in mf.mo_coeff]
+    mymp.kernel(mo_coeff=mo_coeff, with_t2=False)
+    print(mymp.e_corr - eref)
