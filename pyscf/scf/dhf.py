@@ -225,6 +225,12 @@ def init_guess_by_huckel(mol):
     dm = hf.init_guess_by_huckel(mol)
     return _proj_dmll(mol, dm, mol)
 
+def init_guess_by_mod_huckel(mol):
+    '''Initial guess from on-the-fly Huckel, doi:10.1021/acs.jctc.8b01089,
+    employing the updated GWH rule from doi:10.1021/ja00480a005.'''
+    dm = hf.init_guess_by_mod_huckel(mol)
+    return _proj_dmll(mol, dm, mol)
+
 def init_guess_by_chkfile(mol, chkfile_name, project=None):
     '''Read SCF chkfile and make the density matrix for 4C-DHF initial guess.
 
@@ -233,7 +239,7 @@ def init_guess_by_chkfile(mol, chkfile_name, project=None):
             Whether to project chkfile's orbitals to the new basis.  Note when
             the geometry of the chkfile and the given molecule are very
             different, this projection can produce very poor initial guess.
-            In PES scanning, it is recommended to swith off project.
+            In PES scanning, it is recommended to switch off project.
 
             If project is set to None, the projection is only applied when the
             basis sets of the chkfile's molecule are different to the basis
@@ -283,7 +289,7 @@ def get_init_guess(mol, key='minao'):
 
     Kwargs:
         key : str
-            One of 'minao', 'atom', 'huckel', 'hcore', '1e', 'chkfile'.
+            One of 'minao', 'atom', 'huckel', 'mod_huckel', 'hcore', '1e', 'chkfile'.
     '''
     return UHF(mol).get_init_guess(mol, key)
 
@@ -331,7 +337,7 @@ def analyze(mf, verbose=logger.DEBUG, **kwargs):
                      i+1, mo_energy[i], mo_occ[i])
     mol = mf.mol
     if mf.verbose >= logger.DEBUG1:
-        log.debug(' ** MO coefficients of large component of postive state (real part) **')
+        log.debug(' ** MO coefficients of large component of positive state (real part) **')
         label = mol.spinor_labels()
         n2c = mo_coeff.shape[0] // 2
         dump_mat.dump_rec(mf.stdout, mo_coeff[n2c:,:n2c].real, label, start=1)
@@ -495,6 +501,13 @@ class DHF(hf.SCF):
         if mol is None: mol = self.mol
         logger.info(self, 'Initial guess from on-the-fly Huckel, doi:10.1021/acs.jctc.8b01089.')
         return init_guess_by_huckel(mol)
+
+    @lib.with_doc(hf.SCF.init_guess_by_mod_huckel.__doc__)
+    def init_guess_by_mod_huckel(self, mol=None):
+        if mol is None: mol = self.mol
+        logger.info(self, '''Initial guess from on-the-fly Huckel, doi:10.1021/acs.jctc.8b01089,
+employing the updated GWH rule from doi:10.1021/ja00480a005.''')
+        return init_guess_by_mod_huckel(mol)
 
     def init_guess_by_chkfile(self, chkfile=None, project=None):
         if chkfile is None: chkfile = self.chkfile
