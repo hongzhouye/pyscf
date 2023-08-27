@@ -711,20 +711,20 @@ def make_rdm2(mp, t2=None, kind="compact"):
         result = []
 
         for spin in ['aa','ab','bb']:
-            res = []
+            res = np.ndarray((nkpts,nkpts,nkpts), dtype=object)
             for kp in range(nkpts):
                 for kq in range(nkpts):
                     for kr in range(nkpts):
                         ks = mp.khelper.kconserv[kp, kq, kr]
                         if spin == 'aa':
-                            res.append(dm2aa[kp,kq,kr][np.ix_(idx[0][kp],idx[0][kq],
-                                                              idx[0][kr],idx[0][ks])])
+                            res[kp,kq,kr] = dm2aa[kp,kq,kr][np.ix_(idx[0][kp],idx[0][kq],
+                                                                   idx[0][kr],idx[0][ks])]
                         elif spin == 'bb':
-                            res.append(dm2bb[kp,kq,kr][np.ix_(idx[1][kp],idx[1][kq],
-                                                              idx[1][kr],idx[1][ks])])
+                            res[kp,kq,kr] = dm2bb[kp,kq,kr][np.ix_(idx[1][kp],idx[1][kq],
+                                                                   idx[1][kr],idx[1][ks])]
                         else:
-                            res.append(dm2ab[kp,kq,kr][np.ix_(idx[0][kp],idx[0][kq],
-                                                              idx[1][kr],idx[1][ks])])
+                            res[kp,kq,kr] = dm2ab[kp,kq,kr][np.ix_(idx[0][kp],idx[0][kq],
+                                                                   idx[1][kr],idx[1][ks])]
             result.append(res)
 
         return result
@@ -1100,17 +1100,17 @@ if __name__ == '__main__':
     spin = spin0 * nkpts
     frozen = 1
 
-    # cell = gto.M(atom=atom, basis=basis, a=a, spin=spin)
-    # kpts = cell.make_kpts(kmesh)
-    #
-    # mf = scf.KUHF(cell, kpts).rs_density_fit().run()
-    # mmp = mp.KMP2(mf, frozen=frozen).set(verbose=6).run()
-    #
-    # mol = molgto.M(atom=atom, basis=basis, spin=spin0)
-    # mfmol = molscf.UHF(mol).density_fit().run()
-    # mpmol = molmp.MP2(mfmol, frozen=frozen).set(verbose=4).run()
-    #
-    # print('mol pbc difference: %.10f' % (mmp.e_corr-mpmol.e_corr))
+    cell = gto.M(atom=atom, basis=basis, a=a, spin=spin)
+    kpts = cell.make_kpts(kmesh)
+
+    mf = scf.KUHF(cell, kpts).rs_density_fit().run()
+    mmp = mp.KMP2(mf, frozen=frozen).set(verbose=6).run()
+
+    mol = molgto.M(atom=atom, basis=basis, spin=spin0)
+    mfmol = molscf.UHF(mol).density_fit().run()
+    mpmol = molmp.MP2(mfmol, frozen=frozen).set(verbose=4).run()
+
+    print('mol pbc difference: %.10f' % (mmp.e_corr-mpmol.e_corr))
 
     # compare to KRHF
     cell = gto.M(atom=atom, basis=basis, a=a)
@@ -1122,7 +1122,6 @@ if __name__ == '__main__':
     rmmp = mp.KMP2(rmf, frozen=frozen).set(verbose=6).run()
     kdm1 = rmmp.make_rdm1()
     kdm2 = rmmp.make_rdm2()
-    kdm2 = np.asarray(kdm2).reshape(nkpts,nkpts,nkpts,*(rmmp.nmo,)*4)
 
     # copy the spin-restricted SCF solution
     mf = scf.KUHF(cell, kpts).rs_density_fit()
@@ -1134,9 +1133,6 @@ if __name__ == '__main__':
     mmp = mp.KMP2(mf, frozen=frozen).set(verbose=6).run()
     skdm1 = mmp.make_rdm1()
     skdm2 = mmp.make_rdm2()
-    skdm2 = [np.asarray(skdm2[0]).reshape(*(nkpts,)*3,*(mmp.nmo[0],)*4),
-             np.asarray(skdm2[1]).reshape(*(nkpts,)*3,*(mmp.nmo[0],)*2,*(mmp.nmo[1],)*2),
-             np.asarray(skdm2[2]).reshape(*(nkpts,)*3,*(mmp.nmo[1],)*4)]
     kdm1u = [dm0+dm1 for dm0,dm1 in zip(skdm1[0],skdm1[1])]
     kdm2u = np.ndarray((nkpts,nkpts,nkpts), dtype=object)
     for k1 in range(nkpts):

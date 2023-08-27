@@ -55,11 +55,12 @@ class KnownValues(unittest.TestCase):
 
         dm1 = kmp2.make_rdm1()
         dm2 = kmp2.make_rdm2()
-        e = 0
+        e1 = 0
         for k in range(nkpts):
-            e += np.einsum('pq,qp', dm1[k], hcore[k]).real / nkpts
+            e1 += np.einsum('pq,qp', dm1[k], hcore[k]).real / nkpts
+
+        e2 = 0
         ao2mo = kmp2._scf.with_df.ao2mo
-        idx = 0
         for kp in range(nkpts):
             for kq in range(nkpts):
                 for kr in range(nkpts):
@@ -72,9 +73,8 @@ class KnownValues(unittest.TestCase):
                           (kpts[kp], kpts[kq], kpts[kr], kpts[ks]),
                           compact=False).reshape(mop.shape[-1],moq.shape[-1],
                           mor.shape[-1],mos.shape[-1]) / nkpts
-                    e += np.einsum('pqrs,pqrs',dm2[idx], eri).real * 0.5 / nkpts
-                    idx += 1
-        e += cell.energy_nuc()
+                    e2 += np.einsum('pqrs,pqrs',dm2[kp,kq,kr], eri).real * 0.5 / nkpts
+        e = e1 + e2 + cell.energy_nuc()
         self.assertAlmostEqual(e, e_tot, 4)
 
 if __name__ == "__main__":

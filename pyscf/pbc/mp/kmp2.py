@@ -585,12 +585,12 @@ def make_rdm2(mp, t2=None, kind="compact"):
         return dm2
     else:
         idx = padding_k_idx(mp, kind="joint")
-        result = []
+        result = np.ndarray((nkpts,nkpts,nkpts), dtype=object)
         for kp in range(nkpts):
             for kq in range(nkpts):
                 for kr in range(nkpts):
                     ks = mp.khelper.kconserv[kp, kq, kr]
-                    result.append(dm2[kp,kq,kr][np.ix_(idx[kp],idx[kq],idx[kr],idx[ks])])
+                    result[kp,kq,kr] = dm2[kp,kq,kr][np.ix_(idx[kp],idx[kq],idx[kr],idx[ks])]
         return result
 
 

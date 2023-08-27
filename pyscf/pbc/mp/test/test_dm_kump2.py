@@ -64,9 +64,9 @@ class KnownValues(unittest.TestCase):
         for s in [0,1]:
             for k in range(nkpts):
                 e1 += np.einsum('pq,qp', dm1[s][k], hcore[s][k]).real / nkpts
-        ao2mo = kmp2._scf.with_df.ao2mo
+
         e2 = 0
-        idx = 0
+        ao2mo = kmp2._scf.with_df.ao2mo
         for kp in range(nkpts):
             for kq in range(nkpts):
                 for kr in range(nkpts):
@@ -82,7 +82,7 @@ class KnownValues(unittest.TestCase):
                           (kpts[kp], kpts[kq], kpts[kr], kpts[ks]),
                           compact=False).reshape(mop.shape[-1],moq.shape[-1],
                           mor.shape[-1],mos.shape[-1]) / nkpts
-                    e2 += np.einsum('pqrs,pqrs',dm2_[idx], eri).real * 0.5 / nkpts
+                    e2 += np.einsum('pqrs,pqrs',dm2_[kp,kq,kr], eri).real * 0.5 / nkpts
 
                     s1 = s2 = 1
                     dm2_ = dm2[2]
@@ -94,7 +94,7 @@ class KnownValues(unittest.TestCase):
                           (kpts[kp], kpts[kq], kpts[kr], kpts[ks]),
                           compact=False).reshape(mop.shape[-1],moq.shape[-1],
                           mor.shape[-1],mos.shape[-1]) / nkpts
-                    e2 += np.einsum('pqrs,pqrs',dm2_[idx], eri).real * 0.5 / nkpts
+                    e2 += np.einsum('pqrs,pqrs',dm2_[kp,kq,kr], eri).real * 0.5 / nkpts
 
                     s1, s2 = 0, 1
                     dm2_ = dm2[1]
@@ -106,9 +106,7 @@ class KnownValues(unittest.TestCase):
                           (kpts[kp], kpts[kq], kpts[kr], kpts[ks]),
                           compact=False).reshape(mop.shape[-1],moq.shape[-1],
                           mor.shape[-1],mos.shape[-1]) / nkpts
-                    e2 += np.einsum('pqrs,pqrs',dm2_[idx], eri).real / nkpts
-
-                    idx += 1
+                    e2 += np.einsum('pqrs,pqrs',dm2_[kp,kq,kr], eri).real / nkpts
         e = e1 + e2 + cell.energy_nuc()
         self.assertAlmostEqual(e, e_tot, 4)
 
