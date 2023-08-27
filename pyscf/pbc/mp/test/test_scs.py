@@ -23,17 +23,17 @@ import pyscf.pbc.mp
 import pyscf.pbc.mp.kmp2
 
 
-def build_cell(space_group_symmetry=False):
+def build_cell(space_group_symmetry=False, spin=None):
     # open-shell system may lead to larger uncertainty than required precision
     # atom = 'C 0 0 0'
     atom = 'Be 0 0 0'
     a = np.eye(3) * 5
     basis = 'cc-pvdz'
     if space_group_symmetry:
-        return pbcgto.M(atom=atom, basis=basis, a=a, precision=1e-8, verbose=4,
+        return pbcgto.M(atom=atom, basis=basis, a=a, precision=1e-8, verbose=4, spin=spin,
                         output='/dev/null',
                         space_group_symmetry=True, symmorphic=False)
-    return pbcgto.M(atom=atom, basis=basis, a=a, precision=1e-8, verbose=4,
+    return pbcgto.M(atom=atom, basis=basis, a=a, precision=1e-8, verbose=4, spin=spin,
                     output='/dev/null')
 
 
@@ -69,6 +69,29 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(pt.e_corr, -0.022116013287498435, 7)
         self.assertAlmostEqual(pt.e_corr_ss, -0.0006375312743462651, 7)
         self.assertAlmostEqual(pt.e_corr_os, -0.02147848201315217, 7)
+
+    def test_kump2(self):
+        def run_k(cell, kmesh):
+            kpts = cell.make_kpts(kmesh)
+            mf = pbcscf.KUHF(cell, kpts).density_fit()
+            mf.conv_tol = 1e-10
+            mf.kernel()
+            pt = pyscf.pbc.mp.kump2.KUMP2(mf).run()
+            return pt
+
+        cell = build_cell(spin=2)
+
+        pt = run_k(cell, (1,1,1))
+        self.assertAlmostEqual(pt.e_corr, -0.00219494193173312, 7)
+        self.assertAlmostEqual(pt.e_corr_ss, -0.0016522781961459433, 7)
+        self.assertAlmostEqual(pt.e_corr_os, -0.0005426637355871768, 7)
+
+        cell = build_cell(spin=4)
+
+        pt = run_k(cell, (2,1,1))
+        self.assertAlmostEqual(pt.e_corr, -0.00226116177572914, 7)
+        self.assertAlmostEqual(pt.e_corr_ss, -0.001711936123118037, 7)
+        self.assertAlmostEqual(pt.e_corr_os, -0.0005492256526111027, 7)
 
     def test_ksymm(self):
         def run_k(cell, kmesh):

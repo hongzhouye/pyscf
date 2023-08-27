@@ -115,10 +115,11 @@ class KnownValues(unittest.TestCase):
 
         nocc = get_nocc(mp)
         nmo = get_nmo(mp)
+        # Take the max occ and max vir from kpoints -
+        # spin0: 2 occ (from first kpoint), 3 vir (from second kpoint)
+        # spin1: 1 occ (from second kpoint),2 vir (from second kpoint)
         self.assertAlmostEqual(nocc, (2, 1))
-        self.assertAlmostEqual(nmo, (5, 3))  # Take the max occ and max vir from kpoints -
-                                             # spin0: 2 occ (from first kpoint), 3 vir (from second kpoint)
-                                             # spin1: 1 occ (from second kpoint),2 vir (from second kpoint)
+        self.assertAlmostEqual(nmo, (5, 3))
 
         nocc = get_nocc(mp, per_kpoint=True)
         nmo = get_nmo(mp, per_kpoint=True)
@@ -132,8 +133,8 @@ class KnownValues(unittest.TestCase):
         #  k1 :  O O | - V V     |  - | - V
         #  k2 :  O - | V V V     |  O | V V
         split_idx = padding_k_idx(mp, kind='split')
-        outa = [[y for x in split_idx[0][idx] for y in x] for idx in range(2)]  # Flatten the list for ease-of-use
-        outb = [[y for x in split_idx[1][idx] for y in x] for idx in range(2)]
+        outa = [[y for x in split_idx[idx][0] for y in x] for idx in range(2)]  # Flatten the list for ease-of-use
+        outb = [[y for x in split_idx[idx][1] for y in x] for idx in range(2)]
         expecteda = [[0, 1, 0], [1, 2, 0, 1, 2]]  # [occ_idx, vir_idx] for alpha
         expectedb = [[0], [1, 0, 1]]              # [occ_idx, vir_idx] for beta
         self.assertAlmostEqual(outa, expecteda)
@@ -156,9 +157,10 @@ class KnownValues(unittest.TestCase):
 
         nocc = get_nocc(mp)
         nmo = get_nmo(mp)
+        # We deleted the first occ from each of the alpha/beta, so
+        # we have 1 occupied and 3 virtuals.
         self.assertAlmostEqual(nocc, (1, 1))
-        self.assertAlmostEqual(nmo, (4, 4))  # We deleted the first occ from each of the alpha/beta, so
-                                             # we have 1 occupied and 3 virtuals.
+        self.assertAlmostEqual(nmo, (4, 4))
 
         nocc = get_nocc(mp, per_kpoint=True)
         nmo = get_nmo(mp, per_kpoint=True)
@@ -172,8 +174,8 @@ class KnownValues(unittest.TestCase):
         #  k1 :  O | - V V   |  O | V V V
         #  k2 :  O | V V V   |  O | - V V
         split_idx = padding_k_idx(mp, kind='split')
-        outa = [[y for x in split_idx[0][idx] for y in x] for idx in range(2)]  # Flatten the list for ease-of-use
-        outb = [[y for x in split_idx[1][idx] for y in x] for idx in range(2)]
+        outa = [[y for x in split_idx[idx][0] for y in x] for idx in range(2)]  # Flatten the list for ease-of-use
+        outb = [[y for x in split_idx[idx][1] for y in x] for idx in range(2)]
         expecteda = [[0, 0], [1, 2, 0, 1, 2]]  # [occ_idx, vir_idx] for alpha
         expectedb = [[0, 0], [0, 1, 2, 1, 2]]  # [occ_idx, vir_idx] for beta
         self.assertAlmostEqual(outa, expecteda)
@@ -191,4 +193,3 @@ class KnownValues(unittest.TestCase):
 if __name__ == '__main__':
     print("Full mask test")
     unittest.main()
-

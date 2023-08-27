@@ -195,6 +195,10 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     return emp2, t2
 
 
+def _iterative_kernel(self, eris):
+    raise NotImplementedError
+
+
 def padding_k_idx(mp, kind="split"):
     """For a description, see `padding_k_idx` in kmp2.py.
 
@@ -833,7 +837,6 @@ def _mem_usage(nocc, nvir, nkpts, naux, dsize, with_t2=WITH_T2):
     '''
     nocc = max(nocc)
     nvir = max(nvir)
-    nmo = nocc + nvir
     # 4 ovov for ovov(ka,kb), ovov(kb,ka), t2, eiajb
     basic = (nocc*nvir)**2*4
     if with_t2:

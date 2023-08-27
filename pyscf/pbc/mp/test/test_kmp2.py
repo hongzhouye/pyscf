@@ -111,7 +111,7 @@ class KnownValues(unittest.TestCase):
 
         kmf = pbcscf.KRHF(cell)
         kmf.kpts = cell.make_kpts(nmp, scaled_center=[0.0,0.0,0.0])
-        e = kmf.kernel()
+        kmf.kernel()
 
         frozen = [[0, 3], []]
         mymp = pyscf.pbc.mp.kmp2.KMP2(kmf, frozen=frozen)
@@ -124,7 +124,7 @@ class KnownValues(unittest.TestCase):
         supcell = super_cell(cell, nmp)
         supcell.build()
         mf = pbcscf.KRHF(supcell)
-        e = mf.kernel()
+        mf.kernel()
 
         mysmp = pyscf.pbc.mp.kmp2.KMP2(mf, frozen=[0, 7])
         emp2, _ = mysmp.kernel()
@@ -140,7 +140,7 @@ class KnownValues(unittest.TestCase):
         kmf = pbcscf.KRHF(cell).density_fit()
         kmf.kpts = cell.make_kpts(nmp, scaled_center=[0.0,0.0,0.0])
         kmf.conv_tol = 1e-9
-        e = kmf.kernel()
+        kmf.kernel()
 
         frozen = [[0, 3], []]
         mymp = pyscf.pbc.mp.kmp2.KMP2(kmf, frozen=frozen)
@@ -181,7 +181,7 @@ class KnownValues(unittest.TestCase):
         abs_kpts = cell.make_kpts(nk, wrap_around=True)
         kmf = pbcscf.KRHF(cell, abs_kpts).density_fit()
         kmf.conv_tol = 1e-12
-        ekpt = kmf.scf()
+        kmf.scf()
         kmf2 = pbcscf.KRHF(cell, abs_kpts).density_fit()
         kmf2.conv_tol = 1e-12
         kmf2.with_df._cderi = kmf.with_df._cderi
@@ -200,7 +200,7 @@ class KnownValues(unittest.TestCase):
         kmf.verbose = 5
         kmf.kpts = cell.make_kpts(nmp, scaled_center=[0.0,0.0,0.0])
         kmf.conv_tol = 1e-9
-        e = kmf.kernel()
+        kmf.kernel()
 
         mymp = pyscf.pbc.mp.kmp2.KMP2(kmf)
         mymp.max_memory = 0.016 # incore requires ~0.018 MB of memory

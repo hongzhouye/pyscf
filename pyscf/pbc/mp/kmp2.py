@@ -157,6 +157,10 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     return emp2, t2
 
 
+def _iterative_kernel(self, eris):
+    raise NotImplementedError
+
+
 def _padding_k_idx(nmo, nocc, kind="split"):
     """A convention used for padding vectors, matrices and tensors in case when occupation numbers depend on the
     k-point index.
@@ -733,7 +737,6 @@ def _mem_usage(nocc, nvir, nkpts, naux, dsize, with_t2=WITH_T2):
         incore  = kLov + basic
         outcore = basic
     '''
-    nmo = nocc + nvir
     # 4 ovov for ovov(ka,kb), ovov(kb,ka), t2, eiajb
     basic = (nocc*nvir)**2*4
     if with_t2:
