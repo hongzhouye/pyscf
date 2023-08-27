@@ -191,6 +191,23 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(ekpt2, -1.2053666821021261, 7)
         self.assertAlmostEqual(mp.e_corr, -6.9881475423322723e-06, 9)
 
+    def test_kmp2_gdf_outcore(self):
+        cell = build_h_cell()
+
+        nmp = [2, 1, 1]
+
+        kmf = pbcscf.KRHF(cell).density_fit()
+        kmf.verbose = 5
+        kmf.kpts = cell.make_kpts(nmp, scaled_center=[0.0,0.0,0.0])
+        kmf.conv_tol = 1e-9
+        e = kmf.kernel()
+
+        mymp = pyscf.pbc.mp.kmp2.KMP2(kmf)
+        mymp.max_memory = 0.016 # incore requires ~0.018 MB of memory
+        mymp.kernel()
+
+        self.assertAlmostEqual(mymp.e_corr, -0.03723395559265186, 5)
+
 
 if __name__ == '__main__':
     print("Full kpoint test")

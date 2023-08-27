@@ -16,6 +16,7 @@
 # Author: Timothy Berkelbach <tim.berkelbach@gmail.com>
 #         James McClain <jdmcclain47@gmail.com>
 #         Xing Zhang <zhangxing.nju@gmail.com>
+#         Hong-Zhou Ye <hzyechem@gmail.com>
 #
 
 
@@ -45,6 +46,7 @@ from pyscf import __config__
 WITH_T2 = getattr(__config__, 'mp_mp2_with_t2', True)
 
 
+# TODO: memory optimization for small kmesh + large supercell
 def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     """Computes k-point RMP2 energy.
 
@@ -132,7 +134,7 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
                 if ka != kb:
                     t2_ibja = np.conj(ovov_ij[1] / eiajb.transpose(0,3,2,1))
                     if with_t2:
-                        t2[ki,kj,ka] = t2_ibja.transpose(0,2,1,3)
+                        t2[ki,kj,kb] = t2_ibja.transpose(0,2,1,3)
 
                     edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2
                     emp2_ss += edi*0.5
@@ -725,20 +727,19 @@ class KMP2(mp2.MP2):
         return kernel(self, mo_energy, mo_coeff, eris, with_t2)
 
 
-def _mem_usage(nocc, nvir, nkpts, with_t2=WITH_T2):
+def _mem_usage(nocc, nvir, nkpts, naux, dsize, with_t2=WITH_T2):
     '''
         basic   = t2 + 4*ovov
         incore  = kLov + basic
         outcore = basic
     '''
     nmo = nocc + nvir
-    dsize = 16
     # 4 ovov for ovov(ka,kb), ovov(kb,ka), t2, eiajb
     basic = (nocc*nvir)**2*4
     if with_t2:
         basic += nkpts**3*(nocc*nvir)**2
     basic *= dsize/1e6
-    incore = nkpts**2*nocc*nvir*nmo * dsize/1e6 + basic
+    incore = nkpts**2*naux*nocc*nvir * dsize/1e6 + basic
     outcore = basic
     return incore, outcore, basic
 
@@ -795,6 +796,13 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
     mf = mymp._scf
     kpts = mf.kpts
 
+    if gamma_point(kpts):
+        dtype = np.float64
+        dsize = 8
+    else:
+        dtype = np.complex128
+        dsize = 16
+
     # determine incore/outcore
     nocc = mymp.nocc
     nmo = mymp.nmo
@@ -804,7 +812,8 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
     with_df_ints = mymp.with_df_ints and isinstance(mymp._scf.with_df, df.GDF)
 
     if with_df_ints:
-        mem_incore, mem_outcore, mem_basic = _mem_usage(nocc, nvir, nkpts, with_t2)
+        naux = mymp._scf.with_df.get_naoaux()
+        mem_incore, mem_outcore, mem_basic = _mem_usage(nocc, nvir, nkpts, naux, dsize, with_t2)
         mem_now = lib.current_memory()[0]
         max_memory = max(0, mymp.max_memory - mem_now)
         if max_memory < mem_basic:
@@ -825,8 +834,25 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
             if isinstance(Lov, np.ndarray):
                 ovov = einsum("Lia,Ljb->iajb", Lov[ki,ka], Lov[kj,kb]) / nkpts
             else:
-                ovov = einsum("Lia,Ljb->iajb", Lov[f'{ki},{ka}'][()],
-                              Lov[f'{kj},{kb}'][()]) / nkpts
+                max_mem = mymp.max_memory - lib.current_memory()[0] - (nocc*nvir)**2*dsize/1e6
+                blksize = max(1, int(np.floor(max_mem*0.5 / (2*nocc*nvir*dsize/1e6))))
+                naux = Lov[f'{ki},{ka}'].shape[0]
+                if blksize >= naux:
+                    ovov = einsum("Lia,Ljb->iajb", Lov[f'{ki},{ka}'][()],
+                                  Lov[f'{kj},{kb}'][()]) / nkpts
+                else:
+                    # batch-load Lov by aux index to fit memory
+                    # TODO: alternative: loop over occ index
+                    ovov = np.zeros((nocc,nvir,nocc,nvir), dtype=dtype)
+                    for b0,b1 in lib.prange(0, naux, blksize):
+                        Lia = np.asarray(Lov[f'{ki},{ka}'][b0:b1])
+                        if kj==ki and kb==ka:
+                            Ljb = Lia
+                        else:
+                            Ljb = np.asarray(Lov[f'{kj},{kb}'][b0:b1])
+                        ovov[:] += einsum('Lia,Ljb->iajb', Lia, Ljb)
+                        Lia = Ljb = None
+                    ovov /= nkpts
             return ovov
     else:
         fao2mo = mymp._scf.with_df.ao2mo
@@ -863,9 +889,11 @@ def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
     from pyscf.ao2mo import _ao2mo
 
     log = logger.Logger(mymp.stdout, mymp.verbose)
+    cput0 = (logger.process_clock(), logger.perf_counter())
 
-    if mymp._scf.with_df._cderi is None:
-        mymp._scf.with_df.build()
+    mydf = mymp._scf.with_df
+    if mydf._cderi is None:
+        mydf.build()
 
     cell = mymp._scf.cell
     if cell.dimension == 2:
@@ -887,40 +915,55 @@ def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
 
     if gamma_point(kpts):
         dtype = np.double
+        dsize = 8
     else:
         dtype = np.complex128
+        dsize = 16
     dtype = np.result_type(dtype, *mo_coeff)
 
     if Lov is None:
         Lov = np.empty((nkpts, nkpts), dtype=object)
 
-    cput0 = (logger.process_clock(), logger.perf_counter())
+    mem_avail = mymp.max_memory - lib.current_memory()[0]
+    if isinstance(Lov, np.ndarray):
+        mem_avail -= nkpts**2*mydf.get_naoaux()*nocc*nvir * dsize/1e6
+    mem_per_block = (nocc*nvir+nao**2) * dsize/1e6
+    blksize = max(1, int(np.floor(mem_avail*0.5 / mem_per_block)))
 
     bra_start = 0
     bra_end = nocc
     ket_start = nmo+nocc
     ket_end = ket_start + nvir
     braket = (bra_start, bra_end, ket_start, ket_end)
-    with df.CDERIArray(mymp._scf.with_df._cderi) as cderi_array:
-        tao = []
-        ao_loc = None
-        for ki in range(nkpts):
-            for kj in range(nkpts):
-                Lpq_ao = cderi_array[ki,kj]
+    tao = []
+    ao_loc = None
+    for ki in range(nkpts):
+        for kj in range(nkpts):
+            kpti_kptj = np.asarray((kpts[ki],kpts[kj]))
+            mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
+            mo = np.asarray(mo, dtype=dtype, order='F')
 
-                mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
-                mo = np.asarray(mo, dtype=dtype, order='F')
-                if dtype == np.double:
-                    out = _ao2mo.nr_e2(Lpq_ao, mo, braket, aosym='s2')
-                else:
-                    #Note: Lpq.shape[0] != naux if linear dependency is found in auxbasis
-                    if Lpq_ao[0].size != nao**2:  # aosym = 's2'
-                        Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
-                    out = _ao2mo.r_e2(Lpq_ao, mo, braket, tao, ao_loc)
+            with df._load3c(mydf._cderi, mydf._dataname, kpti_kptj=kpti_kptj) as j3c:
+                naux = j3c.shape[0]
                 if isinstance(Lov, np.ndarray):
-                    Lov[ki, kj] = out.reshape(-1, nocc, nvir)
+                    Lov[ki, kj] = np.empty((naux,nocc,nvir), dtype=dtype)
                 else:
-                    Lov[f'{ki},{kj}'] = out.reshape(-1, nocc, nvir)
+                    Lov.create_dataset(f'{ki},{kj}', shape=(naux,nocc,nvir), dtype=dtype)
+
+                for p0,p1 in lib.prange(0, naux, blksize):
+                    if dtype == np.double:
+                        Lpq_ao = np.asarray(j3c[p0:p1].real)
+                        out = _ao2mo.nr_e2(Lpq_ao, mo, braket, aosym='s2')
+                    else:
+                        Lpq_ao = np.asarray(j3c[p0:p1])
+                        if Lpq_ao[0].size != nao**2:  # aosym = 's2'
+                            Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
+                        out = _ao2mo.r_e2(Lpq_ao, mo, braket, tao, ao_loc)
+                    if isinstance(Lov, np.ndarray):
+                        Lov[ki, kj][p0:p1] = out.reshape(-1, nocc, nvir)
+                    else:
+                        Lov[f'{ki},{kj}'][p0:p1] = out.reshape(-1, nocc, nvir)
+                    Lpq_ao = out = None
 
     log.timer_debug1("transforming DF-MP2 integrals", *cput0)
 
@@ -950,6 +993,8 @@ if __name__ == '__main__':
     kmesh = (2,1,1)
     eref = -0.197262027865986
 
+    ''' Uncomment for an example showing different occ for different kpt
+    '''
     # a0 = 3.44
     # atom = f'Li 0 0 0; Li {a0*0.5} {a0*0.5} {a0*0.5}'
     # a = np.eye(3) * a0
@@ -976,7 +1021,7 @@ if __name__ == '__main__':
     cell = gto.M(atom=atom, a=a, basis=basis, pseudo=pseudo)
     kpts = cell.make_kpts(kmesh)
 
-    mf = scf.KRHF(cell, kpts).rs_density_fit()
+    mf = scf.KRHF(cell, kpts).density_fit()
     mf.kernel()
 
     mymp = mp.KMP2(mf, frozen=0)

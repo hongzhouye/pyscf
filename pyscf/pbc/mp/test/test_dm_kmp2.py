@@ -68,7 +68,7 @@ class KnownValues(unittest.TestCase):
                     moq = mo_coeff[kq]
                     mor = mo_coeff[kr]
                     mos = mo_coeff[ks]
-                    eri = ao2mo((mop,moq,mor,mos), 
+                    eri = ao2mo((mop,moq,mor,mos),
                           (kpts[kp], kpts[kq], kpts[kr], kpts[ks]),
                           compact=False).reshape(mop.shape[-1],moq.shape[-1],
                           mor.shape[-1],mos.shape[-1]) / nkpts

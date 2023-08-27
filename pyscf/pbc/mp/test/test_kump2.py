@@ -55,6 +55,18 @@ class Diamond_GDF(unittest.TestCase):
         mmp = mp.KMP2(self.mf).run()
         self.assertAlmostEqual(mmp.e_corr, -0.15980996558761992, 6)
 
+    def test_energy_input_mo(self):
+        # force recalculate mo energy from fock build
+        mo_coeff = [c.copy() for c in self.mf.mo_coeff]
+        mmp = mp.KMP2(self.mf).run(mo_coeff=mo_coeff)
+        self.assertAlmostEqual(mmp.e_corr, -0.15980996558761992, 6)
+
+    def test_energy_outcore(self):
+        mmp = mp.KMP2(self.mf)
+        mmp.max_memory = 2. # incore memory ~ 2.7 MB
+        mmp.kernel()
+        self.assertAlmostEqual(mmp.e_corr, -0.15980996558761992, 6)
+
     def test_energy_frozen(self):
         mmp = mp.KMP2(self.mf, frozen=1).run()
         self.assertAlmostEqual(mmp.e_corr, -0.12460735942012577, 6)
