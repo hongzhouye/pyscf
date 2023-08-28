@@ -85,7 +85,9 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     mo_e_v = [[mo_energy[s][k][nocc[s]:] for k in range(nkpts)] for s in [0,1]]
 
     # Get location of non-zero/padded elements in occupied and virtual space
-    nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
+    nonzero_padding = padding_k_idx(mp, kind="split")
+    nonzero_opadding = [x[0] for x in nonzero_padding]
+    nonzero_vpadding = [x[1] for x in nonzero_padding]
 
     if with_t2:
         # taa, tab, tbb
@@ -258,8 +260,7 @@ def padding_k_idx(mp, kind="split"):
             )))
 
     if kind == "split":
-        # return [indexes_oa, indexes_va], [indexes_ob, indexes_vb]
-        return [indexes_oa, indexes_ob], [indexes_va, indexes_vb]
+        return [indexes_oa, indexes_va], [indexes_ob, indexes_vb]
     else:
         return indexesa, indexesb
 
@@ -668,7 +669,8 @@ def make_rdm2(mp, t2=None, kind="compact"):
                 dm2ab[ki,ka,kj,:nocc1,nocc1:,:nocc2,nocc2:] = dovov
                 dm2ab[ka,ki,kb,nocc1:,:nocc1,nocc2:,:nocc2] = dovov.transpose(1,0,3,2).conj()
 
-    occidx = padding_k_idx(mp, kind="split")[0]
+    nonzero_padding = padding_k_idx(mp, kind="split")
+    occidx = [x[0] for x in nonzero_padding]
     for s in [0,1]:
         for ki in range(nkpts):
             for i in occidx[s][ki]:

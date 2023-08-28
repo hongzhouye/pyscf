@@ -43,7 +43,7 @@ class Diamond_GDF(unittest.TestCase):
         cell.spin = 2
         cell.build()
         kpts = cell.make_kpts((2,1,1))
-        mf = scf.KUHF(cell, kpts=kpts).rs_density_fit(auxbasis='weigend').run()
+        mf = scf.KUHF(cell, kpts=kpts).density_fit(auxbasis='weigend').run()
         cls.cell = cell
         cls.mf = mf
     @classmethod
@@ -53,23 +53,23 @@ class Diamond_GDF(unittest.TestCase):
 
     def test_energy(self):
         mmp = mp.KMP2(self.mf).run()
-        self.assertAlmostEqual(mmp.e_corr, -0.15980996558761992, 6)
+        self.assertAlmostEqual(mmp.e_corr, -0.1598097472279578, 6)
 
     def test_energy_input_mo(self):
         # force recalculate mo energy from fock build
         mo_coeff = [c.copy() for c in self.mf.mo_coeff]
         mmp = mp.KMP2(self.mf).run(mo_coeff=mo_coeff)
-        self.assertAlmostEqual(mmp.e_corr, -0.15980996558761992, 6)
+        self.assertAlmostEqual(mmp.e_corr, -0.1598097472279578, 6)
 
     def test_energy_outcore(self):
         mmp = mp.KMP2(self.mf)
         mmp.max_memory = 2. # incore memory ~ 2.7 MB
         mmp.kernel()
-        self.assertAlmostEqual(mmp.e_corr, -0.15980996558761992, 6)
+        self.assertAlmostEqual(mmp.e_corr, -0.1598097472279578, 6)
 
     def test_energy_frozen(self):
         mmp = mp.KMP2(self.mf, frozen=1).run()
-        self.assertAlmostEqual(mmp.e_corr, -0.12460735942012577, 6)
+        self.assertAlmostEqual(mmp.e_corr, -0.12460716351393078, 6)
 
 
 class Diamond_FFTDF(unittest.TestCase):
