@@ -100,7 +100,8 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
 
     emp2_ss = emp2_os = 0.
     for ki in range(nkpts):
-        for kj in range(nkpts):
+        for kj in range(ki+1):
+            fac_kikj = 1 if ki==kj else 2
             done = {(ka,kconserv[ki,ka,kj]):False for ka in range(nkpts)}
             for ka in range(nkpts):
                 kb = kconserv[ki,ka,kj]
@@ -123,9 +124,11 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
                 t2_iajb = np.conj(ovov_ij[0] / eiajb)
                 if with_t2:
                     t2[ki,kj,ka] = t2_iajb.transpose(0,2,1,3)
+                    if ki != kj:
+                        t2[kj,ki,kb] = t2_iajb.transpose(2,0,3,1)
 
-                edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * 2
-                exi = -einsum('iajb,ibja', t2_iajb, ovov_ij[1]).real * fac_swap
+                edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * 2 * fac_kikj
+                exi = -einsum('iajb,ibja', t2_iajb, ovov_ij[1]).real * fac_swap * fac_kikj
                 emp2_ss += edi*0.5 + exi
                 emp2_os += edi*0.5
 
@@ -135,8 +138,10 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
                     t2_ibja = np.conj(ovov_ij[1] / eiajb.transpose(0,3,2,1))
                     if with_t2:
                         t2[ki,kj,kb] = t2_ibja.transpose(0,2,1,3)
+                        if ki != kj:
+                            t2[kj,ki,ka] = t2_ibja.transpose(2,0,3,1)
 
-                    edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2
+                    edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2 * fac_kikj
                     emp2_ss += edi*0.5
                     emp2_os += edi*0.5
 
