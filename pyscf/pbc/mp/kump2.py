@@ -162,7 +162,7 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
 
                     done[(ka,kb)] = done[(kb,ka)] = True
 
-                log.timer_debug1('(sa,sb) = (%d,%d) (ki,kj) = (%d,%d)' % (s,s,ki,kj), *cput1)
+                cput1 = log.timer_debug1(f'(sa,sb) = (%d,%d) (ki,kj) = (%d,%d)'%(s,s,ki,kj), *cput1)
 
         ovov_ij = None
 

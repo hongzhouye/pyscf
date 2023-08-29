@@ -380,6 +380,8 @@ def get_e_hf(mp, mo_coeff=None):
     # Get HF energy, which is needed for total MP2 energy.
     if mo_coeff is None:
         mo_coeff = mp.mo_coeff
+    if mo_coeff is mp._scf.mo_coeff and mp._scf.converged:
+        return mp._scf.e_tot
     dm = mp._scf.make_rdm1(mo_coeff, mp.mo_occ)
     vhf = mp._scf.get_veff(mp._scf.mol, dm)
     return mp._scf.energy_tot(dm=dm, vhf=vhf)

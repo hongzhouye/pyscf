@@ -151,7 +151,7 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
 
                 done[(ka,kb)] = done[(kb,ka)] = True
 
-            log.timer_debug1('(ki,kj) = (%d,%d)' % (ki,kj), *cput1)
+            cput1 = log.timer_debug1('(ki,kj) = (%d,%d)' % (ki,kj), *cput1)
 
     log.timer(mp.__class__.__name__, *cput0)
 
