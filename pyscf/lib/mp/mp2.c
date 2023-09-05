@@ -69,7 +69,7 @@ size_t _MP2_gen_jobs(CacheJob *jobs, const int s2symm,
     return m;
 }
 
-/*  Calculate RMP2 energy for AO range (i0,i0+nocci,j0,j0+noccj) with real integrals
+/*  Calculate DF-RMP2 energy for AO range (i0,i0+nocci,j0,j0+noccj) with real integrals
 
     Math:
         for i in range(i0,i0+nocci):
@@ -161,7 +161,7 @@ void MP2_contract_d(double *ed_out, double *ex_out, const int s2symm,
 }
 
 
-/*  Calculate RMP2 energy for AO range (i0,i0+nocci,j0,j0+noccj) with complex integrals
+/*  Calculate DF-RMP2 energy for AO range (i0,i0+nocci,j0,j0+noccj) with complex integrals
 
     Math:
         for i in range(i0,i0+nocci):
@@ -263,6 +263,104 @@ void MP2_contract_c(double *ed_out, double *ex_out, const int s2symm,
 {
     *ed_out += ed;
     *ex_out += ex;
+}
+
+} // parallel
+
+    free(jobs);
+    free(parr_iaLR); free(parr_iaLI);
+    free(parr_jbLR); free(parr_jbLI);
+
+}
+
+/*  Calculate DF-RMP2 OS energy for AO range (i0,i0+nocci,j0,j0+noccj) with complex integrals
+
+    Math:
+        for i in range(i0,i0+nocci):
+            for j in range(j0,j0+noccj):
+                vab = einsum('aL,bL->ab', iaL[i-i0], jbL[j-j0])
+                tab = conj(vab) / ∆eab
+                ed_out += dot(vab, tab)
+*/
+void MP2_OS_contract_c(double *ed_out,
+                       const double *batch_iaLR, const double *batch_iaLI,
+                       const double *batch_jbLR, const double *batch_jbLI,
+                       const int i0, const int j0, const int nocci, const int noccj,
+                       const int nvira, const int nvirb, const int naux,
+                       const double *moeoo, const double *moevv)
+{
+
+    const int I1 = 1;
+    const double D0 = 0;
+    const double D1 = 1;
+    const double Dm1 = -1;
+    const char TRANS_Y = 'T';
+    const char TRANS_N = 'N';
+
+    const int nvv = nvira*nvirb;
+    const int nvax = nvira*naux;
+    const int nvbx = nvirb*naux;
+
+    CacheJob *jobs = malloc(sizeof(CacheJob) * nocci*noccj);
+    size_t njob = _MP2_gen_jobs(jobs, 0, i0, j0, nocci, noccj);
+
+    const double **parr_iaLR = _gen_ptr_arr(batch_iaLR, nocci, nvax);
+    const double **parr_iaLI = _gen_ptr_arr(batch_iaLI, nocci, nvax);
+    const double **parr_jbLR = _gen_ptr_arr(batch_jbLR, noccj, nvbx);
+    const double **parr_jbLI = _gen_ptr_arr(batch_jbLI, noccj, nvbx);
+
+#pragma omp parallel default(none) \
+        shared(njob, jobs, batch_iaLR, batch_iaLI, batch_jbLR, batch_jbLI, parr_iaLR, parr_iaLI, parr_jbLR, parr_jbLI, moeoo, moevv, naux, nvira, nvirb, nvv, noccj, D0, D1, Dm1, I1, TRANS_N, TRANS_Y, ed_out, ex_out)
+{
+    double *cache = malloc(sizeof(double) * nvv*4);
+    double *vabR = cache;
+    double *vabI = vabR + nvv;
+    double *tabR = vabI + nvv;
+    double *tabI = tabR + nvv;
+    double eij;
+
+    const double *iaLR, *iaLI, *jbLR, *jbLI;
+    size_t i,j,a,m;
+    double ed=0, fac;
+
+#pragma omp for schedule (dynamic, 4)
+
+    for (m = 0; m < njob; ++m) {
+        i = jobs[m].i;
+        j = jobs[m].j;
+        fac = jobs[m].fac;
+
+        iaLR = parr_iaLR[i]; iaLI = parr_iaLI[i];
+        jbLR = parr_jbLR[j]; jbLI = parr_jbLI[j];
+        eij = moeoo[i*noccj+j];
+
+        // einsum([i]aL,[j]bL) -> [i][j]ab
+        dgemm_(&TRANS_Y, &TRANS_N, &nvirb, &nvira, &naux,
+               &D1, jbLR, &naux, iaLR, &naux,
+               &D0, vabR, &nvirb);
+        dgemm_(&TRANS_Y, &TRANS_N, &nvirb, &nvira, &naux,
+               &Dm1, jbLI, &naux, iaLI, &naux,
+               &D1, vabR, &nvirb);
+        dgemm_(&TRANS_Y, &TRANS_N, &nvirb, &nvira, &naux,
+               &D1, jbLR, &naux, iaLI, &naux,
+               &D0, vabI, &nvirb);
+        dgemm_(&TRANS_Y, &TRANS_N, &nvirb, &nvira, &naux,
+               &D1, jbLI, &naux, iaLR, &naux,
+               &D1, vabI, &nvirb);
+        // tab = vab / eijab
+        for (a = 0; a < nvv; ++a) {
+            tabR[a] =  vabR[a] / (eij - moevv[a]);
+            tabI[a] = -vabI[a] / (eij - moevv[a]);
+        }
+        // vab, tab -> ed
+        ed += ddot_(&nvv, vabR, &I1, tabR, &I1) * fac;
+        ed -= ddot_(&nvv, vabI, &I1, tabI, &I1) * fac;
+    }
+    free(cache);
+
+#pragma omp critical
+{
+    *ed_out += ed;
 }
 
 } // parallel

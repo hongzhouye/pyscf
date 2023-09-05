@@ -35,3 +35,9 @@ void MP2_contract_c(double *, double *, const int,
                     const int, const int, const int, const int,
                     const int, const int,
                     const double *, const double *);
+void MP2_OS_contract_c(double *,
+                       const double *, const double *,
+                       const double *, const double *,
+                       const int, const int, const int, const int,
+                       const int, const int, const int,
+                       const double *, const double *);

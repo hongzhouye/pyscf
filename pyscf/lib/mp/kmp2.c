@@ -24,8 +24,8 @@
 #include "mp/mp2.h"
 
 
-/*  Calculate KRMP2 energy with density fitting for a given k-point quad (ki,kj,ka,kb) where ka!=kb
-    and a given AO range (i0,i0+nocci,j0,j0+noccj)
+/*  Calculate DF-KRMP2 energy for a given k-point quad (ki,kj,ka,kb) where ka!=kb and a given
+    AO range (i0,i0+nocci,j0,j0+noccj)
 
     Math:
         oovv(ki,kj,ka,kb) = einsum('iaL,jbL->ijab', ovL(ki,ka), ovL(kj,kb))
@@ -188,6 +188,39 @@ void KMP2_contract_drv(double *ed_out, double *ex_out,
             batch_iaLR, batch_iaLI, batch_ibLR, batch_ibLI,
             batch_jbLR, batch_jbLI, batch_jaLR, batch_jaLI,
             i0, j0, nocci, noccj, nvir, naux, moeoo, moevv
+        );
+    }
+}
+
+
+/*  Driver for KUMP2
+*/
+void KUMP2_contract_drv(double *ed_out, double *ex_out,
+                        const double *batch_iaLR, const double *batch_iaLI,
+                        const double *batch_ibLR, const double *batch_ibLI,
+                        const double *batch_jbLR, const double *batch_jbLI,
+                        const double *batch_jaLR, const double *batch_jaLI,
+                        const int sa, const int sb,
+                        const int ki, const int kj, const int ka, const int kb,
+                        const int i0, const int j0,
+                        const int nocci, const int noccj,
+                        const int nvira, const int nvirb, const int naux,
+                        const double *moeoo, const double *moevv)
+{
+    if (sa == sb) {
+        KMP2_contract_drv(
+            ed_out, ex_out,
+            batch_iaLR, batch_iaLI, batch_ibLR, batch_ibLI,
+            batch_jbLR, batch_jbLI, batch_jaLR, batch_jaLI,
+            ki, kj, ka, kb, i0, j0,
+            nocci, noccj, nvira, naux, moeoo, moevv
+        );
+    } else {
+        MP2_OS_contract_c(
+            ed_out,
+            batch_iaLR, batch_iaLI,
+            batch_jbLR, batch_jbLI,
+            i0, j0, nocci, noccj, nvira, nvirb, naux, moeoo, moevv
         );
     }
 }
