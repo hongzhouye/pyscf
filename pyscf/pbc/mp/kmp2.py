@@ -50,6 +50,20 @@ WITH_T2 = getattr(__config__, 'mp_mp2_with_t2', True)
 
 
 def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
+    """Computes k-point RMP2 energy.
+
+    Args:
+        mp (KMP2): an instance of KMP2
+        mo_energy (list): a list of np.ndarray. Each array contains MO energies of
+                          shape (Nmo,) for one kpt
+        mo_coeff (list): a list of np.ndarray. Each array contains MO coefficients
+                         of shape (Nao, Nmo) for one kpt
+        verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
+        with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to WITH_T2 (=True).
+
+    Returns:
+        KMP2 energy and t2 amplitudes (=None if with_t2 is False)
+    """
     log = logger.new_logger(mp, verbose=verbose)
     if mp._kernel is None:
         if mp.with_df_ints:
@@ -69,22 +83,8 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
 
     return fkernel(mp, mo_energy, mo_coeff, eris, with_t2, verbose)
 
-
+@lib.with_doc(kernel.__doc__)
 def kernel_fftdf(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
-    """Computes k-point RMP2 energy.
-
-    Args:
-        mp (KMP2): an instance of KMP2
-        mo_energy (list): a list of np.ndarray. Each array contains MO energies of
-                          shape (Nmo,) for one kpt
-        mo_coeff (list): a list of np.ndarray. Each array contains MO coefficients
-                         of shape (Nao, Nmo) for one kpt
-        verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
-        with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to WITH_T2 (=True).
-
-    Returns:
-        KMP2 energy and t2 amplitudes (=None if with_t2 is False)
-    """
     cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp, verbose)
     log.debug('Using FFTDF kernel')
@@ -123,7 +123,7 @@ def kernel_fftdf(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=No
     dsize = 8 if eris.dtype == np.float64 else 16
     mem_avail = mp.max_memory - lib.current_memory()[0]
     # 4*[O]^2*V^2 = mem
-    occ_blksize = min(nocc, max(1, np.floor((0.7*mem_avail*0.25 / nvir**2.)**0.5)))
+    occ_blksize = min(nocc, max(1, int(np.floor((0.7*mem_avail*0.25*1e6/dsize / nvir**2.)**0.5))))
     log.debug('occ blksize for %s loop: %d/%d', mp.__class__.__name__, occ_blksize, nocc)
 
     cput1 = (logger.process_clock(), logger.perf_counter())
@@ -167,10 +167,10 @@ def kernel_fftdf(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=No
                             if ki != kj:
                                 t2[kj,ki,kb][j0:j1,i0:i1] = t2_iajb.transpose(2,0,3,1)
 
-                        edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * 2 * fac_kikj
+                        edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * fac_kikj
                         exi = -einsum('iajb,ibja', t2_iajb, ovov_ij[1]).real * fac_swap * fac_kikj
-                        emp2_ss += edi*0.5 + exi
-                        emp2_os += edi*0.5
+                        emp2_ss += edi + exi
+                        emp2_os += edi
 
                         t2_iajb = None
 
@@ -181,18 +181,19 @@ def kernel_fftdf(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=No
                                 if ki != kj:
                                     t2[kj,ki,ka][j0:j1,i0:i1] = t2_ibja.transpose(2,0,3,1)
 
-                            edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2 * fac_kikj
-                            emp2_ss += edi*0.5
-                            emp2_os += edi*0.5
+                            edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * fac_kikj
+                            emp2_ss += edi
+                            emp2_os += edi
 
                             t2_ibja = None
+
+                        eiajb = None
 
                         TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
                         tspans[1] += TICK - TOCK
 
-                        eiajb = None
-
-                        done[(ka,kb)] = done[(kb,ka)] = True
+                ovov_ij = None
+                done[(ka,kb)] = done[(kb,ka)] = True
 
         cput1 = log.timer_debug1('ki = %d' % ki, *cput1)
 
@@ -209,21 +210,8 @@ def kernel_fftdf(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=No
 
     return emp2, t2
 
+@lib.with_doc(kernel.__doc__)
 def kernel_df(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
-    """Computes k-point RMP2 energy.
-
-    Args:
-        mp (KMP2): an instance of KMP2
-        mo_energy (list): a list of np.ndarray. Each array contains MO energies of
-                          shape (Nmo,) for one kpt
-        mo_coeff (list): a list of np.ndarray. Each array contains MO coefficients
-                         of shape (Nao, Nmo) for one kpt
-        verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
-        with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to WITH_T2 (=True).
-
-    Returns:
-        KMP2 energy and t2 amplitudes (=None if with_t2 is False)
-    """
     cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp, verbose)
     log.debug('Using DF-Python kernel')
@@ -330,10 +318,10 @@ def kernel_df(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None)
                             if ki != kj:
                                 t2[kj,ki,kb][j0:j1,i0:i1] = t2_iajb.transpose(2,0,3,1)
 
-                        edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * 2 * fac_kikj
+                        edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * fac_kikj
                         exi = -einsum('iajb,ibja', t2_iajb, ovov_ij[1]).real * fac_swap * fac_kikj
-                        emp2_ss += edi*0.5 + exi
-                        emp2_os += edi*0.5
+                        emp2_ss += edi + exi
+                        emp2_os += edi
 
                         t2_iajb = None
 
@@ -344,20 +332,21 @@ def kernel_df(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None)
                                 if ki != kj:
                                     t2[kj,ki,ka][j0:j1,i0:i1] = t2_ibja.transpose(2,0,3,1)
 
-                            edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2 * fac_kikj
-                            emp2_ss += edi*0.5
-                            emp2_os += edi*0.5
+                            edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * fac_kikj
+                            emp2_ss += edi
+                            emp2_os += edi
 
                             t2_ibja = None
+
+                        eiajb = None
 
                         TOCK = np.asarray((logger.process_clock(), logger.perf_counter()))
                         tspans[2] += TOCK - TICK
 
-                        eiajb = None
-
-                        done[(ka,kb)] = done[(kb,ka)] = True
-
                     iaL = ibL = None
+
+                ovov_ij = None
+                done[(ka,kb)] = done[(kb,ka)] = True
 
         cput1 = log.timer_debug1('ki = %d' % ki, *cput1)
 
@@ -374,21 +363,8 @@ def kernel_df(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None)
 
     return emp2, t2
 
+@lib.with_doc(kernel.__doc__)
 def kernel_df_C(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
-    """Computes k-point RMP2 energy.
-
-    Args:
-        mp (KMP2): an instance of KMP2
-        mo_energy (list): a list of np.ndarray. Each array contains MO energies of
-                          shape (Nmo,) for one kpt
-        mo_coeff (list): a list of np.ndarray. Each array contains MO coefficients
-                         of shape (Nao, Nmo) for one kpt
-        verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
-        with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to WITH_T2 (=True).
-
-    Returns:
-        KMP2 energy and t2 amplitudes (=None if with_t2 is False)
-    """
     cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp, verbose)
     log.debug('Using DF-C kernel')
@@ -1258,7 +1234,7 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
                     eris.Lov = h5py.File(eris._Lov_to_save.name, 'w')
                     log.debug('Transformed 3c integrals will be saved in %s', eris._Lov_to_save.name)
 
-            Lov = _init_mp_df_eris(mymp, mo_coeff, eris.Lov)
+            Lov = _init_mp_df_eris(mymp, mo_coeff, nocc, eris.Lov)
     else:
         fao2mo = mymp._scf.with_df.ao2mo
 
@@ -1283,7 +1259,7 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
     log.timer('Integral transformation', *time0)
     return eris
 
-def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
+def _init_mp_df_eris(mymp, mo_coeff=None, nocc=None, Lov=None):
     """Compute 3-center electron repulsion integrals, i.e. (L|ov),
     where `L` denotes DF auxiliary basis functions and `o` and `v` occupied and virtual
     canonical crystalline orbitals. Note that `o` and `v` contain kpt indices `ko` and `kv`,
@@ -1293,7 +1269,7 @@ def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
         mp (KMP2) -- A KMP2 instance
 
     Returns:
-        Lov (np.ndarray) -- 3-center DF ints, with shape (nkpts, nkpts, naux, nocc, nvir)
+        Lov (np.ndarray) -- 3-center DF ints, with shape (nkpts, nkpts, nocc, nvir, naux)
     """
     from pyscf.ao2mo import _ao2mo
 
@@ -1312,8 +1288,11 @@ def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
         # DF-driven CCSD implementation.
         raise NotImplementedError
 
-    nocc = mymp.nocc
-    nmo = mymp.nmo
+    if mo_coeff is None:
+        mo_coeff = _add_padding(mp, mymp.mo_coeff, mymp.mo_energy)[0]
+
+    if nocc is None: nocc = mymp.nocc
+    nmo = mo_coeff[0].shape[1]
     nvir = nmo - nocc
     nao = cell.nao_nr()
     kpts = mymp.kpts
@@ -1325,9 +1304,6 @@ def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
             with df._load3c(mydf._cderi, mydf._dataname, kpti_kptj=kpti_kptj) as j3c:
                 naux_perk[ki,kj] = j3c.shape[0]
     naux0 = naux_perk.reshape(-1).max()
-
-    if mo_coeff is None:
-        mo_coeff = _add_padding(mp, mymp.mo_coeff, mymp.mo_energy)[0]
 
     if gamma_point(kpts):
         dtype = np.float64
@@ -1354,7 +1330,7 @@ def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
     tao = []
     ao_loc = None
 
-    def fao2mo(j3c, i0, i1, p0, p1):
+    def fao2mo(j3c, mo, i0, i1, p0, p1):
         bra_start = i0
         bra_end = i1
         ket_start = nmo + nocc
@@ -1389,7 +1365,7 @@ def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
                 OvL = np.ndarray((nocci,nvir,naux), buffer=buf, dtype=dtype)
                 with df._load3c(mydf._cderi, mydf._dataname, kpti_kptj=kpti_kptj) as j3c:
                     def process(aux_range):
-                        return fao2mo(j3c, i0,i1, *aux_range)
+                        return fao2mo(j3c, mo, i0,i1, *aux_range)
                     for p0,p1 in lib.prange(0, naux, aux_blksize):
                         out = process((p0,p1))
                         OvL[:,:,p0:p1] = out.reshape(-1,nocci,nvir).transpose(1,2,0)
