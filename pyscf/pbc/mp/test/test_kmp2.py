@@ -191,22 +191,60 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(ekpt2, -1.2053666821021261, 7)
         self.assertAlmostEqual(mp.e_corr, -6.9881475423322723e-06, 9)
 
-    def test_kmp2_gdf_outcore(self):
-        cell = build_h_cell()
 
-        nmp = [2, 1, 1]
+class Diamond_GDF(unittest.TestCase):
+    ''' Diamond 311 kpt sampling
+    '''
+    @classmethod
+    def setUpClass(cls):
+        cell = pbcgto.Cell()
+        cell.verbose = 5
+        cell.output = '/dev/null'
+        cell.atom = 'C 0 0 0; C 0.8925000000 0.8925000000 0.8925000000'
+        cell.a = '''
+        1.7850000000 1.7850000000 0.0000000000
+        0.0000000000 1.7850000000 1.7850000000
+        1.7850000000 0.0000000000 1.7850000000
+        '''
+        cell.pseudo = 'gth-hf-rev'
+        cell.basis = {'C': [[0, (0.8, 1.0)], [0, (0.4, 1.0)],
+                            [1, (1.0, 1.0)], [1, (0.5, 1.0)]]}
+        cell.precision = 1e-12
+        cell.build()
+        kpts = cell.make_kpts((3,1,1))
+        mf = pbcscf.KRHF(cell, kpts=kpts).density_fit(auxbasis='weigend').run()
+        cls.cell = cell
+        cls.mf = mf
+    @classmethod
+    def tearDownClass(cls):
+        cls.cell.stdout.close()
+        del cls.cell, cls.mf
 
-        kmf = pbcscf.KRHF(cell).density_fit()
-        kmf.verbose = 5
-        kmf.kpts = cell.make_kpts(nmp, scaled_center=[0.0,0.0,0.0])
-        kmf.conv_tol = 1e-9
-        kmf.kernel()
+    def test_energy(self):
+        mmp = pyscf.pbc.mp.KMP2(self.mf).run()
+        self.assertAlmostEqual(mmp.e_corr, -0.14695261283407912, 6)
 
-        mymp = pyscf.pbc.mp.kmp2.KMP2(kmf)
-        mymp.max_memory = 0.016 # incore requires ~0.018 MB of memory
-        mymp.kernel()
+    def test_energy_input_mo(self):
+        # force recalculate mo energy from fock build
+        mo_coeff = [c.copy() for c in self.mf.mo_coeff]
+        mmp = pyscf.pbc.mp.KMP2(self.mf).run(mo_coeff=mo_coeff)
+        self.assertAlmostEqual(mmp.e_corr, -0.14695261283407912, 6)
 
-        self.assertAlmostEqual(mymp.e_corr, -0.03723395559265186, 5)
+    def test_energy_outcore(self):
+        mmp = pyscf.pbc.mp.KMP2(self.mf)
+        mmp.max_memory = 1.2    # incore memory ~ 1.8 MB
+        mmp.kernel()
+        self.assertAlmostEqual(mmp.e_corr, -0.14695261283407912, 6)
+
+    def test_energy_frozen(self):
+        mmp = pyscf.pbc.mp.KMP2(self.mf, frozen=1).run()
+        self.assertAlmostEqual(mmp.e_corr, -0.11411554879445532, 6)
+
+    def test_energy_C_kernel(self):
+        mmp = pyscf.pbc.mp.KMP2(self.mf)
+        mmp._kernel = 'C'
+        mmp.kernel(with_t2=False)
+        self.assertAlmostEqual(mmp.e_corr, -0.14695261283407912, 6)
 
 
 if __name__ == '__main__':

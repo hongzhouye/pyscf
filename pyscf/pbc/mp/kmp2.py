@@ -32,6 +32,7 @@ import numpy as np
 from scipy.linalg import block_diag
 import h5py
 import tempfile
+import ctypes
 
 from pyscf import lib
 from pyscf.lib import logger, einsum
@@ -43,11 +44,33 @@ from pyscf.pbc.lib import kpts as libkpts
 from pyscf.lib.parameters import LARGE_DENOM
 from pyscf import __config__
 
+libmp = lib.load_library('libmp')
+
 WITH_T2 = getattr(__config__, 'mp_mp2_with_t2', True)
 
 
-# TODO: memory optimization for small kmesh + large supercell
 def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
+    log = logger.new_logger(mp, verbose=verbose)
+    if mp._kernel is None:
+        if mp.with_df_ints:
+            fkernel = kernel_df if with_t2 else kernel_df_C
+        else:
+            fkernel = kernel_fftdf
+    elif callable(mp._kernel):
+        fkernel = mp._kernel
+    elif isinstance(mp._kernel, str):
+        if mp.with_df_ints:
+            fkernel = kernel_df_C if mp._kernel.lower() == 'c' else kernel_df
+        else:
+            fkernel = kernel_fftdf
+    else:
+        log.error('Unknown kernel type')
+        raise ValueError
+
+    return fkernel(mp, mo_energy, mo_coeff, eris, with_t2, verbose)
+
+
+def kernel_fftdf(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     """Computes k-point RMP2 energy.
 
     Args:
@@ -64,6 +87,7 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     """
     cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp, verbose)
+    log.debug('Using FFTDF kernel')
 
     if eris is None:
         eris = mp.ao2mo(mo_coeff, with_t2)
@@ -77,7 +101,6 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     nkpts = mp.nkpts
 
     kconserv = mp.khelper.kconserv
-    ovov_ij = np.zeros((2,nocc,nvir,nocc,nvir), dtype=eris.dtype)
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -96,7 +119,17 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
         eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
         return eia
 
+    # determine occ batch size
+    dsize = 8 if eris.dtype == np.float64 else 16
+    mem_avail = mp.max_memory - lib.current_memory()[0]
+    # 4*[O]^2*V^2 = mem
+    occ_blksize = min(nocc, max(1, np.floor((0.7*mem_avail*0.25 / nvir**2.)**0.5)))
+    log.debug('occ blksize for %s loop: %d/%d', mp.__class__.__name__, occ_blksize, nocc)
+
     cput1 = (logger.process_clock(), logger.perf_counter())
+
+    tspans = np.zeros((2,2))
+    tnames = ['ovov', 'energy']
 
     emp2_ss = emp2_os = 0.
     for ki in range(nkpts):
@@ -109,49 +142,392 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
                 if done[(ka,kb)] or done[(kb,ka)]:
                     continue
 
-                ovov_ij[0] = eris.get_ovov((ki,ka,kj,kb))
-                if ka != kb:
-                    ovov_ij[1] = eris.get_ovov((ki,kb,kj,ka))
-                    fac_swap = 2
-                else:
-                    ovov_ij[1] = ovov_ij[0]
-                    fac_swap = 1
+                eia = get_eia(ki, ka)
+                ejb = get_eia(kj, kb)
+
+                ovov_ij = [None] * 2
+                for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc,occ_blksize)):
+                    for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc,occ_blksize)):
+                        TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        ovov_ij[0] = eris.get_ovov((ki,ka,kj,kb), (i0,i1), (j0,j1))
+                        if ka == kb:
+                            fac_swap = 1
+                            ovov_ij[1] = ovov_ij[0]
+                        else:
+                            fac_swap = 2
+                            ovov_ij[1] = eris.get_ovov((ki,kb,kj,ka), (i0,i1), (j0,j1))
+                        TOCK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[0] += TOCK - TICK
+
+                        eiajb = lib.direct_sum('ia,jb->iajb', eia[i0:i1], ejb[j0:j1])
+
+                        t2_iajb = np.conj(ovov_ij[0] / eiajb)
+                        if with_t2:
+                            t2[ki,kj,ka][i0:i1,j0:j1] = t2_iajb.transpose(0,2,1,3)
+                            if ki != kj:
+                                t2[kj,ki,kb][j0:j1,i0:i1] = t2_iajb.transpose(2,0,3,1)
+
+                        edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * 2 * fac_kikj
+                        exi = -einsum('iajb,ibja', t2_iajb, ovov_ij[1]).real * fac_swap * fac_kikj
+                        emp2_ss += edi*0.5 + exi
+                        emp2_os += edi*0.5
+
+                        t2_iajb = None
+
+                        if ka != kb:
+                            t2_ibja = np.conj(ovov_ij[1] / eiajb.transpose(0,3,2,1))
+                            if with_t2:
+                                t2[ki,kj,kb][i0:i1,j0:j1] = t2_ibja.transpose(0,2,1,3)
+                                if ki != kj:
+                                    t2[kj,ki,ka][j0:j1,i0:i1] = t2_ibja.transpose(2,0,3,1)
+
+                            edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2 * fac_kikj
+                            emp2_ss += edi*0.5
+                            emp2_os += edi*0.5
+
+                            t2_ibja = None
+
+                        TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[1] += TICK - TOCK
+
+                        eiajb = None
+
+                        done[(ka,kb)] = done[(kb,ka)] = True
+
+        cput1 = log.timer_debug1('ki = %d' % ki, *cput1)
+
+    log.debug('')
+    for tspan,tname in zip(tspans,tnames):
+        log.debug(f'    CPU time for {tname:10s} {tspan[0]:9.2f} sec, wall time {tspan[1]:9.2f} sec')
+    log.debug('')
+
+    log.timer(mp.__class__.__name__, *cput0)
+
+    emp2_ss /= nkpts
+    emp2_os /= nkpts
+    emp2 = lib.tag_array(emp2_ss+emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
+
+    return emp2, t2
+
+def kernel_df(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
+    """Computes k-point RMP2 energy.
+
+    Args:
+        mp (KMP2): an instance of KMP2
+        mo_energy (list): a list of np.ndarray. Each array contains MO energies of
+                          shape (Nmo,) for one kpt
+        mo_coeff (list): a list of np.ndarray. Each array contains MO coefficients
+                         of shape (Nao, Nmo) for one kpt
+        verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
+        with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to WITH_T2 (=True).
+
+    Returns:
+        KMP2 energy and t2 amplitudes (=None if with_t2 is False)
+    """
+    cput0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.new_logger(mp, verbose)
+    log.debug('Using DF-Python kernel')
+
+    if eris is None:
+        eris = mp.ao2mo(mo_coeff, with_t2)
+
+    if mo_energy is None:
+        mo_energy = eris.mo_energy
+
+    nmo = mp.nmo
+    nocc = mp.nocc
+    nvir = nmo - nocc
+    nkpts = mp.nkpts
+
+    kconserv = mp.khelper.kconserv
+
+    mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
+    mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
+
+    # Get location of non-zero/padded elements in occupied and virtual space
+    nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
+
+    if with_t2:
+        t2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
+    else:
+        t2 = None
+
+    def get_eia(ki, ka):
+        eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+        n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+        eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+        return eia
+
+    # determine occ batch size
+    naux = mp._scf.with_df.get_naoaux()
+    dsize = 8 if eris.dtype == np.float64 else 16
+    mem_avail = mp.max_memory - lib.current_memory()[0]
+    # 4*[O]^2*V^2 + 4*[O]XV = mem
+    occ_blksize = min(nocc, max(1, int(np.floor(((naux**2+0.8*mem_avail*0.25*1e6/dsize)**0.5 -
+                                                naux) / (2*nvir)))))
+    log.debug('occ blksize for %s loop: %d/%d', mp.__class__.__name__, occ_blksize, nocc)
+
+    cput1 = (logger.process_clock(), logger.perf_counter())
+
+    tspans = np.zeros((3,2))
+    tnames = ['load', 'ovov', 'energy']
+
+    emp2_ss = emp2_os = 0.
+    for ki in range(nkpts):
+        for kj in range(ki+1):
+            fac_kikj = 1 if ki==kj else 2
+            done = {(ka,kconserv[ki,ka,kj]):False for ka in range(nkpts)}
+            for ka in range(nkpts):
+                kb = kconserv[ki,ka,kj]
+
+                if done[(ka,kb)] or done[(kb,ka)]:
+                    continue
 
                 eia = get_eia(ki, ka)
                 ejb = get_eia(kj, kb)
-                eiajb = lib.direct_sum('ia,jb->iajb', eia, ejb)
 
-                t2_iajb = np.conj(ovov_ij[0] / eiajb)
-                if with_t2:
-                    t2[ki,kj,ka] = t2_iajb.transpose(0,2,1,3)
-                    if ki != kj:
-                        t2[kj,ki,kb] = t2_iajb.transpose(2,0,3,1)
+                ovov_ij = [None] * 2
+                for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc,occ_blksize)):
+                    TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    iaL = eris.get_ovL((ki,ka), (i0,i1))
+                    if ka == kb:
+                        ibL = iaL
+                    else:
+                        ibL = eris.get_ovL((ki,kb), (i0,i1))
+                    TOCK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    tspans[0] += TOCK - TICK
+                    for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc,occ_blksize)):
+                        TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        if ka == kb:
+                            fac_swap = 1
+                            if ki == kj and ibatch == jbatch:
+                                jbL = iaL
+                            else:
+                                jbL = eris.get_ovL((kj,kb), (j0,j1))
+                            TOCK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                            tspans[0] += TOCK - TICK
+                            ovov_ij[0] = einsum('iaL,jbL->iajb', iaL, jbL) / nkpts
+                            ovov_ij[1] = ovov_ij[0]
+                            TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                            tspans[1] += TICK - TOCK
+                        else:
+                            fac_swap = 2
+                            jbL = eris.get_ovL((kj,kb), (j0,j1))
+                            jaL = eris.get_ovL((kj,ka), (j0,j1))
+                            TOCK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                            tspans[0] += TOCK - TICK
+                            ovov_ij[0] = einsum('iaL,jbL->iajb', iaL, jbL) / nkpts
+                            ovov_ij[1] = einsum('iaL,jbL->iajb', ibL, jaL) / nkpts
+                            TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                            tspans[1] += TICK - TOCK
+                        jaL = jbL = None
 
-                edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * 2 * fac_kikj
-                exi = -einsum('iajb,ibja', t2_iajb, ovov_ij[1]).real * fac_swap * fac_kikj
-                emp2_ss += edi*0.5 + exi
-                emp2_os += edi*0.5
+                        eiajb = lib.direct_sum('ia,jb->iajb', eia[i0:i1], ejb[j0:j1])
 
-                t2_iajb = None
+                        t2_iajb = np.conj(ovov_ij[0] / eiajb)
+                        if with_t2:
+                            t2[ki,kj,ka][i0:i1,j0:j1] = t2_iajb.transpose(0,2,1,3)
+                            if ki != kj:
+                                t2[kj,ki,kb][j0:j1,i0:i1] = t2_iajb.transpose(2,0,3,1)
 
-                if ka != kb:
-                    t2_ibja = np.conj(ovov_ij[1] / eiajb.transpose(0,3,2,1))
-                    if with_t2:
-                        t2[ki,kj,kb] = t2_ibja.transpose(0,2,1,3)
-                        if ki != kj:
-                            t2[kj,ki,ka] = t2_ibja.transpose(2,0,3,1)
+                        edi = einsum('iajb,iajb', t2_iajb, ovov_ij[0]).real * 2 * fac_kikj
+                        exi = -einsum('iajb,ibja', t2_iajb, ovov_ij[1]).real * fac_swap * fac_kikj
+                        emp2_ss += edi*0.5 + exi
+                        emp2_os += edi*0.5
 
-                    edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2 * fac_kikj
-                    emp2_ss += edi*0.5
-                    emp2_os += edi*0.5
+                        t2_iajb = None
 
-                    t2_ibja = None
+                        if ka != kb:
+                            t2_ibja = np.conj(ovov_ij[1] / eiajb.transpose(0,3,2,1))
+                            if with_t2:
+                                t2[ki,kj,kb][i0:i1,j0:j1] = t2_ibja.transpose(0,2,1,3)
+                                if ki != kj:
+                                    t2[kj,ki,ka][j0:j1,i0:i1] = t2_ibja.transpose(2,0,3,1)
 
-                eiajb = None
+                            edi = einsum('iajb,iajb', t2_ibja, ovov_ij[1]).real * 2 * fac_kikj
+                            emp2_ss += edi*0.5
+                            emp2_os += edi*0.5
+
+                            t2_ibja = None
+
+                        TOCK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[2] += TOCK - TICK
+
+                        eiajb = None
+
+                        done[(ka,kb)] = done[(kb,ka)] = True
+
+                    iaL = ibL = None
+
+        cput1 = log.timer_debug1('ki = %d' % ki, *cput1)
+
+    log.debug('')
+    for tspan,tname in zip(tspans,tnames):
+        log.debug(f'    CPU time for {tname:10s} {tspan[0]:9.2f} sec, wall time {tspan[1]:9.2f} sec')
+    log.debug('')
+
+    log.timer(mp.__class__.__name__, *cput0)
+
+    emp2_ss /= nkpts
+    emp2_os /= nkpts
+    emp2 = lib.tag_array(emp2_ss+emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
+
+    return emp2, t2
+
+def kernel_df_C(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
+    """Computes k-point RMP2 energy.
+
+    Args:
+        mp (KMP2): an instance of KMP2
+        mo_energy (list): a list of np.ndarray. Each array contains MO energies of
+                          shape (Nmo,) for one kpt
+        mo_coeff (list): a list of np.ndarray. Each array contains MO coefficients
+                         of shape (Nao, Nmo) for one kpt
+        verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
+        with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to WITH_T2 (=True).
+
+    Returns:
+        KMP2 energy and t2 amplitudes (=None if with_t2 is False)
+    """
+    cput0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.new_logger(mp, verbose)
+    log.debug('Using DF-C kernel')
+
+    if eris is None:
+        eris = mp.ao2mo(mo_coeff, with_t2)
+
+    if mo_energy is None:
+        mo_energy = eris.mo_energy
+
+    nmo = mp.nmo
+    nocc = mp.nocc
+    nvir = nmo - nocc
+    nkpts = mp.nkpts
+
+    kconserv = mp.khelper.kconserv
+
+    mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
+    mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
+
+    # Get location of non-zero/padded elements in occupied and virtual space
+    nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
+
+    if with_t2:
+        log.error('DF-C kernel does not support with_t2 = True. '
+                  'Run with mmp.kernel(with_t2=False) or '
+                  'use DF-Python kernel by mmp._kernel = \'py\'.')
+        raise NotImplementedError
+        t2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
+    else:
+        t2 = None
+
+    drv = libmp.KMP2_contract_drv
+
+    def get_eij(ki, kj):
+        eij = -LARGE_DENOM * np.ones((nocc, nocc), dtype=mo_energy[0].dtype)
+        n0_ovp_ij = np.ix_(nonzero_opadding[ki], nonzero_opadding[kj])
+        eij[n0_ovp_ij] = (mo_e_o[ki][:,None] + mo_e_o[kj])[n0_ovp_ij]
+        return eij
+    def get_eab(ka, kb):
+        eab = LARGE_DENOM * np.ones((nvir, nvir), dtype=mo_energy[0].dtype)
+        n0_ovp_ab = np.ix_(nonzero_vpadding[ka], nonzero_vpadding[kb])
+        eab[n0_ovp_ab] = (mo_e_v[ka][:,None] + mo_e_v[kb])[n0_ovp_ab]
+        return eab
+
+    # determine occ batch size
+    naux = mp._scf.with_df.get_naoaux()
+    dsize = 8 if eris.dtype == np.float64 else 16
+    mem_avail = mp.max_memory - lib.current_memory()[0]
+    # 4*[O]^2*V^2 + 4*[O]XV = mem
+    occ_blksize = min(nocc, max(1, int(np.floor(((naux**2+0.8*mem_avail*0.25*1e6/dsize)**0.5 -
+                                                naux) / (2*nvir)))))
+    log.debug('occ blksize for %s loop: %d/%d', mp.__class__.__name__, occ_blksize, nocc)
+
+    cput1 = (logger.process_clock(), logger.perf_counter())
+
+    tspans = np.zeros((2,2))
+    tnames = ['load', 'contract']
+
+    emp2_ss = emp2_os = 0
+    for ki in range(nkpts):
+        for kj in range(ki+1):
+            fac_kikj = 1 if ki==kj else 2
+            moeoo = get_eij(ki,kj)
+            done = {(ka,kconserv[ki,ka,kj]):False for ka in range(nkpts)}
+            for ka in range(nkpts):
+                kb = kconserv[ki,ka,kj]
+
+                if done[(ka,kb)] or done[(kb,ka)]:
+                    continue
+
+                moevv = lib.asarray(get_eab(ka,kb).reshape(-1), order='C')
+
+                for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc,occ_blksize)):
+                    nocci = i1-i0
+                    TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                    iaLR, iaLI = eris.get_ovL((ki,ka), (i0,i1), True)
+                    if ka == kb:
+                        ibLR, ibLI = iaLR, iaLI
+                    else:
+                        ibLR, ibLI = eris.get_ovL((ki,kb), (i0,i1), True)
+                    naux = iaLR.shape[-1]
+                    for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc,occ_blksize)):
+                        noccj = j1-j0
+                        if ka == kb:
+                            if ki == kj and ibatch == jbatch:
+                                jbLR, jbLI = iaLR, iaLI
+                            else:
+                                jbLR, jbLI = eris.get_ovL((kj,kb), (j0,j1), True)
+                            jaLR, jaLI = jbLR, jbLI
+                        else:
+                            jbLR, jbLI = eris.get_ovL((kj,kb), (j0,j1), True)
+                            jaLR, jaLI = eris.get_ovL((kj,ka), (j0,j1), True)
+                        TOCK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[0] += TOCK - TICK
+
+                        ed = np.zeros(1, dtype=np.float64)
+                        ex = np.zeros(1, dtype=np.float64)
+                        drv(
+                            ed.ctypes.data_as(ctypes.c_void_p),
+                            ex.ctypes.data_as(ctypes.c_void_p),
+                            iaLR.ctypes.data_as(ctypes.c_void_p),
+                            iaLI.ctypes.data_as(ctypes.c_void_p),
+                            ibLR.ctypes.data_as(ctypes.c_void_p),
+                            ibLI.ctypes.data_as(ctypes.c_void_p),
+                            jbLR.ctypes.data_as(ctypes.c_void_p),
+                            jbLI.ctypes.data_as(ctypes.c_void_p),
+                            jaLR.ctypes.data_as(ctypes.c_void_p),
+                            jaLI.ctypes.data_as(ctypes.c_void_p),
+                            ctypes.c_int(ki), ctypes.c_int(kj),
+                            ctypes.c_int(ka), ctypes.c_int(kb),
+                            ctypes.c_int(i0), ctypes.c_int(j0),
+                            ctypes.c_int(nocci), ctypes.c_int(noccj),
+                            ctypes.c_int(nvir), ctypes.c_int(naux),
+                            lib.asarray(moeoo[i0:i1,j0:j1],
+                                        order='C').ctypes.data_as(ctypes.c_void_p),
+                            moevv.ctypes.data_as(ctypes.c_void_p),
+                        )
+                        ed *= fac_kikj / nkpts**2
+                        ex *= fac_kikj / nkpts**2
+
+                        emp2_ss += ed + ex
+                        emp2_os += ed
+
+                        TICK = np.asarray((logger.process_clock(), logger.perf_counter()))
+                        tspans[1] += TICK - TOCK
+
+                        jaLR = jaLI = jbLR = jbLI = None
+
+                    iaLR = iaLI = ibLR = ibLI = None
 
                 done[(ka,kb)] = done[(kb,ka)] = True
 
-            cput1 = log.timer_debug1('(ki,kj) = (%d,%d)' % (ki,kj), *cput1)
+        cput1 = log.timer_debug1('ki = %d' % ki, *cput1)
+
+    log.debug('')
+    for tspan,tname in zip(tspans,tnames):
+        log.debug(f'    CPU time for {tname:10s} {tspan[0]:9.2f} sec, wall time {tspan[1]:9.2f} sec')
+    log.debug('')
 
     log.timer(mp.__class__.__name__, *cput0)
 
@@ -631,6 +1007,9 @@ def _gamma1_intermediates(mp, t2=None):
 
 
 class KMP2(mp2.MP2):
+
+    _kernel = getattr(__config__, 'pbc_mp_KMP2_kernel', None)
+
     def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
 
         if mo_coeff is None: mo_coeff = mf.mo_coeff
@@ -647,6 +1026,10 @@ class KMP2(mp2.MP2):
             self.with_df_ints = True
         else:
             self.with_df_ints = False
+
+        # for GDF
+        self._Lov = None
+        self._Lov_to_save = None
 
 ##################################################
 # don't modify the following attributes, they are not input options
@@ -686,6 +1069,7 @@ class KMP2(mp2.MP2):
         logger.info(self, "nocc = %s", self.nocc)
         logger.info(self, "nmo = %s", self.nmo)
         logger.info(self, "with_df_ints = %s", self.with_df_ints)
+        logger.info(self, "_kernel = %s", self._kernel)
 
         if self.frozen is not None:
             logger.info(self, "frozen orbitals = %s", self.frozen)
@@ -738,12 +1122,12 @@ class KMP2(mp2.MP2):
 
 def _mem_usage(nocc, nvir, nkpts, naux, dsize, with_t2=WITH_T2):
     '''
-        basic   = t2 + 4*ovov
+        basic   = t2 + 4*v**2 + 4*x*v
         incore  = kLov + basic
         outcore = basic
     '''
-    # 4 ovov for ovov(ka,kb), ovov(kb,ka), t2, eiajb
-    basic = (nocc*nvir)**2*4
+    # 4 [o][o]vv for ovov(ka,kb), ovov(kb,ka), t2, eiajb + 4 L[o]v
+    basic = 4*(nvir**2 + naux*nvir)
     if with_t2:
         basic += nkpts**3*(nocc*nvir)**2
     basic *= dsize/1e6
@@ -757,10 +1141,15 @@ class _ChemistsERIs:
         self.mo_coeff = None
         self.nocc = None
         self.fock = None
+        self.dtype = None
+
+        # for GDF
+        self._Lov = None
         self._Lov_to_save = None
         self.Lov = None
+
+        # for FFTDF
         self._get_ovov = None
-        self.dtype = None
 
     def _common_init_(self, mp, mo_coeff=None):
         if mo_coeff is None:
@@ -791,8 +1180,25 @@ class _ChemistsERIs:
             self.mo_energy = padded_mo_energy(mp, mo_energy)
         return self
 
-    def get_ovov(self, kiajb):
-        return self._get_ovov(kiajb)
+    def get_ovov(self, kiajb, i01, j01):
+        return self._get_ovov(kiajb, i01, j01)
+
+    def get_ovL(self, kia, i01, RIsep=False):
+        ki,ka = kia
+        i0,i1 = i01
+        Lov = self.Lov
+        if isinstance(Lov, np.ndarray):
+            if RIsep:
+                return (np.asarray(Lov[ki,ka][i0:i1].real, order='C'),
+                        np.asarray(Lov[ki,ka][i0:i1].imag, order='C'))
+            else:
+                return np.asarray(Lov[ki,ka][i0:i1])
+        else:
+            if RIsep:
+                return (np.asarray(Lov[f'{ki},{ka}'][i0:i1].real, order='C'),
+                        np.asarray(Lov[f'{ki},{ka}'][i0:i1].imag, order='C'))
+            else:
+                return np.asarray(Lov[f'{ki},{ka}'][i0:i1])
 
 
 def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
@@ -800,6 +1206,8 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
     time0 = (logger.process_clock(), logger.perf_counter())
     eris = _ChemistsERIs()
     eris._common_init_(mymp, mo_coeff)
+    eris._Lov = mymp._Lov
+    eris._Lov_to_save = mymp._Lov_to_save
     mo_coeff = eris.mo_coeff
     mf = mymp._scf
     kpts = mf.kpts
@@ -829,55 +1237,48 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
                      'Available mem %s MB, required mem %s MB',
                      max_memory, mem_basic)
 
-        if mem_incore < max_memory:
-            eris.Lov = np.ndarray((nkpts,nkpts), dtype=object)
-        else:
-            eris._Lov_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
-            eris.Lov = h5py.File(eris._Lov_to_save, 'w')
-
-        Lov = _init_mp_df_eris(mymp, mo_coeff, eris.Lov)
-
-        def get_ovov(kiajb):
-            ki,ka,kj,kb = kiajb
-            if isinstance(Lov, np.ndarray):
-                ovov = einsum("Lia,Ljb->iajb", Lov[ki,ka], Lov[kj,kb]) / nkpts
+        if eris._Lov is not None:
+            if isinstance(eris._Lov, np.ndarray):
+                eris.Lov = eris._Lov
+                log.debug('Incore 3c integrals are found')
             else:
-                max_mem = mymp.max_memory - lib.current_memory()[0] - (nocc*nvir)**2*dsize/1e6
-                blksize = max(1, int(np.floor(max_mem*0.5 / (2*nocc*nvir*dsize/1e6))))
-                naux = Lov[f'{ki},{ka}'].shape[0]
-                if blksize >= naux:
-                    ovov = einsum("Lia,Ljb->iajb", Lov[f'{ki},{ka}'][()],
-                                  Lov[f'{kj},{kb}'][()]) / nkpts
+                eris.Lov = h5py.File(eris._Lov, 'r')
+                log.debug('Outcore 3c integrals are found %s', eris._Lov)
+        else:
+            if mem_incore < max_memory:
+                eris.Lov = np.ndarray((nkpts,nkpts), dtype=object)
+                log.debug('Transformed 3c integrals will be saved in memory')
+            else:
+                if eris._Lov_to_save is None:
+                    eris._Lov_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+                if isinstance(eris._Lov_to_save, str):
+                    eris.Lov = h5py.File(eris._Lov_to_save, 'w')
+                    log.debug('Transformed 3c integrals will be saved in %s', eris._Lov_to_save)
                 else:
-                    # batch-load Lov by aux index to fit memory
-                    # TODO: alternative: loop over occ index
-                    ovov = np.zeros((nocc,nvir,nocc,nvir), dtype=dtype)
-                    for b0,b1 in lib.prange(0, naux, blksize):
-                        Lia = np.asarray(Lov[f'{ki},{ka}'][b0:b1])
-                        if kj==ki and kb==ka:
-                            Ljb = Lia
-                        else:
-                            Ljb = np.asarray(Lov[f'{kj},{kb}'][b0:b1])
-                        ovov[:] += einsum('Lia,Ljb->iajb', Lia, Ljb)
-                        Lia = Ljb = None
-                    ovov /= nkpts
-            return ovov
+                    eris.Lov = h5py.File(eris._Lov_to_save.name, 'w')
+                    log.debug('Transformed 3c integrals will be saved in %s', eris._Lov_to_save.name)
+
+            Lov = _init_mp_df_eris(mymp, mo_coeff, eris.Lov)
     else:
         fao2mo = mymp._scf.with_df.ao2mo
 
-        def get_ovov(kiajb):
+        def get_ovov(kiajb, i01, j01):
             ki,ka,kj,kb = kiajb
+            i0, i1 = i01
+            j0, j1 = j01
+            nocci = i1-i0
+            noccj = j1-j0
 
-            orbo_i = mo_coeff[ki][:,:nocc]
-            orbo_j = mo_coeff[kj][:,:nocc]
+            orbo_i = mo_coeff[ki][:,i0:i1]
+            orbo_j = mo_coeff[kj][:,j0:j1]
             orbv_a = mo_coeff[ka][:,nocc:]
             orbv_b = mo_coeff[kb][:,nocc:]
             ovov = fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
                           (kpts[ki],kpts[ka],kpts[kj],kpts[kb]),
                           compact=False) / nkpts
-            return ovov.reshape(nocc,nvir,nocc,nvir)
+            return ovov.reshape(nocci,nvir,noccj,nvir)
 
-    eris._get_ovov = get_ovov
+        eris._get_ovov = get_ovov
 
     log.timer('Integral transformation', *time0)
     return eris
@@ -917,61 +1318,87 @@ def _init_mp_df_eris(mymp, mo_coeff=None, Lov=None):
     nao = cell.nao_nr()
     kpts = mymp.kpts
     nkpts = len(kpts)
+    naux_perk = np.zeros((nkpts,nkpts), dtype=int)
+    for ki in range(nkpts):
+        for kj in range(nkpts):
+            kpti_kptj = np.asarray((kpts[ki],kpts[kj]))
+            with df._load3c(mydf._cderi, mydf._dataname, kpti_kptj=kpti_kptj) as j3c:
+                naux_perk[ki,kj] = j3c.shape[0]
+    naux0 = naux_perk.reshape(-1).max()
 
     if mo_coeff is None:
         mo_coeff = _add_padding(mp, mymp.mo_coeff, mymp.mo_energy)[0]
 
     if gamma_point(kpts):
-        dtype = np.double
-        dsize = 8
+        dtype = np.float64
     else:
         dtype = np.complex128
-        dsize = 16
     dtype = np.result_type(dtype, *mo_coeff)
+    dsize = 8 if dtype == np.float64 else 16
 
     if Lov is None:
         Lov = np.empty((nkpts, nkpts), dtype=object)
 
     mem_avail = mymp.max_memory - lib.current_memory()[0]
     if isinstance(Lov, np.ndarray):
-        mem_avail -= nkpts**2*mydf.get_naoaux()*nocc*nvir * dsize/1e6
-    mem_per_block = (nocc*nvir+nao**2) * dsize/1e6
-    blksize = max(1, int(np.floor(mem_avail*0.5 / mem_per_block)))
+        mem_avail -= nkpts**2*naux0*nocc*nvir * dsize/1e6
+    # occblk: [O]XV; auxblk: [X]N^2
+    mem_occblk = naux0*nvir * dsize/1e6
+    mem_auxblk = nao**2 * dsize/1e6
+    occ_blksize = min(nocc, max(1, int(np.floor(mem_avail*0.6 / mem_occblk))))
+    aux_blksize = min(naux0, max(1, int(np.floor(mem_avail*0.3 / mem_auxblk))))
+    buf = np.empty(naux0*occ_blksize*nvir, dtype=dtype)
+    log.debug('occ blksize for %s ao2mo: %d/%d', mymp.__class__.__name__, occ_blksize, nocc)
+    log.debug('aux blksize for %s ao2mo: %d/%d', mymp.__class__.__name__, aux_blksize, naux0)
 
-    bra_start = 0
-    bra_end = nocc
-    ket_start = nmo+nocc
-    ket_end = ket_start + nvir
-    braket = (bra_start, bra_end, ket_start, ket_end)
     tao = []
     ao_loc = None
+
+    def fao2mo(j3c, i0, i1, p0, p1):
+        bra_start = i0
+        bra_end = i1
+        ket_start = nmo + nocc
+        ket_end = ket_start + nvir
+        braket = (bra_start, bra_end, ket_start, ket_end)
+
+        if dtype == np.double:
+            Lpq_ao = np.asarray(j3c[p0:p1].real)
+            return _ao2mo.nr_e2(Lpq_ao, mo, braket, aosym='s2')
+        else:
+            Lpq_ao = np.asarray(j3c[p0:p1])
+            if Lpq_ao[0].size != nao**2:  # aosym = 's2'
+                Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
+            return _ao2mo.r_e2(Lpq_ao, mo, braket, tao, ao_loc)
+
     for ki in range(nkpts):
         for kj in range(nkpts):
             kpti_kptj = np.asarray((kpts[ki],kpts[kj]))
+
             mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
             mo = np.asarray(mo, dtype=dtype, order='F')
 
-            with df._load3c(mydf._cderi, mydf._dataname, kpti_kptj=kpti_kptj) as j3c:
-                naux = j3c.shape[0]
-                if isinstance(Lov, np.ndarray):
-                    Lov[ki, kj] = np.empty((naux,nocc,nvir), dtype=dtype)
-                else:
-                    Lov.create_dataset(f'{ki},{kj}', shape=(naux,nocc,nvir), dtype=dtype)
+            naux = naux_perk[ki,kj]
+            if isinstance(Lov, np.ndarray):
+                Lov[ki,kj] = np.empty((nocc,nvir,naux), dtype=dtype)
+            else:
+                Lov.create_dataset(f'{ki},{kj}', shape=(nocc,nvir,naux), dtype=dtype)
 
-                for p0,p1 in lib.prange(0, naux, blksize):
-                    if dtype == np.double:
-                        Lpq_ao = np.asarray(j3c[p0:p1].real)
-                        out = _ao2mo.nr_e2(Lpq_ao, mo, braket, aosym='s2')
-                    else:
-                        Lpq_ao = np.asarray(j3c[p0:p1])
-                        if Lpq_ao[0].size != nao**2:  # aosym = 's2'
-                            Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
-                        out = _ao2mo.r_e2(Lpq_ao, mo, braket, tao, ao_loc)
-                    if isinstance(Lov, np.ndarray):
-                        Lov[ki, kj][p0:p1] = out.reshape(-1, nocc, nvir)
-                    else:
-                        Lov[f'{ki},{kj}'][p0:p1] = out.reshape(-1, nocc, nvir)
-                    Lpq_ao = out = None
+            aux_ranges = lib.prange(0, naux, aux_blksize)
+            for i0,i1 in lib.prange(0, nocc, occ_blksize):
+                nocci = i1-i0
+                OvL = np.ndarray((nocci,nvir,naux), buffer=buf, dtype=dtype)
+                with df._load3c(mydf._cderi, mydf._dataname, kpti_kptj=kpti_kptj) as j3c:
+                    def process(aux_range):
+                        return fao2mo(j3c, i0,i1, *aux_range)
+                    for p0,p1 in lib.prange(0, naux, aux_blksize):
+                        out = process((p0,p1))
+                        OvL[:,:,p0:p1] = out.reshape(-1,nocci,nvir).transpose(1,2,0)
+                        out = None
+                if isinstance(Lov, np.ndarray):
+                    Lov[ki,kj][i0:i1] = OvL
+                else:
+                    Lov[f'{ki},{kj}'][i0:i1] = OvL
+                OvL = None
 
     log.timer_debug1("transforming DF-MP2 integrals", *cput0)
 
@@ -988,6 +1415,7 @@ scf.krohf.KROHF.MP2 = None
 
 
 if __name__ == '__main__':
+    import os
     from pyscf.pbc import gto, scf, mp
 
     atom = '''
@@ -998,8 +1426,8 @@ if __name__ == '__main__':
     a = np.eye(3)*3
     basis = 'cc-pvdz'
     pseudo = None
-    kmesh = (2,1,1)
-    eref = -0.197262027865986
+    kmesh = (3,1,1)
+    eref = -0.200609535862307
 
     ''' Uncomment for an example showing different occ for different kpt
     '''
@@ -1032,7 +1460,7 @@ if __name__ == '__main__':
     mf = scf.KRHF(cell, kpts).density_fit()
     mf.kernel()
 
-    mymp = mp.KMP2(mf, frozen=0)
+    mymp = KMP2(mf, frozen=0).set(verbose=6)
     mymp.kernel(with_t2=False)
     print(mymp.e_corr - eref)
 
