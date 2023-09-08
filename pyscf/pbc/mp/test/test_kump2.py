@@ -29,7 +29,7 @@ class Diamond_GDF(unittest.TestCase):
     def setUpClass(cls):
         cell = gto.Cell()
         cell.verbose = 6
-        # cell.output = '/dev/null'
+        cell.output = '/dev/null'
         cell.atom = 'C 0 0 0; C 0.8925000000 0.8925000000 0.8925000000'
         cell.a = '''
         1.7850000000 1.7850000000 0.0000000000

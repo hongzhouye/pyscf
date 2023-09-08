@@ -1004,8 +1004,8 @@ class KMP2(mp2.MP2):
             self.with_df_ints = False
 
         # for GDF
-        self._Lov = None
-        self._Lov_to_save = None
+        self._ovL = None
+        self._ovL_to_save = None
 
 ##################################################
 # don't modify the following attributes, they are not input options
@@ -1120,9 +1120,9 @@ class _ChemistsERIs:
         self.dtype = None
 
         # for GDF
-        self._Lov = None
-        self._Lov_to_save = None
-        self.Lov = None
+        self._ovL = None
+        self._ovL_to_save = None
+        self.ovL = None
 
         # for FFTDF
         self._get_ovov = None
@@ -1162,19 +1162,19 @@ class _ChemistsERIs:
     def get_ovL(self, kia, i01, RIsep=False):
         ki,ka = kia
         i0,i1 = i01
-        Lov = self.Lov
-        if isinstance(Lov, np.ndarray):
+        ovL = self.ovL
+        if isinstance(ovL, np.ndarray):
             if RIsep:
-                return (np.asarray(Lov[ki,ka][i0:i1].real, order='C'),
-                        np.asarray(Lov[ki,ka][i0:i1].imag, order='C'))
+                return (np.asarray(ovL[ki,ka][i0:i1].real, order='C'),
+                        np.asarray(ovL[ki,ka][i0:i1].imag, order='C'))
             else:
-                return np.asarray(Lov[ki,ka][i0:i1])
+                return np.asarray(ovL[ki,ka][i0:i1])
         else:
             if RIsep:
-                return (np.asarray(Lov[f'{ki},{ka}'][i0:i1].real, order='C'),
-                        np.asarray(Lov[f'{ki},{ka}'][i0:i1].imag, order='C'))
+                return (np.asarray(ovL[f'{ki},{ka}'][i0:i1].real, order='C'),
+                        np.asarray(ovL[f'{ki},{ka}'][i0:i1].imag, order='C'))
             else:
-                return np.asarray(Lov[f'{ki},{ka}'][i0:i1])
+                return np.asarray(ovL[f'{ki},{ka}'][i0:i1])
 
 
 def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
@@ -1182,8 +1182,8 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
     time0 = (logger.process_clock(), logger.perf_counter())
     eris = _ChemistsERIs()
     eris._common_init_(mymp, mo_coeff)
-    eris._Lov = mymp._Lov
-    eris._Lov_to_save = mymp._Lov_to_save
+    eris._ovL = mymp._ovL
+    eris._ovL_to_save = mymp._ovL_to_save
     mo_coeff = eris.mo_coeff
     mf = mymp._scf
     kpts = mf.kpts
@@ -1213,28 +1213,28 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
                      'Available mem %s MB, required mem %s MB',
                      max_memory, mem_basic)
 
-        if eris._Lov is not None:
-            if isinstance(eris._Lov, np.ndarray):
-                eris.Lov = eris._Lov
+        if eris._ovL is not None:
+            if isinstance(eris._ovL, np.ndarray):
+                eris.ovL = eris._ovL
                 log.debug('Incore 3c integrals are found')
             else:
-                eris.Lov = h5py.File(eris._Lov, 'r')
-                log.debug('Outcore 3c integrals are found %s', eris._Lov)
+                eris.ovL = h5py.File(eris._ovL, 'r')
+                log.debug('Outcore 3c integrals are found %s', eris._ovL)
         else:
-            if mem_incore < max_memory:
-                eris.Lov = np.ndarray((nkpts,nkpts), dtype=object)
+            if mymp.mol.incore_anyway or mem_incore < max_memory:
+                eris.ovL = np.ndarray((nkpts,nkpts), dtype=object)
                 log.debug('Transformed 3c integrals will be saved in memory')
             else:
-                if eris._Lov_to_save is None:
-                    eris._Lov_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
-                if isinstance(eris._Lov_to_save, str):
-                    eris.Lov = h5py.File(eris._Lov_to_save, 'w')
-                    log.debug('Transformed 3c integrals will be saved in %s', eris._Lov_to_save)
+                if eris._ovL_to_save is None:
+                    eris._ovL_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+                if isinstance(eris._ovL_to_save, str):
+                    eris.ovL = h5py.File(eris._ovL_to_save, 'w')
+                    log.debug('Transformed 3c integrals will be saved in %s', eris._ovL_to_save)
                 else:
-                    eris.Lov = h5py.File(eris._Lov_to_save.name, 'w')
-                    log.debug('Transformed 3c integrals will be saved in %s', eris._Lov_to_save.name)
+                    eris.ovL = h5py.File(eris._ovL_to_save.name, 'w')
+                    log.debug('Transformed 3c integrals will be saved in %s', eris._ovL_to_save.name)
 
-            Lov = _init_mp_df_eris(mymp, mo_coeff, nocc, eris.Lov)
+            ovL = _init_mp_df_eris(mymp, mo_coeff, nocc, eris.ovL)
     else:
         fao2mo = mymp._scf.with_df.ao2mo
 
@@ -1256,10 +1256,10 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2, verbose=None):
 
         eris._get_ovov = get_ovov
 
-    log.timer('Integral transformation', *time0)
+    log.timer('%s ao2mo'%(mymp.__class__.__name__), *time0)
     return eris
 
-def _init_mp_df_eris(mymp, mo_coeff=None, nocc=None, Lov=None):
+def _init_mp_df_eris(mymp, mo_coeff, nocc, ovL=None):
     """Compute 3-center electron repulsion integrals, i.e. (L|ov),
     where `L` denotes DF auxiliary basis functions and `o` and `v` occupied and virtual
     canonical crystalline orbitals. Note that `o` and `v` contain kpt indices `ko` and `kv`,
@@ -1269,12 +1269,11 @@ def _init_mp_df_eris(mymp, mo_coeff=None, nocc=None, Lov=None):
         mp (KMP2) -- A KMP2 instance
 
     Returns:
-        Lov (np.ndarray) -- 3-center DF ints, with shape (nkpts, nkpts, nocc, nvir, naux)
+        ovL (np.ndarray) -- 3-center DF ints, with shape (nkpts, nkpts, nocc, nvir, naux)
     """
     from pyscf.ao2mo import _ao2mo
 
     log = logger.Logger(mymp.stdout, mymp.verbose)
-    cput0 = (logger.process_clock(), logger.perf_counter())
 
     mydf = mymp._scf.with_df
     if mydf._cderi is None:
@@ -1312,11 +1311,11 @@ def _init_mp_df_eris(mymp, mo_coeff=None, nocc=None, Lov=None):
     dtype = np.result_type(dtype, *mo_coeff)
     dsize = 8 if dtype == np.float64 else 16
 
-    if Lov is None:
-        Lov = np.empty((nkpts, nkpts), dtype=object)
+    if ovL is None:
+        ovL = np.empty((nkpts, nkpts), dtype=object)
 
     mem_avail = mymp.max_memory - lib.current_memory()[0]
-    if isinstance(Lov, np.ndarray):
+    if isinstance(ovL, np.ndarray):
         mem_avail -= nkpts**2*naux0*nocc*nvir * dsize/1e6
     # occblk: [O]XV; auxblk: [X]N^2
     mem_occblk = naux0*nvir * dsize/1e6
@@ -1354,10 +1353,10 @@ def _init_mp_df_eris(mymp, mo_coeff=None, nocc=None, Lov=None):
             mo = np.asarray(mo, dtype=dtype, order='F')
 
             naux = naux_perk[ki,kj]
-            if isinstance(Lov, np.ndarray):
-                Lov[ki,kj] = np.empty((nocc,nvir,naux), dtype=dtype)
+            if isinstance(ovL, np.ndarray):
+                ovL[ki,kj] = np.empty((nocc,nvir,naux), dtype=dtype)
             else:
-                Lov.create_dataset(f'{ki},{kj}', shape=(nocc,nvir,naux), dtype=dtype)
+                ovL.create_dataset(f'{ki},{kj}', shape=(nocc,nvir,naux), dtype=dtype)
 
             aux_ranges = lib.prange(0, naux, aux_blksize)
             for i0,i1 in lib.prange(0, nocc, occ_blksize):
@@ -1370,15 +1369,13 @@ def _init_mp_df_eris(mymp, mo_coeff=None, nocc=None, Lov=None):
                         out = process((p0,p1))
                         OvL[:,:,p0:p1] = out.reshape(-1,nocci,nvir).transpose(1,2,0)
                         out = None
-                if isinstance(Lov, np.ndarray):
-                    Lov[ki,kj][i0:i1] = OvL
+                if isinstance(ovL, np.ndarray):
+                    ovL[ki,kj][i0:i1] = OvL
                 else:
-                    Lov[f'{ki},{kj}'][i0:i1] = OvL
+                    ovL[f'{ki},{kj}'][i0:i1] = OvL
                 OvL = None
 
-    log.timer_debug1("transforming DF-MP2 integrals", *cput0)
-
-    return Lov
+    return ovL
 
 
 KRMP2 = KMP2
