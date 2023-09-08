@@ -160,6 +160,86 @@ void MP2_contract_d(double *ed_out, double *ex_out, const int s2symm,
 
 }
 
+/*  Calculate DF-RMP2 OS energy for AO range (i0,i0+nocci,j0,j0+noccj) with real integrals
+
+    Math:
+        for i in range(i0,i0+nocci):
+            for j in range(j0,j0+noccj):
+                vab = einsum('aL,bL->ab', iaL[i-i0], jbL[j-j0])
+                tab = vab / ∆eab
+                ed_out += dot(vab, tab) * fac
+*/
+void MP2_OS_contract_d(double *ed_out,
+                       const double *batch_iaL, const double *batch_jbL,
+                       const int i0, const int j0, const int nocci, const int noccj,
+                       const int nvira, const int nvirb, const int naux,
+                       const double *moeoo, const double *moevv)
+{
+
+    const int I1 = 1;
+    const double D0 = 0;
+    const double D1 = 1;
+    const char TRANS_Y = 'T';
+    const char TRANS_N = 'N';
+
+    const int nvv = nvira*nvirb;
+    const int nvax = nvira*naux;
+    const int nvbx = nvirb*naux;
+
+    CacheJob *jobs = malloc(sizeof(CacheJob) * nocci*noccj);
+    size_t njob = _MP2_gen_jobs(jobs, 0, i0, j0, nocci, noccj);
+
+    const double **parr_iaL = _gen_ptr_arr(batch_iaL, nocci, nvax);
+    const double **parr_jbL = _gen_ptr_arr(batch_jbL, noccj, nvbx);
+
+#pragma omp parallel default(none) \
+        shared(njob, jobs, batch_iaL, batch_jbL, parr_iaL, parr_jbL, moeoo, moevv, naux, nvir, nvv, noccj, D0, D1, I1, TRANS_N, TRANS_Y, ed_out)
+{
+    double *cache = malloc(sizeof(double) * nvv*2);
+    double *vab = cache;
+    double *tab = vab + nvv;
+    double eij;
+
+    const double *iaL, *jbL;
+    size_t i,j,a,m;
+    double ed=0, fac;
+
+#pragma omp for schedule (dynamic, 4)
+
+    for (m = 0; m < njob; ++m) {
+        i = jobs[m].i;
+        j = jobs[m].j;
+        fac = jobs[m].fac;
+
+        iaL = parr_iaL[i];
+        jbL = parr_jbL[j];
+        eij = moeoo[i*noccj+j];
+
+        dgemm_(&TRANS_Y, &TRANS_N, &nvirb, &nvira, &naux,
+               &D1, jbL, &naux, iaL, &naux,
+               &D0, vab, &nvirb);
+        // tab = vab / eijab
+        for (a = 0; a < nvv; ++a) {
+            tab[a] = vab[a] / (eij - moevv[a]);
+        }
+        // vab, tab -> ed
+        ed += ddot_(&nvv, vab, &I1, tab, &I1) * fac;
+    }
+    free(cache);
+
+#pragma omp critical
+{
+    *ed_out += ed;
+}
+
+} // parallel
+
+    free(jobs);
+    free(parr_iaL);
+    free(parr_jbL);
+
+}
+
 
 /*  Calculate DF-RMP2 energy for AO range (i0,i0+nocci,j0,j0+noccj) with complex integrals
 

@@ -25,8 +25,7 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.ao2mo import _ao2mo
 from pyscf import df
-from pyscf.mp import mp2
-from pyscf.mp.mp2 import make_rdm1, make_rdm2
+from pyscf.mp import mp2, ump2, dfmp2
 from pyscf import __config__
 
 einsum = lib.einsum
@@ -76,43 +75,67 @@ def kernel_df(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, ver
     if mo_energy is None: mo_energy = eris.mo_energy
     if mo_coeff is None:  mo_coeff = eris.mo_coeff
 
-    dtype = np.result_type(eris.dtype, mo_coeff.dtype)
+    dtype = np.result_type(eris.dtype, mo_coeff[0].dtype)
     assert(dtype == np.float64)
     dsize = 8
     nocc = mp.nocc
-    nvir = mp.nmo - nocc
+    nvir = [mp.nmo[s] - nocc[s] for s in [0,1]]
     naux = mp.with_df.get_naoaux()
-    eia = mo_energy[:nocc,None] - mo_energy[None,nocc:]
+    eia = [mo_energy[s][:nocc[s],None] - mo_energy[s][None,nocc[s]:] for s in [0,1]]
 
     if with_t2:
-        t2 = np.empty((nocc,nocc,nvir,nvir), dtype=dtype)
+        t2 = (np.empty((nocc[0],nocc[0],nvir[0],nvir[0]), dtype=dtype),
+              np.empty((nocc[0],nocc[1],nvir[0],nvir[1]), dtype=dtype),
+              np.empty((nocc[1],nocc[1],nvir[1],nvir[1]), dtype=dtype))
     else:
         t2 = None
 
     # determine occ blksize
     mem_avail = mp.max_memory - lib.current_memory()[0]
     # 4*[O]^2*V^2 + 2*[O]XV = mem
-    occ_blksize = min(nocc, max(1, int(np.floor(((naux**2+0.8*mem_avail*4*1e6/dsize)**0.5 -
-                                                    naux) / (4*nvir)))))
-    log.debug('occ blksize for %s loop: %d/%d', mp.__class__.__name__, occ_blksize, nocc)
+    occ_blksize = min(max(nocc), max(1, int(np.floor(((naux**2+0.8*mem_avail*4*1e6/dsize)**0.5 -
+                                                     naux) / (4*max(nvir))))))
+    log.debug('occ blksize for %s loop: %d/%s', mp.__class__.__name__, occ_blksize, nocc)
 
     emp2_ss = emp2_os = 0
-    for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc,occ_blksize)):
-        iaL = eris.get_ovL(i0,i1)
-        for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc,occ_blksize)):
-            if ibatch == jbatch:
-                jbL = iaL
-            else:
-                jbL = eris.get_ovL(j0,j1)
+
+    # same spin
+    for s in [0,1]:
+        s_t2 = 0 if s == 0 else 2
+        for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc[s],occ_blksize)):
+            iaL = eris.get_ovL(s,i0,i1)
+            for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc[s],occ_blksize)):
+                if ibatch == jbatch:
+                    jbL = iaL
+                else:
+                    jbL = eris.get_ovL(s,j0,j1)
+
+                gij = einsum('iaL,jbL->iajb', iaL, jbL)
+                t2ij = np.conj(gij) / lib.direct_sum('ia+jb->iajb', eia[s][i0:i1], eia[s][j0:j1])
+                if with_t2:
+                    # t2aa and t2bb are defined with antisymmetry
+                    t2[s_t2][i0:i1,j0:j1] = t2ij.transpose(0,2,1,3) - t2ij.transpose(0,2,3,1)
+
+                ed =  einsum('iajb,iajb->', t2ij, gij)
+                ex = -einsum('iajb,ibja->', t2ij, gij)
+                emp2_ss += (ed + ex) * 0.5
+
+                t2ij = gij = jbL = None
+            iaL = None
+
+    # opposite spin
+    sa, sb = 0, 1
+    for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc[sa],occ_blksize)):
+        iaL = eris.get_ovL(sa,i0,i1)
+        for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc[sb],occ_blksize)):
+            jbL = eris.get_ovL(sb,j0,j1)
 
             gij = einsum('iaL,jbL->iajb', iaL, jbL)
-            t2ij = np.conj(gij) / lib.direct_sum('ia+jb->iajb', eia[i0:i1], eia[j0:j1])
+            t2ij = np.conj(gij) / lib.direct_sum('ia+jb->iajb', eia[sa][i0:i1], eia[sb][j0:j1])
             if with_t2:
-                t2[i0:i1,j0:j1] = t2ij.transpose(0,2,1,3)
+                t2[1][i0:i1,j0:j1] = t2ij.transpose(0,2,1,3)
 
             ed =  einsum('iajb,iajb->', t2ij, gij)
-            ex = -einsum('iajb,ibja->', t2ij, gij)
-            emp2_ss += ed + ex
             emp2_os += ed
 
             t2ij = gij = jbL = None
@@ -136,87 +159,110 @@ def kernel_df_C(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, v
     if mo_energy is None: mo_energy = eris.mo_energy
     if mo_coeff is None:  mo_coeff = eris.mo_coeff
 
-    dtype = np.result_type(eris.dtype, mo_coeff.dtype)
+    dtype = np.result_type(eris.dtype, mo_coeff[0].dtype)
     assert(dtype == np.float64)
     dsize = 8
     nocc = mp.nocc
-    nvir = mp.nmo - nocc
+    nvir = [mp.nmo[s] - nocc[s] for s in [0,1]]
     naux = mp.with_df.get_naoaux()
-
-    moeoo = mo_energy[:nocc,None] + mo_energy[:nocc]
-    moevv = lib.asarray(mo_energy[nocc:,None] + mo_energy[nocc:], order='C')
 
     if with_t2:
         raise NotImplementedError
-        t2 = np.empty((nocc,nocc,nvir,nvir), dtype=dtype)
+        t2 = (np.empty((nocc[0],nocc[0],nvir[0],nvir[0]), dtype=dtype),
+              np.empty((nocc[0],nocc[1],nvir[0],nvir[1]), dtype=dtype),
+              np.empty((nocc[1],nocc[1],nvir[1],nvir[1]), dtype=dtype))
     else:
         t2 = None
-
-    drv = libmp.MP2_contract_d
 
     # determine occ blksize
     mem_avail = mp.max_memory - lib.current_memory()[0]
     # 4*[O]^2*V^2 + 2*[O]XV = mem
-    occ_blksize = min(nocc, max(1, int(np.floor(((naux**2+0.8*mem_avail*4*1e6/dsize)**0.5 -
-                                                    naux) / (4*nvir)))))
-    log.debug('occ blksize for %s loop: %d/%d', mp.__class__.__name__, occ_blksize, nocc)
+    occ_blksize = min(max(nocc), max(1, int(np.floor(((naux**2+0.8*mem_avail*4*1e6/dsize)**0.5 -
+                                                     naux) / (4*max(nvir))))))
+    log.debug('occ blksize for %s loop: %d/%s', mp.__class__.__name__, occ_blksize, nocc)
 
     emp2_ss = emp2_os = 0
-    for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc,occ_blksize)):
+
+    # same spin
+    drv = libmp.MP2_contract_d
+    for s in [0,1]:
+        s_t2 = 0 if s == 0 else 2
+        moeoo = mo_energy[s][:nocc[s],None] + mo_energy[s][:nocc[s]]
+        moevv = lib.asarray(mo_energy[s][nocc[s]:,None] + mo_energy[s][nocc[s]:], order='C')
+        for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc[s],occ_blksize)):
+            nocci = i1-i0
+            iaL = eris.get_ovL(s,i0,i1)
+            for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc[s],occ_blksize)):
+                noccj = j1-j0
+                if ibatch == jbatch:
+                    jbL = iaL
+                else:
+                    jbL = eris.get_ovL(s,j0,j1)
+
+                ed = np.zeros(1, dtype=np.float64)
+                ex = np.zeros(1, dtype=np.float64)
+                s2symm = 1
+                drv(
+                    ed.ctypes.data_as(ctypes.c_void_p),
+                    ex.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_int(s2symm),
+                    iaL.ctypes.data_as(ctypes.c_void_p),
+                    jbL.ctypes.data_as(ctypes.c_void_p),
+                    ctypes.c_int(i0), ctypes.c_int(j0),
+                    ctypes.c_int(nocci), ctypes.c_int(noccj),
+                    ctypes.c_int(nvir[s]), ctypes.c_int(naux),
+                    lib.asarray(moeoo[i0:i1,j0:j1],
+                                order='C').ctypes.data_as(ctypes.c_void_p),
+                    moevv.ctypes.data_as(ctypes.c_void_p),
+                )
+                emp2_ss += (ed + ex) * 0.5
+
+                jbL = None
+            iaL = None
+
+    # opposite spin
+    sa, sb = 0, 1
+    drv = libmp.MP2_OS_contract_d
+    moeoo = mo_energy[sa][:nocc[sa],None] + mo_energy[sb][:nocc[sb]]
+    moevv = lib.asarray(mo_energy[sa][nocc[sa]:,None] + mo_energy[sb][nocc[sb]:], order='C')
+    for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc[sa],occ_blksize)):
         nocci = i1-i0
-        iaL = eris.get_ovL(i0,i1)
-        for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc,occ_blksize)):
+        iaL = eris.get_ovL(sa,i0,i1)
+        for jbatch,(j0,j1) in enumerate(lib.prange(0,nocc[sb],occ_blksize)):
             noccj = j1-j0
-            if ibatch == jbatch:
-                jbL = iaL
-            else:
-                jbL = eris.get_ovL(j0,j1)
+            jbL = eris.get_ovL(sb,j0,j1)
 
             ed = np.zeros(1, dtype=np.float64)
-            ex = np.zeros(1, dtype=np.float64)
             s2symm = 1
             drv(
                 ed.ctypes.data_as(ctypes.c_void_p),
-                ex.ctypes.data_as(ctypes.c_void_p),
-                ctypes.c_int(s2symm),
                 iaL.ctypes.data_as(ctypes.c_void_p),
                 jbL.ctypes.data_as(ctypes.c_void_p),
                 ctypes.c_int(i0), ctypes.c_int(j0),
                 ctypes.c_int(nocci), ctypes.c_int(noccj),
-                ctypes.c_int(nvir), ctypes.c_int(naux),
+                ctypes.c_int(nvir[sa]), ctypes.c_int(nvir[sb]),
+                ctypes.c_int(naux),
                 lib.asarray(moeoo[i0:i1,j0:j1],
                             order='C').ctypes.data_as(ctypes.c_void_p),
                 moevv.ctypes.data_as(ctypes.c_void_p),
             )
-            emp2_ss += ed + ex
             emp2_os += ed
 
             jbL = None
         iaL = None
 
-    emp2_ss = emp2_ss.real
-    emp2_os = emp2_os.real
+    emp2_ss = emp2_ss
+    emp2_os = emp2_os
     emp2 = lib.tag_array(emp2_ss+emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
 
     return emp2, t2
 
 
-class DFMP2(mp2.MP2):
+class DFUMP2(dfmp2.DFMP2):
 
-    _kernel = getattr(__config__, 'mp_DFMP2_kernel', None)
-
-    def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
-        mp2.MP2.__init__(self, mf, frozen, mo_coeff, mo_occ)
-        if getattr(mf, 'with_df', None):
-            self.with_df = mf.with_df
-        else:
-            self.with_df = df.DF(mf.mol)
-            self.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=True)
-        self._keys.update(['with_df'])
-
-    def reset(self, mol=None):
-        self.with_df.reset(mol)
-        return mp2.MP2.reset(self, mol)
+    get_nocc = ump2.get_nocc
+    get_nmo = ump2.get_nmo
+    get_frozen_mask = ump2.get_frozen_mask
 
     def ao2mo(self, mo_coeff=None, with_t2=WITH_T2):
         return _make_df_eris(self, mo_coeff, with_t2)
@@ -225,13 +271,13 @@ class DFMP2(mp2.MP2):
         if t2 is None:
             t2 = self.t2
         assert t2 is not None
-        return make_rdm1(self, t2, ao_repr=ao_repr)
+        return ump2.make_rdm1(self, t2, ao_repr=ao_repr)
 
     def make_rdm2(self, t2=None, ao_repr=False):
         if t2 is None:
             t2 = self.t2
         assert t2 is not None
-        return make_rdm2(self, t2, ao_repr=ao_repr)
+        return ump2.make_rdm2(self, t2, ao_repr=ao_repr)
 
     def nuc_grad_method(self):
         raise NotImplementedError
@@ -244,6 +290,8 @@ class DFMP2(mp2.MP2):
         return kernel(self, mo_energy, mo_coeff, eris, with_t2)
 
 def _mem_usage(nocc, nvir, naux, dsize, with_t2=WITH_T2):
+    nocc = max(nocc)
+    nvir = max(nvir)
     nmo = nocc + nvir
     basic = nvir**2*4   # vijab, vijba, tijab, eijab
     if with_t2:
@@ -253,7 +301,7 @@ def _mem_usage(nocc, nvir, naux, dsize, with_t2=WITH_T2):
     outcore = basic
     return incore, outcore, basic
 
-class _ChemistsERIs(mp2._ChemistsERIs):
+class _ChemistsERIs(ump2._ChemistsERIs):
     def __init__(self, mol=None):
         self.mol = mol
         self.mo_coeff = None
@@ -265,8 +313,8 @@ class _ChemistsERIs(mp2._ChemistsERIs):
         self._ovL = None
         self._ovL_to_save = None
 
-    def get_ovL(self, i0, i1):
-        return np.asarray(self.ovL[i0:i1], order='C')
+    def get_ovL(self, s, i0, i1):
+        return np.asarray(self.ovL[s][i0:i1], order='C')
 
 def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2):
     log = logger.new_logger(mymp)
@@ -277,7 +325,7 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2):
 
     if mo_coeff is None: mo_coeff = eris.mo_coeff
 
-    dtype = mo_coeff.dtype
+    dtype = mo_coeff[0].dtype
     assert(dtype == np.float64)
     dsize = 8
 
@@ -285,7 +333,7 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2):
 
     nocc = mymp.nocc
     nmo = mymp.nmo
-    nvir = nmo - nocc
+    nvir = [nmo[s] - nocc[s] for s in [0,1]]
     naux = with_df.get_naoaux()
     mem_incore, mem_outcore, mem_basic = _mem_usage(nocc, nvir, naux, dsize, with_t2)
     mem_now = lib.current_memory()[0]
@@ -305,7 +353,9 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2):
             log.debug('Outcore 3c integrals are found %s', eris._ovL)
     else:
         if mymp.mol.incore_anyway or mem_incore < max_memory:
-            eris.ovL = np.ndarray((nocc,nvir,naux), dtype=np.float64)
+            eris.ovL = np.ndarray(2, dtype=object)
+            for s in [0,1]:
+                eris.ovL[s] = np.ndarray((nocc[s],nvir[s],naux), dtype=np.float64)
             log.debug('Transformed 3c integrals will be saved in memory')
         else:
             if eris._ovL_to_save is None:
@@ -316,9 +366,11 @@ def _make_df_eris(mymp, mo_coeff=None, with_t2=WITH_T2):
             else:
                 eris._ovL = h5py.File(eris._ovL_to_save.name, 'w')
                 log.debug('Transformed 3c integrals will be saved in %s', eris._ovL_to_save.name)
-            eris.ovL = eris._ovL.create_dataset('ovL', shape=(nocc,nvir,naux), dtype=dtype)
+            eris.ovL = [eris._ovL.create_dataset(f'{s}',
+                        shape=(nocc[s],nvir[s],naux), dtype=dtype) for s in [0,1]]
 
-    _init_mp_df_eris(mymp, mo_coeff, nocc, eris.ovL)
+    for s in [0,1]:
+        dfmp2._init_mp_df_eris(mymp, mo_coeff[s], nocc[s], eris.ovL[s])
 
     log.timer('%s ao2mo'%(mymp.__class__.__name__), *time0)
 
@@ -337,7 +389,7 @@ def _init_mp_df_eris(mymp, mo_coeff, nocc, ovL=None):
     nao_pair = nao*(nao+1) // 2
     naux = with_df.get_naoaux()
 
-    dtype = mo_coeff.dtype
+    dtype = mo_coeff[0].dtype
     dsize = 8
 
     mo = np.asarray(mo_coeff, order='F')
@@ -391,12 +443,10 @@ def _init_mp_df_eris(mymp, mo_coeff, nocc, ovL=None):
     return ovL
 
 
-MP2 = DFMP2
+UMP2 = DFUMP2
 
 from pyscf import scf
-scf.hf.RHF.DFMP2 = lib.class_as_method(DFMP2)
-scf.rohf.ROHF.DFMP2 = None
-# scf.uhf.UHF.DFMP2 = None
+scf.uhf.UHF.DFMP2 = lib.class_as_method(DFUMP2)
 
 del (WITH_T2)
 
@@ -410,37 +460,45 @@ if __name__ == '__main__':
         [8 , (0. , 0.     , 0.)],
         [1 , (0. , -0.757 , 0.587)],
         [1 , (0. , 0.757  , 0.587)]]
+    mol.spin = 2
 
     mol.basis = 'cc-pvdz'
     mol.build()
-    mf = scf.RHF(mol).run()
-    pt = DFMP2(mf)
+    mf = scf.UHF(mol).run()
+    pt = DFUMP2(mf)
     emp2, t2 = pt.kernel()
-    print(emp2 - -0.204004830285)
+    print(emp2 - -0.16578336414980513)
 
     pt.with_df = df.DF(mol)
     pt.with_df.auxbasis = 'weigend'
     emp2, t2 = pt.kernel()
-    print(emp2 - -0.204254500453)
+    print(emp2 - -0.16607940248507164)
 
-    mf = scf.density_fit(scf.RHF(mol), 'weigend')
+    mf = scf.density_fit(scf.UHF(mol), 'weigend')
     mf.kernel()
-    pt = DFMP2(mf)
+    pt = DFUMP2(mf)
     emp2, t2 = pt.kernel()
-    print(emp2 - -0.203986171133)
+    print(emp2 - -0.16584999578948312)
 
     pt.with_df = df.DF(mol)
     pt.with_df.auxbasis = df.make_auxbasis(mol, mp2fit=True)
     emp2, t2 = pt.kernel()
-    print(emp2 - -0.203738031827)
+    print(emp2 - -0.16555625575394367)
+
+    pt.with_df = df.DF(mol)
+    pt.with_df.auxbasis = df.make_auxbasis(mol, mp2fit=True)
+    pt._kernel = 'C'
+    emp2, t2 = pt.kernel(with_t2=False)
+    pt._kernel = None
+    print(emp2 - -0.16555625575394367)
 
     pt.frozen = 2
     pt.verbose = 6
     emp2, t2 = pt.kernel()
-    print(emp2 - -0.14433975122418313)
+    print(emp2 - -0.1100358996441624)
 
     pt.frozen = 2
     pt.verbose = 6
     pt._kernel = 'C'
     emp2, t2 = pt.kernel(with_t2=False)
-    print(emp2 - -0.14433975122418313)
+    print(emp2 - -0.1100358996441624)
