@@ -390,7 +390,7 @@ void MP2_OS_contract_c(double *ed_out,
     const double **parr_jbLI = _gen_ptr_arr(batch_jbLI, noccj, nvbx);
 
 #pragma omp parallel default(none) \
-        shared(njob, jobs, batch_iaLR, batch_iaLI, batch_jbLR, batch_jbLI, parr_iaLR, parr_iaLI, parr_jbLR, parr_jbLI, moeoo, moevv, naux, nvira, nvirb, nvv, noccj, D0, D1, Dm1, I1, TRANS_N, TRANS_Y, ed_out, ex_out)
+        shared(njob, jobs, batch_iaLR, batch_iaLI, batch_jbLR, batch_jbLI, parr_iaLR, parr_iaLI, parr_jbLR, parr_jbLI, moeoo, moevv, naux, nvira, nvirb, nvv, noccj, D0, D1, Dm1, I1, TRANS_N, TRANS_Y, ed_out)
 {
     double *cache = malloc(sizeof(double) * nvv*4);
     double *vabR = cache;
