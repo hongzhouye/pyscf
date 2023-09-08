@@ -1314,66 +1314,86 @@ def _init_mp_df_eris(mymp, mo_coeff, nocc, ovL=None):
     if ovL is None:
         ovL = np.empty((nkpts, nkpts), dtype=object)
 
-    mem_avail = mymp.max_memory - lib.current_memory()[0]
-    if isinstance(ovL, np.ndarray):
-        mem_avail -= nkpts**2*naux0*nocc*nvir * dsize/1e6
-    # occblk: [O]XV; auxblk: [X]N^2
-    mem_occblk = naux0*nvir * dsize/1e6
-    mem_auxblk = nao**2 * dsize/1e6
-    occ_blksize = min(nocc, max(1, int(np.floor(mem_avail*0.6 / mem_occblk))))
-    aux_blksize = min(naux0, max(1, int(np.floor(mem_avail*0.3 / mem_auxblk))))
-    buf = np.empty(naux0*occ_blksize*nvir, dtype=dtype)
-    log.debug('occ blksize for %s ao2mo: %d/%d', mymp.__class__.__name__, occ_blksize, nocc)
-    log.debug('aux blksize for %s ao2mo: %d/%d', mymp.__class__.__name__, aux_blksize, naux0)
-
     tao = []
     ao_loc = None
 
-    def fao2mo(j3c, mo, i0, i1, p0, p1):
-        bra_start = i0
-        bra_end = i1
-        ket_start = nmo + nocc
-        ket_end = ket_start + nvir
-        braket = (bra_start, bra_end, ket_start, ket_end)
+    def fao2mo(j3c, mo, i0, i1, p0, p1, buf):
+        ijslice = (i0,i1,nmo+nocc,nmo*2)
 
         if dtype == np.double:
             Lpq_ao = np.asarray(j3c[p0:p1].real)
-            return _ao2mo.nr_e2(Lpq_ao, mo, braket, aosym='s2')
+            return _ao2mo.nr_e2(Lpq_ao, mo, ijslice, aosym='s2', out=buf)
         else:
             Lpq_ao = np.asarray(j3c[p0:p1])
             if Lpq_ao[0].size != nao**2:  # aosym = 's2'
                 Lpq_ao = lib.unpack_tril(Lpq_ao).astype(np.complex128)
-            return _ao2mo.r_e2(Lpq_ao, mo, braket, tao, ao_loc)
+            return _ao2mo.r_e2(Lpq_ao, mo, ijslice, tao, ao_loc, out=buf)
 
-    for ki in range(nkpts):
-        for kj in range(nkpts):
-            kpti_kptj = np.asarray((kpts[ki],kpts[kj]))
+    mem_avail = mymp.max_memory - lib.current_memory()[0]
+    if isinstance(ovL, np.ndarray):
+        mem_avail -= nkpts**2*naux0*nocc*nvir * dsize/1e6
 
-            mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
-            mo = np.asarray(mo, dtype=dtype, order='F')
+    if isinstance(ovL, np.ndarray):
+        # incore: batching aux (OV + Nao_pair) * [X] = M
+        mem_auxblk = (nao**2+nocc*nvir) * dsize/1e6
+        aux_blksize = min(naux0, max(1, int(np.floor(mem_avail*0.7 / mem_auxblk))))
+        log.debug('aux blksize for incore ao2mo: %d/%d', aux_blksize, naux0)
+        buf = np.empty(aux_blksize*nocc*nvir, dtype=dtype)
 
-            naux = naux_perk[ki,kj]
-            if isinstance(ovL, np.ndarray):
-                ovL[ki,kj] = np.empty((nocc,nvir,naux), dtype=dtype)
-            else:
-                ovL.create_dataset(f'{ki},{kj}', shape=(nocc,nvir,naux), dtype=dtype)
+        for ki in range(nkpts):
+            for kj in range(nkpts):
+                kpti_kptj = np.asarray((kpts[ki],kpts[kj]))
 
-            aux_ranges = lib.prange(0, naux, aux_blksize)
-            for i0,i1 in lib.prange(0, nocc, occ_blksize):
-                nocci = i1-i0
-                OvL = np.ndarray((nocci,nvir,naux), buffer=buf, dtype=dtype)
+                mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
+                mo = np.asarray(mo, dtype=dtype, order='F')
+
+                naux = naux_perk[ki,kj]
+                ovLij = ovL[ki,kj] = np.empty((nocc,nvir,naux), dtype=dtype)
+
                 with df._load3c(mydf._cderi, mydf._dataname, kpti_kptj=kpti_kptj) as j3c:
                     def process(aux_range):
-                        return fao2mo(j3c, mo, i0,i1, *aux_range)
+                        return fao2mo(j3c, mo, 0,nocc, *aux_range, buf)
                     for p0,p1 in lib.prange(0, naux, aux_blksize):
                         out = process((p0,p1))
-                        OvL[:,:,p0:p1] = out.reshape(-1,nocci,nvir).transpose(1,2,0)
+                        ovLij[:,:,p0:p1] = out.reshape(-1,nocc,nvir).transpose(1,2,0)
                         out = None
-                if isinstance(ovL, np.ndarray):
-                    ovL[ki,kj][i0:i1] = OvL
-                else:
-                    ovL[f'{ki},{kj}'][i0:i1] = OvL
-                OvL = None
+                ovLij = None
+        buf = None
+    else:
+        # outcore: batching occ [O]XV and aux ([O]V + Nao_pair)*[X]
+        mem_occblk = naux0*nvir * dsize/1e6
+        occ_blksize = min(nocc, max(1, int(np.floor(mem_avail*0.6 / mem_occblk))))
+        mem_auxblk = (occ_blksize*nvir+nao**2) * dsize/1e6
+        aux_blksize = min(naux0, max(1, int(np.floor(mem_avail*0.3 / mem_auxblk))))
+        log.debug('occ blksize for outcore ao2mo: %d/%d', occ_blksize, nocc)
+        log.debug('aux blksize for outcore ao2mo: %d/%d', aux_blksize, naux0)
+        buf = np.empty(naux0*occ_blksize*nvir, dtype=dtype)
+        buf2 = np.empty(aux_blksize*occ_blksize*nvir, dtype=dtype)
+
+        for ki in range(nkpts):
+            for kj in range(nkpts):
+                kpti_kptj = np.asarray((kpts[ki],kpts[kj]))
+
+                mo = np.hstack((mo_coeff[ki], mo_coeff[kj]))
+                mo = np.asarray(mo, dtype=dtype, order='F')
+
+                naux = naux_perk[ki,kj]
+                ovLij = ovL.create_dataset(f'{ki},{kj}', shape=(nocc,nvir,naux), dtype=dtype)
+
+                for i0,i1 in lib.prange(0, nocc, occ_blksize):
+                    nocci = i1-i0
+                    OvL = np.ndarray((nocci,nvir,naux), buffer=buf, dtype=dtype)
+                    with df._load3c(mydf._cderi, mydf._dataname, kpti_kptj=kpti_kptj) as j3c:
+                        def process(aux_range):
+                            return fao2mo(j3c, mo, i0,i1, *aux_range, buf2)
+                        for p0,p1 in lib.prange(0, naux, aux_blksize):
+                            out = process((p0,p1))
+                            OvL[:,:,p0:p1] = out.reshape(-1,nocci,nvir).transpose(1,2,0)
+                            out = None
+                    ovLij[i0:i1] = OvL
+                    OvL = None
+                ovLij = None
+        buf = buf2 = None
 
     return ovL
 
