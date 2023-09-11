@@ -65,7 +65,9 @@ def kernel(mp, mo_energy, mo_coeff, eris=None, with_t2=WITH_T2, verbose=None):
     return fkernel(mp, mo_energy, mo_coeff, eris, with_t2, verbose)
 
 def kernel_df(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbose=None):
+    cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp)
+    log.debug('Using DF-Python kernel')
 
     if mo_energy is not None or mo_coeff is not None:
         # For backward compatibility.  In pyscf-1.4 or earlier, mp.frozen is
@@ -96,6 +98,8 @@ def kernel_df(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, ver
                                                     naux) / (4*nvir)))))
     log.debug('occ blksize for %s loop: %d/%d', mp.__class__.__name__, occ_blksize, nocc)
 
+    cput1 = (logger.process_clock(), logger.perf_counter())
+
     emp2_ss = emp2_os = 0
     for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc,occ_blksize)):
         iaL = eris.get_ovL(i0,i1)
@@ -118,6 +122,10 @@ def kernel_df(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, ver
             t2ij = gij = jbL = None
         iaL = None
 
+        cput1 = log.timer_debug1('i-block [%d:%d]/%d' % (i0,i1,nocc), *cput1)
+
+    log.timer(mp.__class__.__name__, *cput0)
+
     emp2_ss = emp2_ss
     emp2_os = emp2_os
     emp2 = lib.tag_array(emp2_ss+emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
@@ -125,7 +133,9 @@ def kernel_df(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, ver
     return emp2, t2
 
 def kernel_df_C(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbose=None):
+    cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.new_logger(mp)
+    log.debug('Using DF-C kernel')
 
     if mo_energy is not None or mo_coeff is not None:
         # For backward compatibility.  In pyscf-1.4 or earlier, mp.frozen is
@@ -161,6 +171,8 @@ def kernel_df_C(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, v
                                                     naux) / (4*nvir)))))
     log.debug('occ blksize for %s loop: %d/%d', mp.__class__.__name__, occ_blksize, nocc)
 
+    cput1 = (logger.process_clock(), logger.perf_counter())
+
     emp2_ss = emp2_os = 0
     for ibatch,(i0,i1) in enumerate(lib.prange(0,nocc,occ_blksize)):
         nocci = i1-i0
@@ -193,6 +205,10 @@ def kernel_df_C(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, v
 
             jbL = None
         iaL = None
+
+        cput1 = log.timer_debug1('i-block [%d:%d]/%d' % (i0,i1,nocc), *cput1)
+
+    log.timer(mp.__class__.__name__, *cput0)
 
     emp2_ss = emp2_ss.real
     emp2_os = emp2_os.real
