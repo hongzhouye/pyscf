@@ -74,7 +74,7 @@ def kernel_df(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, ver
         # not supported when mo_energy or mo_coeff is given.
         assert (mp.frozen == 0 or mp.frozen is None)
 
-    if eris is None:      eris = mp.ao2mo(mo_coeff)
+    if eris is None:      eris = mp.ao2mo(mo_coeff, with_t2)
     if mo_energy is None: mo_energy = eris.mo_energy
     if mo_coeff is None:  mo_coeff = eris.mo_coeff
 
@@ -142,7 +142,7 @@ def kernel_df_C(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, v
         # not supported when mo_energy or mo_coeff is given.
         assert (mp.frozen == 0 or mp.frozen is None)
 
-    if eris is None:      eris = mp.ao2mo(mo_coeff)
+    if eris is None:      eris = mp.ao2mo(mo_coeff, with_t2)
     if mo_energy is None: mo_energy = eris.mo_energy
     if mo_coeff is None:  mo_coeff = eris.mo_coeff
 
@@ -216,6 +216,9 @@ def kernel_df_C(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, v
 
     return emp2, t2
 
+def _iterative_kernel(mp, eris):
+    raise NotImplementedError
+
 
 class DFMP2(mp2.MP2):
 
@@ -229,6 +232,34 @@ class DFMP2(mp2.MP2):
             self.with_df = df.DF(mf.mol)
             self.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=True)
         self._keys.update(['with_df'])
+
+    def kernel(self, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2):
+        '''
+        Args:
+            with_t2 : bool
+                Whether to generate and hold t2 amplitudes in memory.
+        '''
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+
+        self.dump_flags()
+
+        self.e_hf = self.get_e_hf(mo_coeff=mo_coeff)
+
+        if eris is None:
+            eris = self.ao2mo(mo_coeff, with_t2)
+
+        if self._scf.converged:
+            self.e_corr, self.t2 = self.init_amps(mo_energy, mo_coeff, eris, with_t2)
+        else:
+            self.converged, self.e_corr, self.t2 = _iterative_kernel(self, eris)
+
+        self.e_corr_ss = getattr(self.e_corr, 'e_corr_ss', 0)
+        self.e_corr_os = getattr(self.e_corr, 'e_corr_os', 0)
+        self.e_corr = float(self.e_corr)
+
+        self._finalize()
+        return self.e_corr, self.t2
 
     def reset(self, mol=None):
         self.with_df.reset(mol)
