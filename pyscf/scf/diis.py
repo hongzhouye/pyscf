@@ -121,6 +121,27 @@ def get_err_vec(s, d, f, Corth=None):
     else:
         return get_err_vec_orth(s, d, f, Corth)
 
+class CDIIS1(lib.diis.DIIS):
+    '''error vector = f(n) - f(n-1)'''
+    def __init__(self, mf=None, filename=None, Corth=None):
+        lib.diis.DIIS.__init__(self, mf, filename)
+        self.space = 8
+        self.Corth = Corth
+    def update(self, s, d, f, *args, **kwargs):
+        if self.Corth is not None:
+            c = self.Corth
+            f_ = reduce(numpy.dot, (c.T.conj(), f, c))
+        else:
+            f_ = f
+        xnew = lib.diis.DIIS.update(self, f_)
+        if self._H is not None:
+            errvec = self.get_err_vec(self._head-1)
+            logger.debug1(self, 'diis-norm(errvec)=%g', numpy.linalg.norm(errvec))
+        if self.Corth is not None:
+            c = self.Corth
+            xnew = reduce(numpy.dot, (s, c, xnew, c.T.conj(), s))
+        return xnew
+
 class EDIIS(lib.diis.DIIS):
     '''SCF-EDIIS
     Ref: JCP 116, 8255 (2002); DOI:10.1063/1.1470195

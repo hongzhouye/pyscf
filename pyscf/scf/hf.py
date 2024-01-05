@@ -146,7 +146,12 @@ Keyword argument "init_dm" is replaced by "dm0"''')
         mf_diis = mf.diis
     elif mf.diis:
         assert issubclass(mf.DIIS, lib.diis.DIIS)
-        mf_diis = mf.DIIS(mf, mf.diis_file)
+        if mf.diis_errvec_type == 1:
+            DIIS = diis.SCF_DIIS
+        else:
+            DIIS = diis.CDIIS1
+        mf_diis = DIIS(mf, mf.diis_file)
+        # mf_diis = mf.DIIS(mf, mf.diis_file)
         mf_diis.space = mf.diis_space
         mf_diis.rollback = mf.diis_space_rollback
 
@@ -166,12 +171,15 @@ Keyword argument "init_dm" is replaced by "dm0"''')
     # A preprocessing hook before the SCF iteration
     mf.pre_kernel(locals())
 
+    fock_last = None
+
     cput1 = logger.timer(mf, 'initialize scf', *cput0)
     for cycle in range(mf.max_cycle):
         dm_last = dm
         last_hf_e = e_tot
 
-        fock = mf.get_fock(h1e, s1e, vhf, dm, cycle, mf_diis)
+        fock = mf.get_fock(h1e, s1e, vhf, dm, cycle, mf_diis, fock_last=fock_last)
+        fock_last = fock
         mo_energy, mo_coeff = mf.eig(fock, s1e)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         dm = mf.make_rdm1(mo_coeff, mo_occ)
@@ -939,7 +947,8 @@ def get_veff(mol, dm, dm_last=None, vhf_last=None, hermi=1, vhfopt=None):
         return vj - vk * .5 + numpy.asarray(vhf_last)
 
 def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
-             diis_start_cycle=None, level_shift_factor=None, damp_factor=None):
+             diis_start_cycle=None, level_shift_factor=None, damp_factor=None,
+             fock_last=None):
     '''F = h^{core} + V^{HF}
 
     Special treatment (damping, DIIS, or level shift) will be applied to the
@@ -963,6 +972,13 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
             The step to start DIIS.  Default is 0.
         level_shift_factor : float or int
             Level shift (in AU) for virtual space.  Default is 0.
+        damp_factor : float
+            Damping factor (in AU) for the fock matrix update (Default is 0):
+                fock += (fock_last - fock) * damp_factor
+            Must be between 0 (no damping) and 1 (complete damping).
+            `fock_last` must be given.
+        fock_last : 2D ndarray
+            Fock matrix from last SCF cycle. Needed by damping.
     '''
     if h1e is None: h1e = mf.get_hcore()
     if vhf is None: vhf = mf.get_veff(mf.mol, dm)
@@ -979,12 +995,15 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
     if s1e is None: s1e = mf.get_ovlp()
     if dm is None: dm = mf.make_rdm1()
 
-    if 0 <= cycle < diis_start_cycle-1 and abs(damp_factor) > 1e-4:
-        f = damping(s1e, dm*.5, f, damp_factor)
-    if diis is not None and cycle >= diis_start_cycle:
-        f = diis.update(s1e, dm, f, mf, h1e, vhf)
     if abs(level_shift_factor) > 1e-4:
         f = level_shift(s1e, dm*.5, f, level_shift_factor)
+    if 0 <= cycle < diis_start_cycle-1 and abs(damp_factor) > 1e-4:
+        # f = damping(s1e, dm*.5, f, damp_factor)
+        if fock_last is not None:
+            logger.debug1(mf, 'get_fock: damping fock update by %.5g', damp_factor)
+            f += (fock_last - f) * damp_factor
+    if diis is not None and cycle >= diis_start_cycle:
+        f = diis.update(s1e, dm, f, mf, h1e, vhf)
     return f
 
 def get_occ(mf, mo_energy=None, mo_coeff=None):
@@ -1414,6 +1433,11 @@ class SCF(lib.StreamObject):
             DIIS space size.  By default, 8 Fock matrices and errors vector are stored.
         diis_start_cycle : int
             The step to start DIIS.  Default is 1.
+        diis_errvec_type : int
+            Type of error vectors over which DIIS extrapolation is performed:
+                1 : SDF - FDS
+                2 : fock matrix change between adjacent SCF cycles.
+            Default is 1.
         diis_file: 'str'
             File to store DIIS vectors and error vectors.
         level_shift : float or int
@@ -1466,6 +1490,7 @@ class SCF(lib.StreamObject):
     diis_space = getattr(__config__, 'scf_hf_SCF_diis_space', 8)
     # need > 0 if initial DM is numpy.zeros array
     diis_start_cycle = getattr(__config__, 'scf_hf_SCF_diis_start_cycle', 1)
+    diis_errvec_type = getattr(__config__, 'scf_hf_SCF_diis_errvec_type', 1)
     diis_file = None
     diis_space_rollback = 0
 
