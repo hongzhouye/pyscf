@@ -144,14 +144,15 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
     if dm_kpts is None: dm_kpts = mf.make_rdm1()
 
     if abs(level_shift_factor) > 1e-4:
-        f_kpts = [mol_hf.level_shift(s, dm_kpts[k], f_kpts[k], level_shift_factor)
-                  for k, s in enumerate(s_kpts)]
+        f_kpts = lib.asarray([mol_hf.level_shift(s, dm_kpts[k], f_kpts[k], level_shift_factor)
+                              for k, s in enumerate(s_kpts)])
     if 0 <= cycle < diis_start_cycle-1 and abs(damp_factor) > 1e-4:
         # f_kpts = [mol_hf.damping(s1e, dm_kpts[k] * 0.5, f_kpts[k], damp_factor)
         #           for k, s1e in enumerate(s_kpts)]
         if fock_last is not None:
             logger.debug1(mf, 'get_fock: damping fock update by %.5g', damp_factor)
-            f_kpts = [f*(1-damp_factor)+f_last*damp_factor for f,f_last in zip(f_kpts,fock_last)]
+            f_kpts = lib.asarray([f*(1-damp_factor)+f_last*damp_factor
+                                  for f,f_last in zip(f_kpts,fock_last)])
     if diis and cycle >= diis_start_cycle:
         f_kpts = diis.update(s_kpts, dm_kpts, f_kpts, mf, h1e_kpts, vhf_kpts)
     return lib.asarray(f_kpts)
