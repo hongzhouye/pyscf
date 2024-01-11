@@ -172,13 +172,19 @@ Keyword argument "init_dm" is replaced by "dm0"''')
     mf.pre_kernel(locals())
 
     fock_last = None
+    delta_E = None
+    use_level_shift = True
 
     cput1 = logger.timer(mf, 'initialize scf', *cput0)
     for cycle in range(mf.max_cycle):
         dm_last = dm
         last_hf_e = e_tot
 
-        fock = mf.get_fock(h1e, s1e, vhf, dm, cycle, mf_diis, fock_last=fock_last)
+        if use_level_shift:
+            use_level_shift = delta_E is None or abs(delta_E) > mf.level_shift_conv_tol
+        level_shift_factor = mf.level_shift if use_level_shift else 0
+        fock = mf.get_fock(h1e, s1e, vhf, dm, cycle, mf_diis,
+                           level_shift_factor=level_shift_factor, fock_last=fock_last)
         fock_last = fock
         mo_energy, mo_coeff = mf.eig(fock, s1e)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
@@ -194,6 +200,7 @@ Keyword argument "init_dm" is replaced by "dm0"''')
         if not TIGHT_GRAD_CONV_TOL:
             norm_gorb = norm_gorb / numpy.sqrt(norm_gorb.size)
         norm_ddm = numpy.linalg.norm(dm-dm_last)
+        delta_E = e_tot-last_hf_e
         logger.info(mf, 'cycle= %d E= %.15g  delta_E= %4.3g  |g|= %4.3g  |ddm|= %4.3g',
                     cycle+1, e_tot, e_tot-last_hf_e, norm_gorb, norm_ddm)
 
@@ -1442,6 +1449,8 @@ class SCF(lib.StreamObject):
             File to store DIIS vectors and error vectors.
         level_shift : float or int
             Level shift (in AU) for virtual space.  Default is 0.
+        level_shift_conv_tol : float
+            Turn off level shift if abs(delta_E) > level_shift_conv_tol
         direct_scf : bool
             Direct SCF is used by default.
         direct_scf_tol : float
@@ -1496,6 +1505,7 @@ class SCF(lib.StreamObject):
 
     damp = getattr(__config__, 'scf_hf_SCF_damp', 0)
     level_shift = getattr(__config__, 'scf_hf_SCF_level_shift', 0)
+    level_shift_conv_tol = getattr(__config__, 'scf_hf_SCF_level_shift_conv_tol', 0)
     direct_scf = getattr(__config__, 'scf_hf_SCF_direct_scf', True)
     direct_scf_tol = getattr(__config__, 'scf_hf_SCF_direct_scf_tol', 1e-13)
     conv_check = getattr(__config__, 'scf_hf_SCF_conv_check', True)
