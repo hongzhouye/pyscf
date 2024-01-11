@@ -143,9 +143,6 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
     if s_kpts is None: s_kpts = mf.get_ovlp()
     if dm_kpts is None: dm_kpts = mf.make_rdm1()
 
-    if abs(level_shift_factor) > 1e-4:
-        f_kpts = lib.asarray([mol_hf.level_shift(s, dm_kpts[k], f_kpts[k], level_shift_factor)
-                              for k, s in enumerate(s_kpts)])
     if 0 <= cycle < diis_start_cycle-1 and abs(damp_factor) > 1e-4:
         # f_kpts = [mol_hf.damping(s1e, dm_kpts[k] * 0.5, f_kpts[k], damp_factor)
         #           for k, s1e in enumerate(s_kpts)]
@@ -155,6 +152,9 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
                                   for f,f_last in zip(f_kpts,fock_last)])
     if diis and cycle >= diis_start_cycle:
         f_kpts = diis.update(s_kpts, dm_kpts, f_kpts, mf, h1e_kpts, vhf_kpts)
+    if abs(level_shift_factor) > 1e-4:
+        f_kpts = lib.asarray([mol_hf.level_shift(s, dm_kpts[k], f_kpts[k], level_shift_factor)
+                              for k, s in enumerate(s_kpts)])
     return lib.asarray(f_kpts)
 
 def get_fermi(mf, mo_energy_kpts=None, mo_occ_kpts=None):

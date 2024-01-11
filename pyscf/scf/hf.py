@@ -995,8 +995,6 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
     if s1e is None: s1e = mf.get_ovlp()
     if dm is None: dm = mf.make_rdm1()
 
-    if abs(level_shift_factor) > 1e-4:
-        f = level_shift(s1e, dm*.5, f, level_shift_factor)
     if 0 <= cycle < diis_start_cycle-1 and abs(damp_factor) > 1e-4:
         # f = damping(s1e, dm*.5, f, damp_factor)
         if fock_last is not None:
@@ -1004,6 +1002,8 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
             f += (fock_last - f) * damp_factor
     if diis is not None and cycle >= diis_start_cycle:
         f = diis.update(s1e, dm, f, mf, h1e, vhf)
+    if abs(level_shift_factor) > 1e-4:
+        f = level_shift(s1e, dm*.5, f, level_shift_factor)
     return f
 
 def get_occ(mf, mo_energy=None, mo_coeff=None):
