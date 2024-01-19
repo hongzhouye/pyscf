@@ -142,6 +142,161 @@ class CDIIS1(lib.diis.DIIS):
             xnew = reduce(numpy.dot, (s, c, xnew, c.T.conj(), s))
         return xnew
 
+#####
+class DIISBase(lib.StreamObject):
+
+    update_type = 1
+    lindep_thresh = 1e-10
+    err_remove_damp = 1e-10
+
+    def __init__(self, dev=None):
+        if dev is not None:
+            self.verbose = dev.verbose
+            self.stdout = dev.stdout
+        else:
+            self.verbose = logger.INFO
+            self.stdout = sys.stdout
+
+        self.space = 8
+        self.damp = 0
+
+        # internal variables
+        self._xs = None
+        self._fs = None
+        self._es = None
+
+    def _update(self, x, f, e=None):
+        if self._xs is None:
+            self._xs = []
+            self._fs = []
+            self._es = []
+
+        if e is None:
+            e = (f - x).ravel()
+        logger.debug1(self, 'diis-norm(errvec)=%g', numpy.linalg.norm(e))
+
+        damp = self.damp
+        if abs(self.damp) > 1e-10:
+            if numpy.linalg.norm(e) < self.err_remove_damp:
+                logger.debug1(self, 'removing damping from diis')
+                damp = 0
+
+        n = len(self._xs)
+        if n < self.space:
+            self._xs.append( x )
+            self._fs.append( f )
+            self._es.append( e )
+        else:
+            for i in range(n-1):
+                self._xs[i] = self._xs[i+1]
+                self._fs[i] = self._fs[i+1]
+                self._es[i] = self._es[i+1]
+            self._xs[-1] = x
+            self._fs[-1] = f
+            self._es[-1] = e
+
+        return self.extrapolate(damp)
+
+    def update(self, x, f, e=None):
+        return self._update(x, f, e)
+
+    def extrapolate(self, damp=None):
+        if damp is None: damp = self.damp
+
+        n = len(self._xs)
+        if n == 1:
+            if abs(damp) < 1e-10:
+                return self._fs[0]
+            else:
+                return self._fs[0] - damp * (self._fs[0] - self._xs[0])
+
+        A = numpy.zeros((n,n))
+        for i in range(n):
+            for j in range(i+1):
+                a = numpy.dot(self._es[i], self._es[j])
+                A[i,j] = A[j,i] = a
+        B = numpy.zeros((n+1,n+1))
+        B[:n,:n] =  A
+        B[:n, n] = -1
+        B[ n,:n] =  1
+        b = numpy.zeros(n+1)
+        b[n] = 1
+
+        w, v = scipy.linalg.eigh(B)
+        logger.debug1(self, 'diis-eigval %s', numpy.sort(abs(w)))
+        if numpy.any(abs(w) < self.lindep_thresh):
+            logger.debug(self, 'Linear dependence found in DIIS error vectors.')
+            idx = abs(w) > self.lindep_thresh
+            logger.debug(self, 'Keeping %d/%d diis vectors', numpy.count_nonzero(idx), idx.size)
+            alps = numpy.dot(v[:,idx]*(1./w[idx]), numpy.dot(v[:,idx].T.conj(), b))[:n]
+        else:
+            try:
+                alps = numpy.linalg.solve(B, b)[:n]
+            except numpy.linalg.linalg.LinAlgError as e:
+                logger.warn(self, ' diis singular, eigh(h) %s', w)
+                raise e
+        logger.debug1(self, 'diis-c %s', alps)
+
+        if abs(damp) < 1e-10:
+            if self.update_type == 1:
+                xnew = sum([alps[i]*self._xs[i] for i in range(n)])
+            elif self.update_type == 2:
+                xnew = sum([alps[i]*self._fs[i] for i in range(n)])
+            else:
+                raise RuntimeError
+        else:
+            xnew = sum([alps[i]*(self._fs[i] - damp*(self._fs[i]-self._xs[i]))
+                        for i in range(n)])
+
+        return xnew
+
+    def reset(self):
+        self._xs = None
+        self._fs = None
+        self._es = None
+
+class DIIS_Fock_Res(DIISBase):
+
+    def __init__(self, mf, Corth):
+        DIISBase.__init__(self, mf)
+        self.Corth = Corth
+
+    def update(self, s, d, f, f_last):
+        ''' f_last --[eigh]--> d --[F-build]--> f
+        '''
+        c = self.Corth
+        f1 = reduce(numpy.dot, (c.T.conj(), f, c))
+        f1_last = reduce(numpy.dot, (c.T.conj(), f_last, c))
+        f1new = self._update(f1_last, f1)
+        fnew = reduce(numpy.dot, (s, c, f1new, c.T.conj(), s))
+        return fnew
+
+class DIIS_Fock_Res_TypeI(DIIS_Fock_Res):
+    update_type = 1
+class DIIS_Fock_Res_TypeII(DIIS_Fock_Res):
+    update_type = 2
+
+
+class DIIS_Fock_Err(DIISBase):
+
+    def __init__(self, mf, Corth):
+        DIISBase.__init__(self, mf)
+        self.Corth = Corth
+
+    def update(self, s, d, f, f_last):
+        ''' f_last --[eigh]--> d --[F-build]--> f
+        '''
+        from pyscf.scf.diis import get_err_vec
+        e = get_err_vec(s, d, f, self.Corth)
+        fnew = self._update(f_last, f, e)
+        return fnew
+
+class DIIS_Fock_Err_TypeI(DIIS_Fock_Err):
+    update_type = 1
+class DIIS_Fock_Err_TypeII(DIIS_Fock_Err):
+    update_type = 2
+#####
+
 class EDIIS(lib.diis.DIIS):
     '''SCF-EDIIS
     Ref: JCP 116, 8255 (2002); DOI:10.1063/1.1470195
