@@ -1862,6 +1862,9 @@ class SCF(lib.StreamObject):
             log.info('DIIS = %s', self.DIIS)
             log.info('diis_start_cycle = %d', self.diis_start_cycle)
             log.info('diis_space = %d', self.diis_space)
+            log.info('diis_damp = %d', self.diis_damp)
+            log.info('diis_lindep_thresh = %d', self.diis_lindep_thresh)
+            log.info('diis_err_remove_damp = %d', self.diis_err_remove_damp)
         else:
             log.info('DIIS disabled')
         log.info('SCF conv_tol = %g', self.conv_tol)
