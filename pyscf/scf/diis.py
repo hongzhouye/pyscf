@@ -225,9 +225,9 @@ class DIISBase(lib.StreamObject):
         B = numpy.zeros((n+1,n+1), dtype=dtype)
         B[:n,:n] =  A
         B[:n, n] = -1
-        B[ n,:n] =  1
+        B[ n,:n] = -1
         b = numpy.zeros(n+1, dtype=dtype)
-        b[n] = 1
+        b[n] = -1
 
         w, v = scipy.linalg.eigh(B)
         logger.debug1(self, 'diis-eigval %s', numpy.sort(abs(w)))
