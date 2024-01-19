@@ -276,9 +276,9 @@ class DIIS_Fock_Res(DIISBase):
             f1 = reduce(numpy.dot, (c.T.conj(), f, c))
             f1_last = reduce(numpy.dot, (c.T.conj(), f_last, c))
         elif isinstance(f, numpy.ndarray) and f.ndim == 3:
-            f1 = lib.asarray([reduce(numpy.dot, (ck.T.conj(), fk, ck)) for ck,f1k in zip(c,f)])
+            f1 = lib.asarray([reduce(numpy.dot, (ck.T.conj(), fk, ck)) for ck,fk in zip(c,f)])
             f1_last = lib.asarray([reduce(numpy.dot, (ck.T.conj(), fk, ck))
-                                   for ck,f1k in zip(c,f_last)])
+                                   for ck,fk in zip(c,f_last)])
         else:
             raise RuntimeError('Unknown SCF DIIS type')
         f1new = self._update(f1_last, f1)
