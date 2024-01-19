@@ -195,7 +195,13 @@ class DIISBase(lib.StreamObject):
             self._fs[-1] = f
             self._es[-1] = e
 
-        return self.extrapolate(damp)
+        xnew = self.extrapolate(damp)
+        if xnew is not None:
+            return xnew
+
+        # restart
+        self.reset()
+        return self._update(x, f, e)
 
     def update(self, x, f, e=None):
         return self._update(x, f, e)
@@ -210,16 +216,17 @@ class DIISBase(lib.StreamObject):
             else:
                 return self._fs[0] - damp * (self._fs[0] - self._xs[0])
 
-        A = numpy.zeros((n,n))
+        dtype = self._fs[0].dtype
+        A = numpy.zeros((n,n), dtype=dtype)
         for i in range(n):
             for j in range(i+1):
                 a = numpy.dot(self._es[i], self._es[j])
                 A[i,j] = A[j,i] = a
-        B = numpy.zeros((n+1,n+1))
+        B = numpy.zeros((n+1,n+1), dtype=dtype)
         B[:n,:n] =  A
         B[:n, n] = -1
         B[ n,:n] =  1
-        b = numpy.zeros(n+1)
+        b = numpy.zeros(n+1, dtype=dtype)
         b[n] = 1
 
         w, v = scipy.linalg.eigh(B)
@@ -265,10 +272,33 @@ class DIIS_Fock_Res(DIISBase):
         ''' f_last --[eigh]--> d --[F-build]--> f
         '''
         c = self.Corth
-        f1 = reduce(numpy.dot, (c.T.conj(), f, c))
-        f1_last = reduce(numpy.dot, (c.T.conj(), f_last, c))
+        if isinstance(f, numpy.ndarray) and f.ndim == 2:
+            f1 = reduce(numpy.dot, (c.T.conj(), f, c))
+            f1_last = reduce(numpy.dot, (c.T.conj(), f_last, c))
+        elif isinstance(f, numpy.ndarray) and f.ndim == 3:
+            f1 = lib.asarray([reduce(numpy.dot, (ck.T.conj(), fk, ck)) for ck,f1k in zip(c,f)])
+            f1_last = lib.asarray([reduce(numpy.dot, (ck.T.conj(), fk, ck))
+                                   for ck,f1k in zip(c,f_last)])
+        else:
+            raise RuntimeError('Unknown SCF DIIS type')
         f1new = self._update(f1_last, f1)
-        fnew = reduce(numpy.dot, (s, c, f1new, c.T.conj(), s))
+        if isinstance(f, numpy.ndarray) and f.ndim == 2:
+            sc = numpy.dot(s, c)
+            fnew = reduce(numpy.dot, (sc, f1new, sc.T.conj()))
+        elif isinstance(f, numpy.ndarray) and f.ndim == 3 and s.ndim == 3:
+            fnew = []
+            for sk,ck,f1k in zip(s,c,f1new):
+                sc = numpy.dot(sk, ck)
+                fnew.append( reduce(numpy.dot, (sc, f1k, sc.T.conj())) )
+            fnew = lib.asarray(fnew)
+        elif isinstance(f, numpy.ndarray) and f.ndim == 3 and s.ndim == 2:
+            fnew = []
+            for ck,f1k in zip(c,f1new):
+                sc = numpy.dot(s, ck)
+                fnew.append( reduce(numpy.dot, (sc, f1k, sc.T.conj())) )
+            fnew = lib.asarray(fnew)
+        else:
+            raise RuntimeError('Unknown SCF DIIS type')
         return fnew
 
 class DIIS_Fock_Res_TypeI(DIIS_Fock_Res):
