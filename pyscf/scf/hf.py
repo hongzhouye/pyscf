@@ -375,6 +375,7 @@ Keyword argument "init_dm" is replaced by "dm0"''')
         mf_diis.lindep_thresh = mf.diis_lindep_thresh
         mf_diis.err_remove_damp = mf.diis_err_remove_damp
         mf_diis.restart_if_lindep = mf.diis_restart_if_lindep
+        mf_diis.w = mf.diis_w
     else:
         mf_diis = None
 
@@ -1776,6 +1777,7 @@ class SCF(lib.StreamObject):
     diis_lindep_thresh = getattr(__config__, 'scf_hf_SCF_diis_lindep_thresh', 1e-10)
     diis_err_remove_damp = getattr(__config__, 'scf_hf_SCF_diis_err_remove_damp', 1e-10)
     diis_restart_if_lindep = getattr(__config__, 'scf_hf_SCF_diis_restart_if_lindep', False)
+    diis_w = getattr(__config__, 'scf_hf_SCF_diis_w', None)
     # need > 0 if initial DM is numpy.zeros array
     diis_start_cycle = getattr(__config__, 'scf_hf_SCF_diis_start_cycle', 1)
     diis_errvec_type = getattr(__config__, 'scf_hf_SCF_diis_errvec_type', 1)

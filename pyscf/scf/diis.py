@@ -274,24 +274,36 @@ class DIISBase(lib.StreamObject):
 
 class DIIS_Fock_Res(DIISBase):
 
-    def __init__(self, mf, Corth):
+    def __init__(self, mf, Corth, w=None):
         DIISBase.__init__(self, mf)
         self.Corth = Corth
+        self.w = w
 
     def update(self, s, d, f, f_last):
         ''' f_last --[eigh]--> d --[F-build]--> f
         '''
         c = self.Corth
+        w = self.w
         if isinstance(f, numpy.ndarray) and f.ndim == 2:
             f1 = reduce(numpy.dot, (c.T.conj(), f, c))
             f1_last = reduce(numpy.dot, (c.T.conj(), f_last, c))
+            if w is None:
+                e1 = reduce(numpy.dot, (c.T.conj(), f-f_last, c)).ravel()
+            else:
+                e1 = reduce(numpy.dot, (c.T.conj(), (f-f_last)*w, c)).ravel()
         elif isinstance(f, numpy.ndarray) and f.ndim == 3:
             f1 = lib.asarray([reduce(numpy.dot, (ck.T.conj(), fk, ck)) for ck,fk in zip(c,f)])
             f1_last = lib.asarray([reduce(numpy.dot, (ck.T.conj(), fk, ck))
                                    for ck,fk in zip(c,f_last)])
+            if w is None:
+                e1 = lib.asarray([reduce(numpy.dot, (ck.T.conj(), fk-fk_last, ck)).ravel() for
+                                  ck,fk,fk_last in zip(c,f,f_last)])
+            else:
+                e1 = lib.asarray([reduce(numpy.dot, (ck.T.conj(), (fk-fk_last)*w, ck)).ravel() for
+                                  ck,fk,fk_last in zip(c,f,f_last)])
         else:
             raise RuntimeError('Unknown SCF DIIS type')
-        f1new = self._update(f1_last, f1)
+        f1new = self._update(f1_last, f1, e1)
         if isinstance(f, numpy.ndarray) and f.ndim == 2:
             sc = numpy.dot(s, c)
             fnew = reduce(numpy.dot, (sc, f1new, sc.T.conj()))
@@ -323,12 +335,50 @@ class DIIS_Fock_Err(DIISBase):
         DIISBase.__init__(self, mf)
         self.Corth = Corth
 
+    # def update(self, s, d, f, f_last):
+    #     ''' f_last --[eigh]--> d --[F-build]--> f
+    #     '''
+    #     from pyscf.scf.diis import get_err_vec
+    #     e = get_err_vec(s, d, f, self.Corth)
+    #     fnew = self._update(f_last, f, e)
+    #     return fnew
     def update(self, s, d, f, f_last):
-        ''' f_last --[eigh]--> d --[F-build]--> f
-        '''
-        from pyscf.scf.diis import get_err_vec
-        e = get_err_vec(s, d, f, self.Corth)
-        fnew = self._update(f_last, f, e)
+        '''error vector in orthonormal basis = C.T.conj() (SDF - FDS) C'''
+        # Symmetry information to reduce numerical error in DIIS (issue #1524)
+        w = self.w
+        Corth = self.Corth
+        orbsym = getattr(Corth, 'orbsym', None)
+        if orbsym is not None:
+            sym_forbid = orbsym[:,None] != orbsym
+
+        if isinstance(f, numpy.ndarray) and f.ndim == 2:
+            sdf = reduce(numpy.dot, (s, d, f))
+            if w is not None: sdf *= w
+            sdf = reduce(numpy.dot, (Corth.conj().T, sdf, Corth))
+            if orbsym is not None:
+                sdf[sym_forbid] = 0
+            errvec = (sdf.conj().T - sdf).ravel()
+
+        elif isinstance(f, numpy.ndarray) and f.ndim == 3 and s.ndim == 3:
+            errvec = []
+            for i in range(f.shape[0]):
+                sdf = reduce(numpy.dot, (s[i], d[i], f[i]))
+                if w is not None: sdf *= w
+                sdf = reduce(numpy.dot, (Corth[i].conj().T, sdf, Corth[i]))
+                if orbsym is not None:
+                    sdf[sym_forbid] = 0
+                errvec.append((sdf.conj().T - sdf).ravel())
+            errvec = numpy.hstack(errvec)
+
+        elif f.ndim == s.ndim+1 and f.shape[0] == 2:  # for UHF
+            raise RuntimeError
+            errvec = numpy.hstack([
+                get_err_vec_orth(s, d[0], f[0], Corth[0]).ravel(),
+                get_err_vec_orth(s, d[1], f[1], Corth[1]).ravel()])
+        else:
+            raise RuntimeError('Unknown SCF DIIS type')
+
+        fnew = self._update(f_last, f, errvec)
         return fnew
 
 class DIIS_Fock_Err_TypeI(DIIS_Fock_Err):
