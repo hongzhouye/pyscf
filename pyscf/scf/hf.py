@@ -374,6 +374,7 @@ Keyword argument "init_dm" is replaced by "dm0"''')
         mf_diis.damp = mf.diis_damp
         mf_diis.lindep_thresh = mf.diis_lindep_thresh
         mf_diis.err_remove_damp = mf.diis_err_remove_damp
+        mf_diis.restart_if_lindep = mf.diis_restart_if_lindep
     else:
         mf_diis = None
 
@@ -1774,6 +1775,7 @@ class SCF(lib.StreamObject):
     diis_damp = getattr(__config__, 'scf_hf_SCF_diis_damp', 0)
     diis_lindep_thresh = getattr(__config__, 'scf_hf_SCF_diis_lindep_thresh', 1e-10)
     diis_err_remove_damp = getattr(__config__, 'scf_hf_SCF_diis_err_remove_damp', 1e-10)
+    diis_restart_if_lindep = getattr(__config__, 'scf_hf_SCF_diis_restart_if_lindep', False)
     # need > 0 if initial DM is numpy.zeros array
     diis_start_cycle = getattr(__config__, 'scf_hf_SCF_diis_start_cycle', 1)
     diis_errvec_type = getattr(__config__, 'scf_hf_SCF_diis_errvec_type', 1)
@@ -1862,9 +1864,10 @@ class SCF(lib.StreamObject):
             log.info('DIIS = %s', self.DIIS)
             log.info('diis_start_cycle = %d', self.diis_start_cycle)
             log.info('diis_space = %d', self.diis_space)
-            log.info('diis_damp = %d', self.diis_damp)
-            log.info('diis_lindep_thresh = %d', self.diis_lindep_thresh)
-            log.info('diis_err_remove_damp = %d', self.diis_err_remove_damp)
+            log.info('diis_damp = %s', self.diis_damp)
+            log.info('diis_lindep_thresh = %s', self.diis_lindep_thresh)
+            log.info('diis_err_remove_damp = %s', self.diis_err_remove_damp)
+            log.info('diis_restart_if_lindep = %s', self.diis_restart_if_lindep)
         else:
             log.info('DIIS disabled')
         log.info('SCF conv_tol = %g', self.conv_tol)

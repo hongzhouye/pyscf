@@ -146,8 +146,11 @@ class CDIIS1(lib.diis.DIIS):
 class DIISBase(lib.StreamObject):
 
     update_type = 1
-    lindep_thresh = 1e-10
+    lindep_thresh = 1e-14
+
+    # to be discarded
     err_remove_damp = 1e-10
+    restart_if_lindep = False
 
     def __init__(self, dev=None):
         if dev is not None:
@@ -220,7 +223,7 @@ class DIISBase(lib.StreamObject):
         A = numpy.zeros((n,n), dtype=dtype)
         for i in range(n):
             for j in range(i+1):
-                a = numpy.dot(self._es[i], self._es[j])
+                a = numpy.dot(self._es[i].conj(), self._es[j])
                 A[i,j] = A[j,i] = a
         B = numpy.zeros((n+1,n+1), dtype=dtype)
         B[:n,:n] =  A
@@ -230,10 +233,17 @@ class DIISBase(lib.StreamObject):
         b[n] = -1
 
         w, v = scipy.linalg.eigh(B)
+        invcond = abs(w) / abs(w).max()
         logger.debug1(self, 'diis-eigval %s', numpy.sort(abs(w)))
-        if numpy.any(abs(w) < self.lindep_thresh):
+        logger.debug1(self, 'diis-cond= %.5g  rank= %d', 1./invcond.min(),
+                      numpy.count_nonzero(invcond>self.lindep_thresh))
+
+        if numpy.any(invcond < self.lindep_thresh):
             logger.debug(self, 'Linear dependence found in DIIS error vectors.')
-            idx = abs(w) > self.lindep_thresh
+            if self.restart_if_lindep:
+                logger.debug(self, 'Restarting DIIS space')
+                return None
+            idx = invcond > self.lindep_thresh
             logger.debug(self, 'Keeping %d/%d diis vectors', numpy.count_nonzero(idx), idx.size)
             alps = numpy.dot(v[:,idx]*(1./w[idx]), numpy.dot(v[:,idx].T.conj(), b))[:n]
         else:
