@@ -381,7 +381,7 @@ def _init_mp_df_eris(mymp, mo_coeff, nocc, ovL=None):
     nmo = mo_coeff.shape[1]
     nvir = nmo - nocc
     nao = mymp.mol.nao_nr()
-    nao_pair = nao*(nao+1) // 2
+    nao_pair = nao**2
     naux = with_df.get_naoaux()
 
     dtype = mo_coeff.dtype
