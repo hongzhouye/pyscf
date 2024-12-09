@@ -21,6 +21,7 @@ from pyscf.pbc.cc import eom_kccsd_rhf
 from pyscf.pbc.cc import eom_kccsd_uhf
 from pyscf.pbc.cc import eom_kccsd_ghf
 from pyscf.pbc.cc.kccsd_rhf_ksymm import KsymAdaptedRCCSD
+from pyscf.pbc.cc.klnoccsd import KLNOCCSD, KLNOCCSD_T
 
 def RCCSD(mf, frozen=None, mo_coeff=None, mo_occ=None):
     mf = mf.to_rhf()

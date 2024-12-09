@@ -17,83 +17,84 @@
 import unittest
 import numpy as np
 from pyscf import __config__
-from pyscf import gto, scf, mp, cc, lo
+from pyscf.pbc import gto, scf, mp, cc
+from pyscf import lo
 from pyscf.cc.ccsd_t import kernel as CCSD_T
 from pyscf.cc import LNOCCSD_T
+from pyscf.pbc.cc import KLNOCCSD_T
 from pyscf.cc.lno_helper import autofrag_iao
+from pyscf.pbc.cc.klno_helper import k2s_scf, sort_orb_by_cell
 
 
-class WaterDimer(unittest.TestCase):
+class Water_In_A_Box(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        mol = gto.Mole()
-        mol.verbose = 4
-        mol.output = '/dev/null'
-        mol.atom = '''
+        cell = gto.Cell()
+        cell.verbose = 4
+        cell.output = '/dev/null'
+        cell.atom = '''
         O   -1.485163346097   -0.114724564047    0.000000000000
         H   -1.868415346097    0.762298435953    0.000000000000
         H   -0.533833346097    0.040507435953    0.000000000000
-        O    1.416468653903    0.111264435953    0.000000000000
-        H    1.746241653903   -0.373945564047   -0.758561000000
-        H    1.746241653903   -0.373945564047    0.758561000000
         '''
-        mol.basis = 'cc-pvdz'
-        mol.precision = 1e-10
-        mol.build()
-        mf = scf.RHF(mol).density_fit().run()
+        cell.a = np.eye(3) * 4
+        cell.basis = 'cc-pvdz'
+        cell.precision = 1e-10
+        cell.build()
 
-        # canonical
-        frozen = 2
-        mymp = mp.MP2(mf, frozen=frozen)
-        mymp.kernel(with_t2=False)
-        efull_mp2 = mymp.e_corr
+        kmesh = [3,1,1]
+        kpts = cell.make_kpts(kmesh)
+        nkpts = len(kpts)
 
-        mycc = cc.CCSD(mf, frozen=frozen)
-        eris = mycc.ao2mo()
-        mycc.kernel(eris=eris)
-        efull_ccsd = mycc.e_corr
+        kmf = scf.KRHF(cell, kpts=kpts).density_fit().run()
 
-        efull_t = CCSD_T(mycc, eris=eris, verbose=mycc.verbose)
-        efull_ccsd_t = efull_ccsd + efull_t
+        frozen_per_cell = 1
+        frozen = frozen_per_cell * nkpts
 
-        cls.mol = mol
-        cls.mf = mf
+        cls.cell = cell
+        cls.kmf = kmf
         cls.frozen = frozen
-        cls.ecano = [efull_mp2, efull_ccsd, efull_ccsd_t]
     @classmethod
     def tearDownClass(cls):
-        cls.mol.stdout.close()
-        del cls.mol, cls.mf, cls.ecano, cls.frozen
+        cls.cell.stdout.close()
+        del cls.cell, cls.kmf, cls.frozen
 
     def test_lno_pm_by_thresh(self):
-        mol = self.mol
-        mf = self.mf
+        cell = self.cell
+        kmf = self.kmf
         frozen = self.frozen
+        kpts = kmf.kpts
+
+        mf = k2s_scf(kmf)
 
         # PM localization
         orbocc = mf.mo_coeff[:,frozen:np.count_nonzero(mf.mo_occ)]
-        mlo = lo.PipekMezey(mol, orbocc)
+        mlo = lo.PipekMezey(mf.cell, orbocc)
         lo_coeff = mlo.kernel()
         while True: # always performing jacobi sweep to avoid trapping in local minimum/saddle point
             lo_coeff1 = mlo.stability_jacobi()[1]
             if lo_coeff1 is lo_coeff:
                 break
-            mlo = lo.PipekMezey(mf.mol, lo_coeff1).set(verbose=4)
+            mlo = lo.PipekMezey(mf.cell, lo_coeff1).set(verbose=4)
             mlo.init_guess = None
             lo_coeff = mlo.kernel()
 
         # Fragment list: for PM, every orbital corresponds to a fragment
-        frag_lolist = [[i] for i in range(lo_coeff.shape[1])]
+        s1e = mf.get_ovlp()
+        Nk = len(kpts)
+        nlo = lo_coeff.shape[1]//Nk
+        lo_coeff = sort_orb_by_cell(mf.cell, lo_coeff, Nk, s=s1e)
+        frag_lolist = [[i] for i in range(nlo)]
 
         gamma = 10
         threshs = [1e-5,1e-6,1e-100]
         refs = [
-            [-0.4044781783,-0.4231598372,-0.4292049721],
-            [-0.4058765086,-0.4244510794,-0.4307864928],
-            self.ecano
+            [-0.1998019819,-0.2102871047,-0.2132242357],
+            [-0.2003627897,-0.2107978384,-0.2138505827],
+            [-0.2005167756,-0.2109109734,-0.2140042176] # canonical
         ]
         for thresh,ref in zip(threshs,refs):
-            mcc = LNOCCSD_T(mf, lo_coeff, frag_lolist, frozen=frozen).set(verbose=5)
+            mcc = KLNOCCSD_T(kmf, lo_coeff, frag_lolist, frozen=frozen, mf=mf).set(verbose=5)
             mcc.lno_thresh = [thresh*10,thresh]
             mcc.kernel()
             emp2 = mcc.e_corr_pt2
@@ -105,28 +106,34 @@ class WaterDimer(unittest.TestCase):
             self.assertAlmostEqual(eccsd_t, ref[2], 6)
 
     def test_lno_iao_by_thresh(self):
-        mol = self.mol
-        mf = self.mf
+        cell = self.cell
+        kmf = self.kmf
         frozen = self.frozen
+        kpts = kmf.kpts
+
+        mf = k2s_scf(kmf)
 
         # IAO localization
         orbocc = mf.mo_coeff[:,frozen:np.count_nonzero(mf.mo_occ)]
-        iao_coeff = lo.iao.iao(mol, orbocc)
+        iao_coeff = lo.iao.iao(mf.cell, orbocc)
         lo_coeff = lo.orth.vec_lowdin(iao_coeff, mf.get_ovlp())
-        moliao = lo.iao.reference_mol(mol)
+        celliao = lo.iao.reference_mol(mf.cell)
 
         # Fragment list: all IAOs belonging to same atom form a fragment
-        frag_lolist = autofrag_iao(moliao)
+        frag_lolist_full = autofrag_iao(celliao)
+        Nk = len(kmf.kpts)
+        nfrag = len(frag_lolist_full)//Nk
+        frag_lolist = frag_lolist_full[:Nk]
 
         gamma = 10
         threshs = [1e-5,1e-6,1e-100]
         refs = [
-            [-0.4054784012,-0.4240686326,-0.4303996712],
-            [-0.4060479828,-0.4245745223,-0.4309965749],
-            self.ecano
+            [-0.2002220838,-0.2106579848,-0.2137039612],
+            [-0.2004567566,-0.2108616407,-0.2139342959],
+            [-0.2005167756,-0.2109109734,-0.2140042176] # canonical
         ]
         for thresh,ref in zip(threshs,refs):
-            mcc = LNOCCSD_T(mf, lo_coeff, frag_lolist, frozen=frozen).set(verbose=5)
+            mcc = KLNOCCSD_T(kmf, lo_coeff, frag_lolist, frozen=frozen, mf=mf).set(verbose=5)
             mcc.lno_thresh = [thresh*10,thresh]
             mcc.kernel()
             emp2 = mcc.e_corr_pt2
@@ -140,5 +147,5 @@ class WaterDimer(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    print("Full Tests for LNO-CCSD and LNO-CCSD(T)")
+    print("Full Tests for KLNO-CCSD and KLNO-CCSD(T)")
     unittest.main()

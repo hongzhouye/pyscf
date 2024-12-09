@@ -33,7 +33,6 @@ from functools import reduce
 
 from pyscf.lib import logger
 from pyscf import lib
-from pyscf.mp.mp2 import get_e_hf
 
 from pyscf.cc.lno import LNO
 
@@ -111,6 +110,12 @@ def is_unitary_related(c1, c2, s=None, thresh=1e-8):
     else:
         u = np.linalg.multi_dot((c1.T.conj(), s, c2))
     return abs(fdot(u.T.conj(), u) - np.eye(u.shape[1])).max() < thresh
+
+def get_e_hf(self, mo_coeff=None):
+    ''' Fragment CC does not need HF energy. We here just return e_tot from SCF to avoid
+        any recomputation of integrals.
+    '''
+    return self._scf.e_tot
 
 class MODIFIED_CCSD(ccsd.CCSD):
     get_e_hf = get_e_hf
@@ -515,7 +520,6 @@ def impurity_solve(mcc, mo_coeff, uocc_loc, mo_occ, maskact, eris,
                                                       orbactvir,orbfrzvir]]
     nlo = uocc_loc.shape[1]
     nactmo = nactocc + nactvir
-
     log.debug('    impsol:  %d LOs  %d/%d MOs  %d occ  %d vir',
               nlo, nactmo, nmo, nactocc, nactvir)
 
