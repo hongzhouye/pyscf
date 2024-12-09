@@ -20,6 +20,7 @@ from pyscf import __config__
 from pyscf import gto, scf, mp, cc, lo
 from pyscf.cc.ccsd_t import kernel as CCSD_T
 from pyscf.cc import LNOCCSD_T
+from pyscf.cc.lno import autofrag_iao
 
 
 class WaterDimer(unittest.TestCase):
@@ -40,26 +41,9 @@ class WaterDimer(unittest.TestCase):
         mol.precision = 1e-10
         mol.build()
         mf = scf.RHF(mol).density_fit().run()
-        cls.mol = mol
-        cls.mf = mf
-    @classmethod
-    def tearDownClass(cls):
-        cls.mol.stdout.close()
-        del cls.mol, cls.mf
-
-    def kernel(self, CC, **kwargs):
-        mcc = CC(self.mf, **kwargs)
-        eris = mcc.ao2mo()
-        mcc.kernel(eris=eris)
-        et = CCSD_T(mcc, eris=eris)
-        return mcc.e_corr, et
-
-    def test_lno_pm_by_thresh(self):
-        mol = self.mol
-        mf = self.mf
-        frozen = 2
 
         # canonical
+        frozen = 2
         mymp = mp.MP2(mf, frozen=frozen)
         mymp.kernel(with_t2=False)
         efull_mp2 = mymp.e_corr
@@ -71,6 +55,27 @@ class WaterDimer(unittest.TestCase):
 
         efull_t = CCSD_T(mycc, eris=eris, verbose=mycc.verbose)
         efull_ccsd_t = efull_ccsd + efull_t
+
+        cls.mol = mol
+        cls.mf = mf
+        cls.frozen = frozen
+        cls.ecano = [efull_mp2, efull_ccsd, efull_ccsd_t]
+    @classmethod
+    def tearDownClass(cls):
+        cls.mol.stdout.close()
+        del cls.mol, cls.mf, cls.ecano, cls.frozen
+
+    def kernel(self, CC, **kwargs):
+        mcc = CC(self.mf, **kwargs)
+        eris = mcc.ao2mo()
+        mcc.kernel(eris=eris)
+        et = CCSD_T(mcc, eris=eris)
+        return mcc.e_corr, et
+
+    def test_lno_pm_by_thresh(self):
+        mol = self.mol
+        mf = self.mf
+        frozen = self.frozen
 
         # PM localization
         orbocc = mf.mo_coeff[:,frozen:np.count_nonzero(mf.mo_occ)]
@@ -92,7 +97,40 @@ class WaterDimer(unittest.TestCase):
         refs = [
             [-0.4044781783,-0.4231598372,-0.4292049721],
             [-0.4058765086,-0.4244510794,-0.4307864928],
-            [efull_mp2, efull_ccsd, efull_ccsd_t]
+            self.ecano
+        ]
+        for thresh,ref in zip(threshs,refs):
+            mcc = LNOCCSD_T(mf, lo_coeff, frag_lolist, frozen=frozen).set(verbose=5)
+            mcc.lno_thresh = [thresh*10,thresh]
+            mcc.kernel()
+            emp2 = mcc.e_corr_pt2
+            eccsd = mcc.e_corr_ccsd
+            eccsd_t = mcc.e_corr_ccsd_t
+            # print('[%s],' % (','.join([f'{x:.10f}' for x in [emp2,eccsd,eccsd_t]])))
+            self.assertAlmostEqual(emp2, ref[0], 6)
+            self.assertAlmostEqual(eccsd, ref[1], 6)
+            self.assertAlmostEqual(eccsd_t, ref[2], 6)
+
+    def test_lno_iao_by_thresh(self):
+        mol = self.mol
+        mf = self.mf
+        frozen = self.frozen
+
+        # IAO localization
+        orbocc = mf.mo_coeff[:,frozen:np.count_nonzero(mf.mo_occ)]
+        iao_coeff = lo.iao.iao(mol, orbocc)
+        lo_coeff = lo.orth.vec_lowdin(iao_coeff, mf.get_ovlp())
+        moliao = lo.iao.reference_mol(mol)
+
+        # Fragment list: all IAOs belonging to same atom form a fragment
+        frag_lolist = autofrag_iao(moliao)
+
+        gamma = 10
+        threshs = [1e-5,1e-6,1e-100]
+        refs = [
+            [-0.4054784012,-0.4240686326,-0.4303996712],
+            [-0.4060479828,-0.4245745223,-0.4309965749],
+            self.ecano
         ]
         for thresh,ref in zip(threshs,refs):
             mcc = LNOCCSD_T(mf, lo_coeff, frag_lolist, frozen=frozen).set(verbose=5)

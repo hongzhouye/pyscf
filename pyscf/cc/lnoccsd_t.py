@@ -1,3 +1,31 @@
+#!/usr/bin/env python
+# Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Author: Hong-Zhou Ye <hzyechem@gmail.com>
+#
+
+
+''' LNO-RCCSD(T) (both molecule and pbc w/ Gamma-point BZ sampling)
+
+    - Original publication by Kállay and co-workers:
+        Rolik and Kállay, J. Chem. Phys. 135, 104111 (2011)
+
+    - Publication for this implementation by Ye and Berkelbach:
+        Ye and Berkelbach, J. Chem. Theory Comput. 2024, 20, 20, 8948–8959
+'''
+
 import ctypes
 import numpy
 
