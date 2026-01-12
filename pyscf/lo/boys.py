@@ -28,6 +28,7 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.soscf import ciah
 from pyscf.lo import orth, cholesky_mos
+from pyscf.lo.stability import stability_newton
 from pyscf import __config__
 
 
@@ -60,17 +61,22 @@ def kernel(localizer, mo_coeff=None, callback=None, verbose=None):
     else:
         u0 = localizer.get_init_guess(None)
 
-    rotaiter = ciah.rotate_orb_cc(localizer, u0, conv_tol_grad, verbose=log)
+    e0 = localizer.cost_function(u0)
+    g_orb = localizer.get_grad(u0)
+    norm_gorb = numpy.linalg.norm(g_orb)
+    log.info('Init f(x)= %.14g  |g|= %g', e0, norm_gorb)
+
+    rotaiter = ciah.rotate_orb_cc(localizer, u0, conv_tol_grad, verbose=log.verbose-1)
     u, g_orb, stat = next(rotaiter)
     cput1 = log.timer('initializing CIAH', *cput0)
 
     tot_kf = stat.tot_kf
     tot_hop = stat.tot_hop
     conv = False
-    e_last = 0
+    e_last = e0
     for imacro in range(localizer.max_cycle):
         norm_gorb = numpy.linalg.norm(g_orb)
-        u0 = lib.dot(u0, u)
+        u0 = localizer.update_rotation(u0, u)
         e = localizer.cost_function(u0)
         e_last, de = e, e-e_last
 
@@ -96,6 +102,7 @@ def kernel(localizer, mo_coeff=None, callback=None, verbose=None):
     log.info('macro X = %d  f(x)= %.14g  |g|= %g  %d intor %d KF %d Hx',
              imacro+1, e, norm_gorb,
              (imacro+1)*2, tot_kf+imacro+1, tot_hop)
+    log.timer(localizer.__class__.__name__, *cput0)
 # Sort the localized orbitals, to make each localized orbitals as close as
 # possible to the corresponding input orbitals
     sorted_idx = mo_mapping.mo_1to1map(u0)
@@ -114,9 +121,9 @@ def dipole_integral(mol, mo_coeff, charge_center=None):
                              for x in mol.intor_symmetric('int1e_r', comp=3)])
     return dip
 
-def atomic_init_guess(mol, mo_coeff):
+def atomic_init_guess(mol, mo_coeff, kpt=None):
     if getattr(mol, 'pbc_intor', None):
-        s = mol.pbc_intor('int1e_ovlp', hermi=1)
+        s = mol.pbc_intor('int1e_ovlp', hermi=1, kpt=kpt)
     else:
         s = mol.intor_symmetric('int1e_ovlp')
     c = orth.orth_ao(mol, s=s)
@@ -148,11 +155,19 @@ class OrbitalLocalizer(lib.StreamObject, ciah.CIAHOptimizerMixin):
         'ah_max_cycle', 'init_guess', 'mol', 'mo_coeff',
     }
 
-    def __init__(self, mol, mo_coeff=None):
+    def __init__(self, mol, mo_coeff):
+        ciah.CIAHOptimizerMixin.__init__(self, mo_coeff.shape[1])
+
         self.mol = mol
         self.stdout = mol.stdout
         self.verbose = mol.verbose
         self.mo_coeff = mo_coeff
+
+    def rotate_orb(self, u=None):
+        if u is None:
+            return self.mo_coeff
+        else:
+            return lib.dot(self.mo_coeff, u)
 
     def dump_flags(self, verbose=None):
         log = logger.new_logger(self, verbose)
@@ -173,6 +188,7 @@ class OrbitalLocalizer(lib.StreamObject, ciah.CIAHOptimizerMixin):
         log.info('ah_max_cycle = %s'   , self.ah_max_cycle   )
         log.info('ah_trust_region = %s', self.ah_trust_region)
         log.info('init_guess = %s'     , self.init_guess     )
+        log.info('norb = %s'           , self.norb     )
 
     def get_init_guess(self, key='atomic'):
         '''Generate initial guess for localization.
@@ -182,32 +198,43 @@ class OrbitalLocalizer(lib.StreamObject, ciah.CIAHOptimizerMixin):
                 If key is 'atomic', initial guess is based on the projected
                 atomic orbitals. False
         '''
-        nmo = self.mo_coeff.shape[1]
         if isinstance(key, str) and key.lower() == 'atomic':
-            u0 = atomic_init_guess(self.mol, self.mo_coeff)
+            u0 = self.init_guess_by_atomic()
         elif isinstance(key, str) and key.lower().startswith('cho'):
-            mo_init = cholesky_mos(self.mo_coeff)
-            S = self.mol.intor_symmetric('int1e_ovlp')
-            u0 = numpy.linalg.multi_dot([self.mo_coeff.T, S, mo_init])
+            u0 = self.init_guess_by_cholesky()
         else:
-            u0 = numpy.eye(nmo)
+            u0 = self.identity_rotation()
         if (isinstance(key, str) and key.lower().startswith('rand')
             or numpy.linalg.norm(self.get_grad(u0)) < 1e-5):
             # Add noise to kick initial guess out of saddle point
-            dr = numpy.cos(numpy.arange((nmo-1)*nmo//2)) * 1e-3
+            dr = numpy.cos(numpy.arange(self.pdim)) * 1e-3
             u0 = self.extract_rotation(dr)
         return u0
 
-    def gen_g_hop(self, u):
-        raise NotImplementedError
+    def init_guess_by_atomic(self):
+        return atomic_init_guess(self.mol, self.mo_coeff)
 
-    def get_grad(self, u=None):
-        raise NotImplementedError
+    def init_guess_by_cholesky(self):
+        mo_init = cholesky_mos(self.mo_coeff)
+        S = self.mol.intor_symmetric('int1e_ovlp')
+        return numpy.linalg.multi_dot([self.mo_coeff.T, S, mo_init])
 
-    def cost_function(self, u=None):
-        raise NotImplementedError
+    def stability(self, verbose=None, return_status=False):
+        return stability_newton(self, verbose=verbose, return_status=return_status)
 
     kernel = kernel
+
+
+@lib.with_doc(OrbitalLocalizer.__doc__)
+class OrbitalLocalizerComplex(OrbitalLocalizer, ciah.CIAHOptimizerMixinComplex):
+
+    def __init__(self, mol, mo_coeff):
+        ciah.CIAHOptimizerMixinComplex.__init__(self, mo_coeff.shape[1])
+
+        self.mol = mol
+        self.stdout = mol.stdout
+        self.verbose = mol.verbose
+        self.mo_coeff = mo_coeff
 
 
 class Boys(OrbitalLocalizer):
@@ -220,7 +247,7 @@ class Boys(OrbitalLocalizer):
         mol : Mole object
 
     Kwargs:
-        mo_coeff : size (N,N) np.array
+        mo_coeff : size (N,N) numpy.array
             The orbital space to localize for Boys localization.
             When initializing the localization optimizer ``bopt = Boys(mo_coeff)``,
 
@@ -265,8 +292,8 @@ class Boys(OrbitalLocalizer):
 
     '''
 
-    def gen_g_hop(self, u):
-        mo_coeff = lib.dot(self.mo_coeff, u)
+    def gen_g_hop(self, u=None):
+        mo_coeff = self.rotate_orb(u)
         dip = dipole_integral(self.mol, mo_coeff)
         g0 = numpy.einsum('xii,xip->pi', dip, dip)
         g = -self.pack_uniq_var(g0-g0.conj().T) * 2
@@ -324,16 +351,14 @@ class Boys(OrbitalLocalizer):
         return g, h_op, h_diag
 
     def get_grad(self, u=None):
-        if u is None: u = numpy.eye(self.mo_coeff.shape[1])
-        mo_coeff = lib.dot(self.mo_coeff, u)
+        mo_coeff = self.rotate_orb(u)
         dip = dipole_integral(self.mol, mo_coeff)
         g0 = numpy.einsum('xii,xip->pi', dip, dip)
         g = -self.pack_uniq_var(g0-g0.conj().T) * 2
         return g
 
     def cost_function(self, u=None):
-        if u is None: u = numpy.eye(self.mo_coeff.shape[1])
-        mo_coeff = lib.dot(self.mo_coeff, u)
+        mo_coeff = self.rotate_orb(u)
         charge_center = (numpy.einsum('z,zx->x', self.mol.atom_charges(), self.mol.atom_coords())
                          / self.mol.atom_charges().sum())
         dip = dipole_integral(self.mol, mo_coeff, charge_center)
@@ -380,4 +405,13 @@ if __name__ == '__main__':
     print('g', numpy.array(g_num), loc.get_grad(u0)*2)
     print('hdiag', numpy.array(hdiag_num), hdiag)
 
-    mo = Boys(mol).kernel(mf.mo_coeff[:,5:9], verbose=4)
+    mo = mf.mo_coeff[:,:mol.nelectron//2]
+    mlo = Boys(mol, mo).set(verbose=4)
+    mlo.kernel()
+
+    # stability check
+    while True:
+        mo, stable = mlo.stability(return_status=True)
+        if stable:
+            break
+        mlo.kernel(mo)

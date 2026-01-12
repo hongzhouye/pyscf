@@ -26,7 +26,7 @@ import numpy
 # access to the raw lapack function, which is wrapped around here.
 # With older versions of scipy, we use our own implementation instead.
 try:
-    from scipy.linalg.lapack import dpstrf as _dpstrf
+    from scipy.linalg.lapack import dpstrf as _dpstrf, zpstrf as _zpstrf
 except ImportError:
     def _pivoted_cholesky_wrapper(A, tol, lower):
         return pivoted_cholesky_python(A, tol=tol, lower=lower)
@@ -34,7 +34,10 @@ else:
     def _pivoted_cholesky_wrapper(A, tol, lower):
         N = A.shape[0]
         assert (A.shape == (N, N))
-        L, piv, rank, info = _dpstrf(A, tol=tol, lower=lower)
+        if A.dtype == numpy.complex128:
+            L, piv, rank, info = _zpstrf(A, tol=tol, lower=lower)
+        else:
+            L, piv, rank, info = _dpstrf(A, tol=tol, lower=lower)
         if info < 0:
             raise RuntimeError('Pivoted Cholesky factorization failed.')
         if lower:

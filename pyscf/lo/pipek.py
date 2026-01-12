@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 # Author: Qiming Sun <osirpt.sun@gmail.com>
+#         Hong-Zhou Ye <hzyechem@gmail.com>
 #
 
 '''
@@ -29,10 +30,11 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.lo import orth
 from pyscf.lo import boys
-from pyscf.lo import pipek_jacobi
+from pyscf.lo.stability import stability_jacobi, stability_newton
 from pyscf import __config__
 
-def atomic_pops(mol, mo_coeff, method='meta_lowdin', mf=None, s=None, charge_matrices=None):
+
+def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, s=None, charge_matrices=None):
     '''
     Kwargs:
         method : string
@@ -52,11 +54,11 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', mf=None, s=None, charge_mat
     '''
     method = method.lower().replace('_', '-')
     nmo = mo_coeff.shape[1]
-    proj = numpy.empty((mol.natm,nmo,nmo))
+    proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
 
     if s is None:
         if getattr(mol, 'pbc_intor', None):  # whether mol object is a cell
-            s = mol.pbc_intor('int1e_ovlp', hermi=1)
+            s = mol.pbc_intor('int1e_ovlp', hermi=1, kpt=kpt)
         else:
             s = mol.intor_symmetric('int1e_ovlp')
 
@@ -77,27 +79,32 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', mf=None, s=None, charge_mat
         for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
             proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
 
-    elif method in ('iao', 'ibo'):
+    elif method in ('iao', 'ibo', 'iao-biorth'):
         from pyscf.lo import iao
-        assert mf is not None
-        # FIXME: How to handle UHF/UKS object?
-        orb_occ = mf.mo_coeff[:,mf.mo_occ>0]
 
-        iao_coeff = iao.iao(mol, orb_occ)
-        #
-        # IAO is generally not orthogonalized. For simplicity, we take Lowdin
-        # orthogonalization here. Other orthogonalization can be used. Results
-        # should be very closed to the Lowdin-orth orbitals
-        #
-        # PM with Mulliken population of non-orth IAOs can be found in
-        # ibo.PipekMezey function
-        #
-        iao_coeff = orth.vec_lowdin(iao_coeff, s)
-        csc = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coeff))
+        if kpt is None:
+            iao_coeff = iao.iao(mol, mo_coeff)
+        else:
+            iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt])[0]
 
-        iao_mol = iao.reference_mol(mol)
-        for i, (b0, b1, p0, p1) in enumerate(iao_mol.offset_nr_by_atom()):
-            proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
+        if method == 'iao-biorth':
+            ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
+            iao_coefftild = numpy.asarray(numpy.linalg.solve(ovlp, iao_coeff.T).T, order='C')
+
+            csc = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coeff))
+            csctild = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coefftild))
+
+            iao_mol = iao.reference_mol(mol)
+            for i, (b0, b1, p0, p1) in enumerate(iao_mol.offset_nr_by_atom()):
+                proj1 = numpy.dot(csc[:,p0:p1], csctild[:,p0:p1].conj().T)
+                proj[i] = (proj1 + proj1.conj().T) * 0.5
+        else:
+            iao_coeff = orth.vec_lowdin(iao_coeff, s)
+            csc = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coeff))
+
+            iao_mol = iao.reference_mol(mol)
+            for i, (b0, b1, p0, p1) in enumerate(iao_mol.offset_nr_by_atom()):
+                proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
 
     else:
         raise KeyError('method = %s' % method)
@@ -135,7 +142,7 @@ class PipekMezey(boys.OrbitalLocalizer):
         mol : Mole object
 
     Kwargs:
-        mo_coeff : size (N,N) np.array
+        mo_coeff : size (N,N) numpy.array
             The orbital space to localize for PM localization.
             When initializing the localization optimizer ``bopt = PM(mo_coeff)``,
 
@@ -197,121 +204,286 @@ class PipekMezey(boys.OrbitalLocalizer):
     conv_tol = getattr(__config__, 'lo_pipek_PM_conv_tol', 1e-6)
     exponent = getattr(__config__, 'lo_pipek_PM_exponent', 2)  # any integer >= 2
 
-    _keys = {'pop_method', 'conv_tol', 'exponent'}
+    _keys = {'pop_method', 'conv_tol', 'exponent', 'kpt'}
 
-    def __init__(self, mol, mo_coeff=None, mf=None, pop_method=None):
+    def __init__(self, mol, mo_coeff=None, pop_method=None, kpt=None):
         boys.OrbitalLocalizer.__init__(self, mol, mo_coeff)
-        self._scf = mf
         if pop_method is not None:
             self.pop_method = pop_method
+        self.kpt = kpt
 
     def dump_flags(self, verbose=None):
         boys.OrbitalLocalizer.dump_flags(self, verbose)
         logger.info(self, 'pop_method = %s',self.pop_method)
+        logger.info(self, 'kpt = %s',self.kpt)
 
-    def gen_g_hop(self, u):
+    def gen_g_hop(self, u=None):
         exponent = self.exponent
-        mo_coeff = lib.dot(self.mo_coeff, u)
-        projR = self.atomic_pops(self.mol, mo_coeff, self.pop_method).real
+        projR = self.atomic_pops(u).real
         pop = lib.einsum('xii->xi', projR)
         popexp1 = pop**(exponent-1)
         popexp2 = pop**(exponent-2)
 
         # gradient
-        g = lib.einsum('xj,xij->ij', popexp1, projR)
-        g = -2 * exponent * self.pack_uniq_var(g - g.T)
+        g = self.get_grad(proj=projR)
 
         # hessian diagonal
         g1 = lib.einsum('xi,xi->i', popexp1, pop)
         g2 = lib.einsum('xi,xj->ij', popexp1, pop)
-        h_diag  = -2 * exponent * (g1[:,None] - g2)
-        g1 = lib.einsum('xi,xij->ij', popexp2, projR**2.)
-        h_diag +=  4 * exponent * (exponent-1) * g1
-        h_diag = -self.pack_uniq_var(h_diag + h_diag.T)
+        h_diag  = 2 * exponent * (g1[:,None] - g2)
+        g1 = lib.einsum('xi,xij->ij', popexp2, projR**2)
+        h_diag += -4 * exponent * (exponent-1) * g1
+        h_diag = self.pack_uniq_var(h_diag + h_diag.T)
 
         # hessian vector product
         G = lib.einsum('xi,xij->ij', popexp1, projR)
-        G += G.T
 
         def h_op(x):
-            xR = self.unpack_uniq_var(x).real
+            x = self.unpack_uniq_var(x)
 
-            # contributions from (nabla proj) x (nabla proj)
-            j0 = popexp2 * lib.einsum('xik,ki->xi', projR, xR)
+            projx = lib.einsum('xik,kj->xij', projR, x)
+
+            # contributions from disconnected term
+            j0 = popexp2 * lib.einsum('xii->xi', projx)
             j1 = lib.einsum('xi,xij->ij', j0, projR)
-            hx = -4 * exponent * (exponent-1) * j1
+            hx = 4 * exponent * (exponent-1) * j1
 
-            # contributions from nabla^2 proj: symmetric terms
-            j1 = numpy.dot(G,xR)
-            hx += -exponent * j1
+            # contributions symmetric connected terms
+            j1 = lib.einsum('xj,xij->ij', popexp1, projx)
+            hx += -2 * exponent * j1
 
-            # contributions from nabla^2 proj: asymmetric terms
-            j1 = lib.einsum('xj,xik,kj->ij', popexp1, projR, xR)
-            hx += 2 * exponent * j1
+            # contributions from asymmetric connected terms
+            # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
+            j1 = numpy.dot(G, x)
+            j1 += numpy.dot(x, G)
+            hx += exponent * j1
 
-            hx -= hx.T
-
-            return -self.pack_uniq_var(hx)
+            return self.pack_uniq_var(hx - hx.T)
 
         return g, h_op, h_diag
 
-    def get_grad(self, u=None):
-        if u is None: u = numpy.eye(self.mo_coeff.shape[1])
+    def get_grad(self, u=None, proj=None):
+        if proj is None:
+            proj = self.atomic_pops(u)
+
         exponent = self.exponent
-        mo_coeff = lib.dot(self.mo_coeff, u)
-        projR = self.atomic_pops(self.mol, mo_coeff, self.pop_method).real
-        popexp1 = lib.einsum('xii->xi', projR)**(exponent-1)
-        g = lib.einsum('xj,xij->ij', popexp1, projR)
-        g = -2 * exponent * self.pack_uniq_var(g - g.T)
-        return g
+        popexp1 = lib.einsum('xii->xi', proj.real)**(exponent-1)
+        g = lib.einsum('xi,xij->ij', popexp1, proj.real)
+        return 2 * exponent * self.pack_uniq_var(g - g.T)
 
     def cost_function(self, u=None):
-        if u is None: u = numpy.eye(self.mo_coeff.shape[1])
-        mo_coeff = lib.dot(self.mo_coeff, u)
-        projR = self.atomic_pops(self.mol, mo_coeff, self.pop_method).real
-        return (lib.einsum('xii->xi', projR)**self.exponent).sum()
+        proj = self.atomic_pops(u)
+        return (lib.einsum('xii->xi', proj.real)**self.exponent).sum()
 
     @lib.with_doc(atomic_pops.__doc__)
-    def atomic_pops(self, mol, mo_coeff, method=None, s=None):
-        if method is None:
-            method = self.pop_method
-
-        if method.lower() in ('iao', 'ibo') and self._scf is None:
-            logger.error(self, 'PM with IAO scheme should include an scf '
-                         'object when creating PM object.\n    PM(mol, mf=scf_object)')
-            raise ValueError('PM attribute method is not valid')
+    def atomic_pops(self, u=None):
+        mo_coeff = self.rotate_orb(u)
+        mol = self.mol
+        method = self.pop_method.lower()
 
         if not hasattr(self, "_charge_matrices"):
             self._charge_matrices = becke_charge_matrices(mol) if method.lower() == "becke" else None
 
-        return atomic_pops(mol, mo_coeff, method, self._scf, s=s, charge_matrices=self._charge_matrices)
+        return atomic_pops(mol, mo_coeff, method, kpt=self.kpt,
+                           charge_matrices=self._charge_matrices)
 
-    def stability_jacobi(self):
-        return pipek_jacobi.PipekMezey_stability_jacobi(self)
+    def stability_jacobi(self, verbose=None, return_status=False):
+        return stability_jacobi(self, verbose=verbose, return_status=return_status)
+
+    def stability(self, verbose=None, return_status=False):
+        return stability_newton(self, verbose=verbose, return_status=return_status)
 
 
 PM = Pipek = PipekMezey
 
-if __name__ == '__main__':
-    from pyscf import gto, scf
 
-    mol = gto.Mole()
-    mol.atom = '''
+@lib.with_doc(PipekMezey.__doc__)
+class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
+    def __init__(self, mol, mo_coeff=None, pop_method=None, kpt=None):
+        boys.OrbitalLocalizerComplex.__init__(self, mol, mo_coeff)
+        if pop_method is not None:
+            self.pop_method = pop_method
+        self.kpt = kpt
+
+    def gen_g_hop(self, u=None):
+        exponent = self.exponent
+        proj = self.atomic_pops(u)
+        pop = lib.einsum('xii->xi', proj.real)
+        popexp1 = pop**(exponent-1)
+        popexp2 = pop**(exponent-2)
+
+        # gradient
+        g = self.get_grad(proj=proj)
+
+        # hessian diagonal
+        g1 = lib.einsum('xi->i', pop**exponent)
+        g2 = lib.einsum('xi,xj->ij', popexp1, pop)
+        h_diag = 2*exponent * (g1[:,None] - g2) * (1 + 1j)
+        g1 = lib.einsum('xi,xij->ij', popexp2, proj.real**2)
+        g2 = lib.einsum('xi,xij->ij', popexp2, proj.imag**2)
+        h_diag += -4*exponent*(exponent-1) * (g1 + g2 * 1j)
+        h_diag = self.pack_uniq_var(h_diag + h_diag.T)
+
+        # hessian vector product
+        G = lib.einsum('xi,xij->ij', popexp1, proj)
+
+        def h_op(x):
+            x = self.unpack_uniq_var(x)
+
+            projx = lib.einsum('xik,kj->xij', proj, x)
+
+            # contributions from disconnected term
+            j0 = popexp2 * lib.einsum('xii->xi', projx.real)
+            j1 = lib.einsum('xi,xij->ij', j0, proj)
+            hx = 4 * exponent * (exponent-1) * j1.astype(numpy.complex128)
+
+            # contributions symmetric connected terms
+            j1 = lib.einsum('xj,xij->ij', popexp1, projx)
+            hx += -2 * exponent * j1
+
+            # contributions from asymmetric connected terms
+            # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
+            j1 = numpy.dot(G, x)
+            j1 += numpy.dot(x, G)
+            hx += exponent * j1
+
+            return self.pack_uniq_var(hx - hx.T.conj())
+
+        return g, h_op, h_diag
+
+    def get_grad(self, u=None, proj=None):
+        if proj is None:
+            proj = self.atomic_pops(u)
+
+        exponent = self.exponent
+        popexp1 = lib.einsum('xii->xi', proj.real)**(exponent-1)
+        g = lib.einsum('xi,xij->ij', popexp1, proj)
+        return 2 * exponent * self.pack_uniq_var(g - g.T.conj())
+
+
+PMComplex = PipekComplex = PipekMezeyComplex
+
+
+if __name__ == '__main__':
+    from pyscf.pbc import gto, scf
+
+    atom = '''
     O          0.00000        0.00000        0.11779
     H          0.00000        0.75545       -0.47116
     H          0.00000       -0.75545       -0.47116
     '''
-    mol.basis = 'ccpvdz'
-    mol.build()
-    mf = scf.RHF(mol).run()
+    basis = 'ccpvdz'
+    a = numpy.eye(3) * 4
 
-    mlo = PM(mol)
-    mlo.verbose = 4
-    mlo.exponent = 2    # integer >= 2
-    mo0 = mf.mo_coeff[:,mf.mo_occ>1e-6]
-    mo = mlo.kernel(mo0)
-    isstable, mo1 = mlo.stability_jacobi()
-    if not isstable:
-        mo = mlo.kernel(mo1)
-        isstable, mo1 = mlo.stability_jacobi()
-        assert( isstable )
+    cell = gto.M(atom=atom, a=a, basis=basis).set(verbose=5)
+
+    kpt = cell.make_kpts([1,1,1], scaled_center=[0.37, 0.21, 0.85])[0]
+    # kpt = None
+
+    mf = scf.RHF(cell, kpt=kpt).rs_density_fit()
+    mf.kernel()
+
+    mo = mf.mo_coeff[:,mf.mo_occ>1e-6]
+    mlo = PM(cell, mo, kpt=kpt)
+    mlo.kernel()
+
+    # stability check
+    while True:
+        mo, stable = mlo.stability_jacobi(return_status=True)
+        # mo, stable = mlo.stability(return_status=True)
+        if stable:
+            break
+        mlo.kernel(mo)
+
+    mlo = PMComplex(cell, mo, kpt=kpt)
+    mlo.kernel()
+
+    # stability check
+    while True:
+        mo, stable = mlo.stability_jacobi(return_status=True)
+        # mo, stable = mlo.stability(return_status=True)
+        if stable:
+            break
+        mlo.kernel(mo)
+
+
+    # from pyscf import gto, scf
+    #
+    # mol = gto.Mole()
+    # mol.atom = '''
+    # O          0.00000        0.00000        0.11779
+    # H          0.00000        0.75545       -0.47116
+    # H          0.00000       -0.75545       -0.47116
+    # '''
+    # mol.basis = 'ccpvdz'
+    # mol.build()
+    # mf = scf.RHF(mol).run()
+    #
+    # def findiff_grad(func, x, delta=1e-4):
+    #     ''' Finite-difference gradient
+    #     '''
+    #     x = numpy.asarray(x)
+    #     n = x.size
+    #     g = numpy.zeros_like(x)
+    #     for i in range(n):
+    #         dx = numpy.zeros_like(x)
+    #         dx[i] = delta*0.5
+    #         g[i] = (func(x+dx) - func(x-dx)) / delta
+    #     return g
+    #
+    # def findiff_hess(func, x, delta=1e-4):
+    #     ''' Finite-difference Hessian
+    #     '''
+    #     x = numpy.asarray(x)
+    #     n = x.size
+    #     h = numpy.zeros((n,n), dtype=x.dtype)
+    #     for i in range(n):
+    #         dxi = numpy.zeros_like(x)
+    #         dxi[i] = delta*0.5
+    #         for j in range(i+1):
+    #             dxj = numpy.zeros_like(x)
+    #             dxj[j] = delta*0.5
+    #             hij = (func(x+dxi+dxj) + func(x-dxi-dxj) - func(x+dxi-dxj) - func(x-dxi+dxj)) / delta**2
+    #             h[i,j] = h[j,i] = hij
+    #     return h
+    #
+    # mo0 = mf.mo_coeff[:,mf.mo_occ>1e-6]
+    # # mo0 = mo0 + numpy.random.rand(*mo0.shape) * (0.1)
+    # mo0 = mo0 + numpy.random.rand(*mo0.shape) * (0.1+0.1j)
+    # # mlo = PM(mol, mo0)
+    # mlo = PMComplex(mol, mo0)
+    #
+    # g, h_op, h_diag = mlo.gen_g_hop()
+    # x = mlo.zero_uniq_var()
+    # h = numpy.zeros((mlo.pdim,mlo.pdim))
+    # for i in range(mlo.pdim):
+    #     x[i] = 1
+    #     h[:,i] = h_op(x)
+    #     x[i] = 0
+    #
+    # # finite difference
+    # def func(x):
+    #     u = mlo.extract_rotation(x)
+    #     return -mlo.cost_function(u)
+    #
+    # g1 = findiff_grad(func, x)
+    # g_err = abs(g-g1).max()
+    # print(f'Grad err: {g_err:.3e}')
+    #
+    # h1 = findiff_hess(func, x)
+    # h_err = abs(h-h1).max()
+    # print(f'Hess err: {h_err:.3e}')
+    #
+    # hd_err = abs(h_diag-numpy.diag(h1)).max()
+    # print(f'Hess-diag err: {hd_err:.3e}')
+    #
+    # # mlo = PM(mol)
+    # # mlo.verbose = 4
+    # # mlo.exponent = 2    # integer >= 2
+    # # mo0 = mf.mo_coeff[:,mf.mo_occ>1e-6]
+    # # mo = mlo.kernel(mo0)
+    # # isstable, mo1 = mlo.stability_jacobi()
+    # # if not isstable:
+    # #     mo = mlo.kernel(mo1)
+    # #     isstable, mo1 = mlo.stability_jacobi()
+    # #     assert( isstable )

@@ -42,95 +42,6 @@ class Water(unittest.TestCase):
         cls.mol.stdout.close()
         del cls.mol
 
-    def test_cost(self):
-        ''' Test for `cost_function`
-        '''
-        def test1(mlo, loss_ref):
-            for exponent in [2,3,4]:
-                mlo.set(exponent=exponent)
-                loss = mlo.cost_function()
-                self.assertAlmostEqual(loss, loss_ref[exponent], 6)
-
-        mol = self.mol
-
-        # real orbitals
-        s = mol.intor_symmetric('int1e_ovlp')
-        mo_coeff = lo.orth.schmidt(s)
-        norb = mo_coeff.shape[1]
-
-        mlo = lo.pipek.PipekMezey(mol, mo_coeff)
-
-        mlo.pop_method = 'meta-lowdin'
-        loss_ref = {
-            2: 11.0347269392,
-            3: 10.5595998735,
-            4: 10.1484720537,
-        }
-        test1(mlo, loss_ref)
-
-        mlo.pop_method = 'iao'
-        loss_ref = {
-            2: 11.1065896746,
-            3: 10.6685385701,
-            4: 10.2886276646,
-        }
-        test1(mlo, loss_ref)
-
-        mlo.pop_method = 'iao-biorth'
-        loss_ref = {
-            2: 12.4952121786,
-            3: 12.7449891556,
-            4: 13.0116401223,
-        }
-        test1(mlo, loss_ref)
-
-        mlo.pop_method = 'becke'
-        loss_ref = {
-            2: 9.4230597975,
-            3: 8.2191241100,
-            4: 7.3049902834,
-        }
-        test1(mlo, loss_ref)
-
-
-        # complex orbitals
-        mo_coeff = mo_coeff + np.cos(mo_coeff)*0.01j
-
-        mlo = lo.pipek.PipekMezey(mol, mo_coeff)
-
-        mlo.pop_method = 'meta-lowdin'
-        loss_ref = {
-            2: 11.0457506419,
-            3: 10.5751208425,
-            4: 10.1685286213,
-        }
-        test1(mlo, loss_ref)
-
-        mlo.pop_method = 'iao'
-        loss_ref = {
-            2: 11.1150294738,
-            3: 10.6804270421,
-            4: 10.3041148130,
-        }
-        test1(mlo, loss_ref)
-
-        mlo.pop_method = 'iao-biorth'
-        loss_ref = {
-            2: 12.5546672498,
-            3: 12.8367709709,
-            4: 13.1376228051,
-        }
-        test1(mlo, loss_ref)
-
-        mlo.pop_method = 'becke'
-        loss_ref = {
-            2: 9.4333937604,
-            3: 8.2317523225,
-            4: 7.3198256336,
-        }
-        test1(mlo, loss_ref)
-
-
     def test_grad_hess(self):
         ''' Test for `get_grad` and `gen_g_hop`
         '''
@@ -140,7 +51,7 @@ class Water(unittest.TestCase):
             norb = mo_coeff.shape[1]
             u0 = np.eye(norb)
 
-            mlo = lo.pipek.PipekMezey(mol, mo_coeff)
+            mlo = lo.pipek.PipekMezeyComplex(mol, mo_coeff)
             mlo.pop_method = 'meta-lowdin'
 
             x0 = mlo.zero_uniq_var()
@@ -188,7 +99,7 @@ def test_cost(mol, pop_method, exponent, loss_ref):
     mo_coeff = lo.orth.schmidt(s)
     norb = mo_coeff.shape[1]
 
-    mlo = lo.pipek.PipekMezey(mol, mo_coeff)
+    mlo = lo.pipek.PipekMezeyComplex(mol, mo_coeff)
     mlo.exponent = exponent
     mlo.pop_method = pop_method
     loss = mlo.cost_function()
@@ -231,5 +142,5 @@ def _num_hess(func, x0, step_length):
 
 
 if __name__ == "__main__":
-    print("Full Tests for PipekMezey")
+    print("Full Tests for PipekMezeyComplex")
     unittest.main()
