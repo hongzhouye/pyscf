@@ -89,7 +89,8 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, s=None, charge_ma
 
         if method == 'iao-biorth':
             ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
-            iao_coefftild = numpy.asarray(numpy.linalg.solve(ovlp, iao_coeff.T).T, order='C')
+            iao_coefftild = numpy.asarray(numpy.linalg.solve(ovlp,
+                                          iao_coeff.conj().T).conj().T, order='C')
 
             csc = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coeff))
             csctild = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coefftild))
@@ -215,11 +216,11 @@ class PipekMezey(boys.OrbitalLocalizer):
     def dump_flags(self, verbose=None):
         boys.OrbitalLocalizer.dump_flags(self, verbose)
         logger.info(self, 'pop_method = %s',self.pop_method)
-        logger.info(self, 'kpt = %s',self.kpt)
+        logger.info(self, 'exponent = %s',self.exponent)
 
     def gen_g_hop(self, u=None):
         exponent = self.exponent
-        projR = self.atomic_pops(u).real
+        projR = self.atomic_pops(u).real    # real rotations only need proj.real
         pop = lib.einsum('xii->xi', projR)
         popexp1 = pop**(exponent-1)
         popexp2 = pop**(exponent-2)
@@ -290,9 +291,6 @@ class PipekMezey(boys.OrbitalLocalizer):
     def stability_jacobi(self, verbose=None, return_status=False):
         return stability_jacobi(self, verbose=verbose, return_status=return_status)
 
-    def stability(self, verbose=None, return_status=False):
-        return stability_newton(self, verbose=verbose, return_status=return_status)
-
 
 PM = Pipek = PipekMezey
 
@@ -347,7 +345,7 @@ class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
             j1 += numpy.dot(x, G)
             hx += exponent * j1
 
-            return self.pack_uniq_var(hx - hx.T.conj())
+            return self.pack_uniq_var(hx - hx.conj().T)
 
         return g, h_op, h_diag
 
@@ -358,7 +356,7 @@ class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
         exponent = self.exponent
         popexp1 = lib.einsum('xii->xi', proj.real)**(exponent-1)
         g = lib.einsum('xi,xij->ij', popexp1, proj)
-        return 2 * exponent * self.pack_uniq_var(g - g.T.conj())
+        return 2 * exponent * self.pack_uniq_var(g - g.conj().T)
 
 
 PMComplex = PipekComplex = PipekMezeyComplex

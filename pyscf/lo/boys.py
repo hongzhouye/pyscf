@@ -29,11 +29,11 @@ from pyscf.lib import logger
 from pyscf.soscf import ciah
 from pyscf.lo import orth, cholesky_mos
 from pyscf.lo.stability import stability_newton
+from pyscf.tools import mo_mapping
 from pyscf import __config__
 
 
 def kernel(localizer, mo_coeff=None, callback=None, verbose=None):
-    from pyscf.tools import mo_mapping
     if mo_coeff is not None:
         localizer.mo_coeff = numpy.asarray(mo_coeff, order='C')
     if localizer.mo_coeff.shape[1] <= 1:
@@ -105,8 +105,7 @@ def kernel(localizer, mo_coeff=None, callback=None, verbose=None):
     log.timer(localizer.__class__.__name__, *cput0)
 # Sort the localized orbitals, to make each localized orbitals as close as
 # possible to the corresponding input orbitals
-    sorted_idx = mo_mapping.mo_1to1map(u0)
-    localizer.mo_coeff = lib.dot(localizer.mo_coeff, u0[:,sorted_idx])
+    localizer.mo_coeff = localizer.sort_orb(u0)
     return localizer.mo_coeff
 
 
@@ -188,7 +187,6 @@ class OrbitalLocalizer(lib.StreamObject, ciah.CIAHOptimizerMixin):
         log.info('ah_max_cycle = %s'   , self.ah_max_cycle   )
         log.info('ah_trust_region = %s', self.ah_trust_region)
         log.info('init_guess = %s'     , self.init_guess     )
-        log.info('norb = %s'           , self.norb     )
 
     def get_init_guess(self, key='atomic'):
         '''Generate initial guess for localization.
@@ -218,6 +216,10 @@ class OrbitalLocalizer(lib.StreamObject, ciah.CIAHOptimizerMixin):
         mo_init = cholesky_mos(self.mo_coeff)
         S = self.mol.intor_symmetric('int1e_ovlp')
         return numpy.linalg.multi_dot([self.mo_coeff.T, S, mo_init])
+
+    def sort_orb(self, u):
+        sorted_idx = mo_mapping.mo_1to1map(u)
+        return self.rotate_orb(u[:,sorted_idx])
 
     def stability(self, verbose=None, return_status=False):
         return stability_newton(self, verbose=verbose, return_status=return_status)

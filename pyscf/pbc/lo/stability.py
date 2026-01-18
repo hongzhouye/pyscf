@@ -1,40 +1,30 @@
+#!/usr/bin/env python
+# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Author: Hong-Zhou Ye <hzyechem@gmail.com>
+#         Genzhi Yang <genzyang17@gmail.com>
+#
+
+
 import numpy
 
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf import __config__
 
-from pyscf.scf.stability import STAB_NROOTS, STAB_TOL, dump_status
-
-
-def stability_newton(mlo, verbose=None, return_status=False, nroots=STAB_NROOTS, tol=STAB_TOL):
-    log = logger.new_logger(mlo, verbose)
-    g, hop, hdiag = mlo.gen_g_hop()
-
-    def precond(dx, e, x0):
-        hdiagd = hdiag - e
-        hdiagd[abs(hdiagd)<1e-8] = 1e-8
-        return dx/hdiagd
-
-    x0 = numpy.zeros_like(g)
-    mask = abs(g) > 1e-10
-    x0[mask] = 1. / hdiag[mask]
-    x0 = numpy.vstack((x0, numpy.random.rand(5, x0.size)))  # add a few random vectors
-    e, v = lib.davidson(hop, x0, precond, tol=tol, verbose=log.verbose-1, nroots=nroots)
-    log.info('stability: lowest eigs of H = %s', e)
-    if nroots != 1:
-        e, v = e[0], v[0]
-    stable = not (e < -1e-5)
-    dump_status(log, stable, f'{mlo.__class__.__name__}', 'internal')
-    if stable:
-        mo = mlo.mo_coeff
-    else:
-        u = mlo.extract_rotation(v)
-        mo = mlo.rotate_orb(u)
-    if return_status:
-        return mo, stable
-    else:
-        return mo
+from pyscf.lo.stability import stability_newton
 
 
 def stability_jacobi(mlo, verbose=None, return_status=False):
@@ -49,22 +39,23 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
     s2ts = numpy.sin(thetas*2)
 
     def update_rotation_local_(u, theta, i, j):
-        xi = x[:,i].copy()
-        xj = x[:,j].copy()
-        x[:,i] = xi*numpy.cos(theta) + xj*numpy.sin(theta)
-        x[:,j] = -xi*numpy.sin(theta) + xj*numpy.cos(theta)
+        for x in u:
+            xi = x[:,i].copy()
+            xj = x[:,j].copy()
+            x[:,i] = xi*numpy.cos(theta) + xj*numpy.sin(theta)
+            x[:,j] = -xi*numpy.sin(theta) + xj*numpy.cos(theta)
 
     u = mlo.identity_rotation()
     stable = True
     while True:
+        # TODO: adjust this after changing atomic pops
         proj = mlo.atomic_pops(u)
 
-        Lij = proj.real
+        Lij = lib.einsum('ktxij->xij', proj.real)
         Lji = Lij.transpose(0,2,1)
         Lii = lib.einsum('xii->xi', Lij)
         Lijji = Lij + Lji
         Liijj = Lii[:,:,None] - Lii[:,None,:]
-        L = numpy.tril( (Lijji**2 - Liijj**2).sum(axis=0), k=1 ) * 0.5
 
         Aij = (Lijji**2 - Liijj**2).sum(axis=0)[tril_ijdx]
         Bij = (Lijji * Liijj).sum(axis=0)[tril_ijdx]
