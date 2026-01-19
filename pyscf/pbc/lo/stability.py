@@ -48,10 +48,7 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
     u = mlo.identity_rotation()
     stable = True
     while True:
-        # TODO: adjust this after changing atomic pops
-        proj = mlo.atomic_pops(u)
-
-        Lij = lib.einsum('ktxij->xij', proj.real)
+        Lij = mlo.atomic_pops(u, mode='00').real
         Lji = Lij.transpose(0,2,1)
         Lii = lib.einsum('xii->xi', Lij)
         Lijji = Lij + Lji

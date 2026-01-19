@@ -19,7 +19,6 @@
 #include <complex.h>
 //#include <omp.h>
 #include "config.h"
-// #include "vhf/fblas.h"
 #include "np_helper/np_helper.h"
 
 /*
@@ -30,11 +29,13 @@
 void NPomp_douter(const size_t m, const size_t n,
                   const double *__restrict__ a,
                   const double *__restrict__ b,
-                  double *__restrict__ c) {
-#pragma omp parallel for schedule(static)
+                  double *__restrict__ c)
+{
+    #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < m; ++i) {
         const double ai = a[i];
         double *ci = c + i * n;
+
         #pragma omp simd
         for (size_t j = 0; j < n; ++j) {
             ci[j] += ai * b[j];
@@ -54,8 +55,8 @@ void NPomp_zouter(const size_t m, const size_t n,
 {
     #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < m; ++i) {
-        const double complex ai = a[i];   // load once
-        double complex *ci = c + i * n;   // row pointer
+        const double complex ai = a[i];
+        double complex *ci = c + i * n;
 
         #pragma omp simd
         for (size_t j = 0; j < n; ++j) {
