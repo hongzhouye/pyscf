@@ -49,10 +49,10 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
     s2ts = numpy.sin(thetas*2)
 
     def update_rotation_local_(u, theta, i, j):
-        xi = x[:,i].copy()
-        xj = x[:,j].copy()
-        x[:,i] = xi*numpy.cos(theta) + xj*numpy.sin(theta)
-        x[:,j] = -xi*numpy.sin(theta) + xj*numpy.cos(theta)
+        ui = u[:,i].copy()
+        uj = u[:,j].copy()
+        u[:,i] = ui*numpy.cos(theta) + uj*numpy.sin(theta)
+        u[:,j] = -ui*numpy.sin(theta) + uj*numpy.cos(theta)
 
     u = mlo.identity_rotation()
     stable = True

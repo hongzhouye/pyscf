@@ -116,9 +116,9 @@ class Water(unittest.TestCase):
 
         mlo.pop_method = 'iao-biorth'
         loss_ref = {
-            2: 12.5546672498,
-            3: 12.8367709709,
-            4: 13.1376228051,
+            2: 12.5189728118,
+            3: 12.7814008434,
+            4: 13.0613620163,
         }
         test1(mlo, loss_ref)
 

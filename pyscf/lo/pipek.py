@@ -30,11 +30,12 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.lo import orth
 from pyscf.lo import boys
+from pyscf.lo import iao
 from pyscf.lo.stability import stability_jacobi, stability_newton
 from pyscf import __config__
 
 
-def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, s=None, charge_matrices=None):
+def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
     '''
     Kwargs:
         method : string
@@ -56,61 +57,79 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, s=None, charge_ma
     nmo = mo_coeff.shape[1]
     proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
 
-    if s is None:
-        if getattr(mol, 'pbc_intor', None):  # whether mol object is a cell
-            s = mol.pbc_intor('int1e_ovlp', hermi=1, kpt=kpt)
-        else:
-            s = mol.intor_symmetric('int1e_ovlp')
-
     if method == 'becke':
-        if charge_matrices is None:
+        if proj_data is None:
             charge_matrices = becke_charge_matrices(mol)
+        else:
+            charge_matrices = proj_data
 
         for i in range(mol.natm):
             proj[i] = reduce(lib.dot, (mo_coeff.conj().T, charge_matrices[i], mo_coeff))
 
     elif method == 'mulliken':
+        s = get_ovlp(mol, kpt)
         for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
             csc = reduce(numpy.dot, (mo_coeff[p0:p1].conj().T, s[p0:p1], mo_coeff))
             proj[i] = (csc + csc.conj().T) * .5
 
     elif method in ('lowdin', 'meta-lowdin'):
-        csc = reduce(lib.dot, (mo_coeff.conj().T, s, orth.orth_ao(mol, method, 'ANO', s=s)))
-        for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
+        if proj_data is None:
+            s = get_ovlp(mol, kpt)
+            proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s)
+            offset_nr_by_atom = mol.offset_nr_by_atom()
+        else:
+            proj_coeff, s, offset_nr_by_atom = proj_data
+        csc = reduce(lib.dot, (mo_coeff.conj().T, s, proj_coeff))
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
             proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
 
     elif method in ('iao', 'ibo', 'iao-biorth'):
-        from pyscf.lo import iao
-
-        if kpt is None:
-            iao_coeff = iao.iao(mol, mo_coeff)
-        else:
-            iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt])[0]
+        if proj_data is None:
+            s = get_ovlp(mol, kpt)
+            if kpt is None:
+                iao_coeff = iao.iao(mol, mo_coeff)
+            else:
+                iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt])[0]
+            iao_mol = iao.reference_mol(mol)
+            offset_nr_by_atom = iao_mol.offset_nr_by_atom()
 
         if method == 'iao-biorth':
-            ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
-            iao_coefftild = numpy.asarray(numpy.linalg.solve(ovlp,
-                                          iao_coeff.conj().T).conj().T, order='C')
+            if proj_data is None:
+                ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
+                iaotild_coeff = numpy.asarray(numpy.linalg.solve(ovlp,
+                                              iao_coeff.conj().T).conj().T, order='C')
+            else:
+                iao_coeff, iaotild_coeff, s, offset_nr_by_atom = proj_data
 
             csc = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coeff))
-            csctild = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coefftild))
+            csctild = reduce(lib.dot, (mo_coeff.conj().T, s, iaotild_coeff))
 
-            iao_mol = iao.reference_mol(mol)
-            for i, (b0, b1, p0, p1) in enumerate(iao_mol.offset_nr_by_atom()):
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj1 = numpy.dot(csc[:,p0:p1], csctild[:,p0:p1].conj().T)
                 proj[i] = (proj1 + proj1.conj().T) * 0.5
         else:
-            iao_coeff = orth.vec_lowdin(iao_coeff, s)
+            if proj_data is None:
+                iao_coeff = orth.vec_lowdin(iao_coeff, s)
+            else:
+                iao_coeff, s, offset_nr_by_atom = proj_data
+
             csc = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coeff))
 
-            iao_mol = iao.reference_mol(mol)
-            for i, (b0, b1, p0, p1) in enumerate(iao_mol.offset_nr_by_atom()):
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
 
     else:
         raise KeyError('method = %s' % method)
 
     return proj
+
+
+def get_ovlp(mol, kpt=None):
+    if getattr(mol, 'pbc_intor', None):  # whether mol object is a cell
+        s = mol.pbc_intor('int1e_ovlp', hermi=1, kpt=kpt)
+    else:
+        s = mol.intor_symmetric('int1e_ovlp')
+    return s
 
 
 def becke_charge_matrices(mol):
@@ -205,18 +224,58 @@ class PipekMezey(boys.OrbitalLocalizer):
     conv_tol = getattr(__config__, 'lo_pipek_PM_conv_tol', 1e-6)
     exponent = getattr(__config__, 'lo_pipek_PM_exponent', 2)  # any integer >= 2
 
-    _keys = {'pop_method', 'conv_tol', 'exponent', 'kpt'}
+    _keys = {'pop_method', 'conv_tol', 'exponent', 'kpt', '_proj_data'}
 
     def __init__(self, mol, mo_coeff=None, pop_method=None, kpt=None):
         boys.OrbitalLocalizer.__init__(self, mol, mo_coeff)
         if pop_method is not None:
             self.pop_method = pop_method
         self.kpt = kpt
+        self._proj_data = None
 
     def dump_flags(self, verbose=None):
         boys.OrbitalLocalizer.dump_flags(self, verbose)
         logger.info(self, 'pop_method = %s',self.pop_method)
         logger.info(self, 'exponent = %s',self.exponent)
+
+    def get_proj_data(self, mol=None, mo_coeff=None, method=None, kpt=None):
+        if mol is None: mol = self.mol
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if method is None: method = self.pop_method.lower().replace('_', '-')
+        if kpt is None: kpt = self.kpt
+
+        if method == 'becke':
+            proj_data = becke_charge_matrices(mol)
+
+        elif method == 'mulliken':
+            proj_data = None
+
+        elif method in ('lowdin', 'meta-lowdin'):
+            s = get_ovlp(mol, kpt)
+            proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s)
+            proj_data = (proj_coeff, s, mol.offset_nr_by_atom())
+
+        elif method in ('iao', 'ibo', 'iao-biorth'):
+            s = get_ovlp(mol, kpt)
+            if kpt is None:
+                iao_coeff = iao.iao(mol, mo_coeff)
+            else:
+                iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt])[0]
+            iao_mol = iao.reference_mol(mol)
+
+            if method == 'iao-biorth':
+                ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
+                iaotild_coeff = numpy.asarray(numpy.linalg.solve(ovlp,
+                                              iao_coeff.conj().T).conj().T, order='C')
+                proj_data = (iao_coeff, iaotild_coeff, s, iao_mol.offset_nr_by_atom())
+            else:
+                iao_coeff = orth.vec_lowdin(iao_coeff, s)
+                proj_data = (iao_coeff, s, iao_mol.offset_nr_by_atom())
+
+        else:
+            raise KeyError('method = %s' % method)
+
+        return proj_data
 
     def gen_g_hop(self, u=None):
         exponent = self.exponent
@@ -278,18 +337,32 @@ class PipekMezey(boys.OrbitalLocalizer):
 
     @lib.with_doc(atomic_pops.__doc__)
     def atomic_pops(self, u=None):
-        mo_coeff = self.rotate_orb(u)
         mol = self.mol
-        method = self.pop_method.lower()
+        mo_coeff = self.rotate_orb(u)
+        method = self.pop_method
 
-        if not hasattr(self, "_charge_matrices"):
-            self._charge_matrices = becke_charge_matrices(mol) if method.lower() == "becke" else None
+        return atomic_pops(mol, mo_coeff, method, kpt=self.kpt, proj_data=self._proj_data)
 
-        return atomic_pops(mol, mo_coeff, method, kpt=self.kpt,
-                           charge_matrices=self._charge_matrices)
+    def kernel(self, mo_coeff=None, callback=None, verbose=None):
+        self._proj_data = self.get_proj_data()
+        mo_coeff = boys.kernel(self, mo_coeff, callback, verbose)
+        self._proj_data = None
+
+        return mo_coeff
 
     def stability_jacobi(self, verbose=None, return_status=False):
-        return stability_jacobi(self, verbose=verbose, return_status=return_status)
+        self._proj_data = self.get_proj_data()
+        res = stability_jacobi(self, verbose=verbose, return_status=return_status)
+        self._proj_data = None
+
+        return res
+
+    def stability(self, verbose=None, return_status=False):
+        self._proj_data = self.get_proj_data()
+        res = stability_newton(self, verbose=verbose, return_status=return_status)
+        self._proj_data = None
+
+        return res
 
 
 PM = Pipek = PipekMezey
@@ -302,6 +375,7 @@ class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
         if pop_method is not None:
             self.pop_method = pop_method
         self.kpt = kpt
+        self._proj_data = None
 
     def gen_g_hop(self, u=None):
         exponent = self.exponent
@@ -373,7 +447,24 @@ if __name__ == '__main__':
     basis = 'ccpvdz'
     a = numpy.eye(3) * 4
 
-    cell = gto.M(atom=atom, a=a, basis=basis).set(verbose=5)
+    # atom = '''
+    # H      1.2194     -0.1652      2.1600
+    # C      0.6825     -0.0924      1.2087
+    # C     -0.7075     -0.0352      1.1973
+    # H     -1.2644     -0.0630      2.1393
+    # C     -1.3898      0.0572     -0.0114
+    # H     -2.4836      0.1021     -0.0204
+    # C     -0.6824      0.0925     -1.2088
+    # H     -1.2194      0.1652     -2.1599
+    # C      0.7075      0.0352     -1.1973
+    # H      1.2641      0.0628     -2.1395
+    # C      1.3899     -0.0572      0.0114
+    # H      2.4836     -0.1022      0.0205
+    # '''
+    # basis = 'ccpvdz'
+    # a = numpy.eye(3) * 7
+
+    cell = gto.M(atom=atom, a=a, basis=basis).set(verbose=4)
 
     kpt = cell.make_kpts([1,1,1], scaled_center=[0.37, 0.21, 0.85])[0]
     # kpt = None
