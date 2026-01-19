@@ -75,7 +75,7 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
     elif method in ('lowdin', 'meta-lowdin'):
         if proj_data is None:
             s = get_ovlp(mol, kpt)
-            proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s)
+            proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s, adjust_phase=False)
             offset_nr_by_atom = mol.offset_nr_by_atom()
         else:
             proj_coeff, s, offset_nr_by_atom = proj_data
@@ -252,7 +252,7 @@ class PipekMezey(boys.OrbitalLocalizer):
 
         elif method in ('lowdin', 'meta-lowdin'):
             s = get_ovlp(mol, kpt)
-            proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s)
+            proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s, adjust_phase=False)
             proj_data = (proj_coeff, s, mol.offset_nr_by_atom())
 
         elif method in ('iao', 'ibo', 'iao-biorth'):

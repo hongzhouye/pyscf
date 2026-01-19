@@ -429,7 +429,7 @@ class KptsOrbitalLocalizer(lib.StreamObject, kciah.SubspaceCIAHOptimizerMixin):
         mo0 = lib.dot(mo_coeff[0], u00)
         u0 = [u00]
         for k in range(1,len(mo_coeff)):
-            u0.append( align_phase(mo_coeff[k], mo_coeff[0]) )
+            u0.append( align_phase(mo_coeff[k], mo0) )
 
         return numpy.asarray(u0)
 
