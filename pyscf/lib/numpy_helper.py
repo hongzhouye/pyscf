@@ -1430,6 +1430,25 @@ def broadcast_mul(a, b, out=None):
        ctypes.c_size_t(out_strides[1]))
     return out
 
+def outer(a, b, out=None):
+    if a.dtype == numpy.float64 and b.dtype == numpy.float64:
+        fn = _np_helper.NPomp_douter
+    else:
+        fn = _np_helper.NPomp_zouter
+        if a.dtype != numpy.complex128: a = a.astype(numpy.complex128)
+        if b.dtype != numpy.complex128: b = b.astype(numpy.complex128)
+
+    if out is None:
+        out = numpy.zeros((a.size, b.size), dtype=a.dtype)
+
+    fn(ctypes.c_size_t(a.size),
+       ctypes.c_size_t(b.size),
+       a.ctypes.data_as(ctypes.c_void_p),
+       b.ctypes.data_as(ctypes.c_void_p),
+       out.ctypes.data_as(ctypes.c_void_p))
+
+    return out
+
 def ndarray_pointer_2d(array):
     '''Return an array that contains the addresses of the first element in each
     row of the input 2d array.
