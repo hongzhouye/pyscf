@@ -266,7 +266,7 @@ def pre_orth_ao_atm_scf(mol):
     return scipy.linalg.block_diag(*coeff)
 
 
-def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=REF_BASIS, s=None):
+def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=REF_BASIS, s=None, adjust_phase=True):
     '''Orthogonalize AOs
 
     Kwargs:
@@ -325,9 +325,10 @@ def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=REF_BASIS, s=None):
         c_orth = nao._nao_sub(mol, weight, pre_orth_ao, s)
 
     # adjust phase
-    for i in range(c_orth.shape[1]):
-        if c_orth[i,i] < 0:
-            c_orth[:,i] *= -1
+    if c_orth.dtype == numpy.float64 and adjust_phase:
+        for i in range(c_orth.shape[1]):
+            if c_orth[i,i] < 0:
+                c_orth[:,i] *= -1
     return c_orth
 
 del (ORTH_METHOD)
