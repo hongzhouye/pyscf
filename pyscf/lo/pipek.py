@@ -298,27 +298,51 @@ class PipekMezey(boys.OrbitalLocalizer):
         # hessian vector product
         G = lib.einsum('xi,xij->ij', popexp1, projR)
 
-        def h_op(x):
-            x = self.unpack_uniq_var(x)
+        mem_avail = self.mol.max_memory - lib.current_memory()[0]
+        if mem_avail * 0.5 > self.norb**3 * 8/1024**2:
+            QP = lib.einsum('xj,xil->ilj', popexp1, projR)
+            def h_op(x):
+                x = self.unpack_uniq_var(x)
 
-            projx = lib.einsum('xik,kj->xij', projR, x)
+                # contributions from disconnected term
+                j0 = popexp2 * lib.einsum('xik,ki->xi', projR, x)
+                j1 = lib.einsum('xi,xij->ij', j0, projR)
+                hx = 4 * exponent * (exponent-1) * j1
 
-            # contributions from disconnected term
-            j0 = popexp2 * lib.einsum('xii->xi', projx)
-            j1 = lib.einsum('xi,xij->ij', j0, projR)
-            hx = 4 * exponent * (exponent-1) * j1
+                # contributions symmetric connected terms
+                j1 = lib.einsum('ilj,lj->ij', QP, x)
+                hx += -2 * exponent * j1
 
-            # contributions symmetric connected terms
-            j1 = lib.einsum('xj,xij->ij', popexp1, projx)
-            hx += -2 * exponent * j1
+                # contributions from asymmetric connected terms
+                # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
+                j1 = numpy.dot(G, x)
+                j1 += numpy.dot(x, G)
+                hx += exponent * j1
 
-            # contributions from asymmetric connected terms
-            # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
-            j1 = numpy.dot(G, x)
-            j1 += numpy.dot(x, G)
-            hx += exponent * j1
+                return self.pack_uniq_var(hx - hx.T)
 
-            return self.pack_uniq_var(hx - hx.T)
+        else:
+            def h_op(x):
+                x = self.unpack_uniq_var(x)
+
+                projx = lib.einsum('xik,kj->xij', projR, x)
+
+                # contributions from disconnected term
+                j0 = popexp2 * lib.einsum('xii->xi', projx)
+                j1 = lib.einsum('xi,xij->ij', j0, projR)
+                hx = 4 * exponent * (exponent-1) * j1
+
+                # contributions symmetric connected terms
+                j1 = lib.einsum('xj,xij->ij', popexp1, projx)
+                hx += -2 * exponent * j1
+
+                # contributions from asymmetric connected terms
+                # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
+                j1 = numpy.dot(G, x)
+                j1 += numpy.dot(x, G)
+                hx += exponent * j1
+
+                return self.pack_uniq_var(hx - hx.T)
 
         return g, h_op, h_diag
 
@@ -399,27 +423,51 @@ class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
         # hessian vector product
         G = lib.einsum('xi,xij->ij', popexp1, proj)
 
-        def h_op(x):
-            x = self.unpack_uniq_var(x)
+        mem_avail = self.mol.max_memory - lib.current_memory()[0]
+        if mem_avail * 0.5 > self.norb**3 * 16/1024**2:
+            QP = lib.einsum('xj,xil->ilj', popexp1, proj)
+            def h_op(x):
+                x = self.unpack_uniq_var(x)
 
-            projx = lib.einsum('xik,kj->xij', proj, x)
+                # contributions from disconnected term
+                j0 = popexp2 * lib.einsum('xik,ki->xi', proj, x).real
+                j1 = lib.einsum('xi,xij->ij', j0, proj)
+                hx = 4 * exponent * (exponent-1) * j1.astype(numpy.complex128)
 
-            # contributions from disconnected term
-            j0 = popexp2 * lib.einsum('xii->xi', projx.real)
-            j1 = lib.einsum('xi,xij->ij', j0, proj)
-            hx = 4 * exponent * (exponent-1) * j1.astype(numpy.complex128)
+                # contributions symmetric connected terms
+                j1 = lib.einsum('ilj,lj->ij', QP, x)
+                hx += -2 * exponent * j1
 
-            # contributions symmetric connected terms
-            j1 = lib.einsum('xj,xij->ij', popexp1, projx)
-            hx += -2 * exponent * j1
+                # contributions from asymmetric connected terms
+                # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
+                j1 = numpy.dot(G, x)
+                j1 += numpy.dot(x, G)
+                hx += exponent * j1
 
-            # contributions from asymmetric connected terms
-            # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
-            j1 = numpy.dot(G, x)
-            j1 += numpy.dot(x, G)
-            hx += exponent * j1
+                return self.pack_uniq_var(hx - hx.conj().T)
 
-            return self.pack_uniq_var(hx - hx.conj().T)
+        else:
+            def h_op(x):
+                x = self.unpack_uniq_var(x)
+
+                projx = lib.einsum('xik,kj->xij', proj, x)
+
+                # contributions from disconnected term
+                j0 = popexp2 * lib.einsum('xii->xi', projx.real)
+                j1 = lib.einsum('xi,xij->ij', j0, proj)
+                hx = 4 * exponent * (exponent-1) * j1.astype(numpy.complex128)
+
+                # contributions symmetric connected terms
+                j1 = lib.einsum('xj,xij->ij', popexp1, projx)
+                hx += -2 * exponent * j1
+
+                # contributions from asymmetric connected terms
+                # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
+                j1 = numpy.dot(G, x)
+                j1 += numpy.dot(x, G)
+                hx += exponent * j1
+
+                return self.pack_uniq_var(hx - hx.conj().T)
 
         return g, h_op, h_diag
 
