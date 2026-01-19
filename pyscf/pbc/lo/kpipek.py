@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 # Author: Hong-Zhou Ye <hzyechem@gmail.com>
-#         Genzhi Yang <genzyang17@gmail.com>
+#         Gengzhi Yang <genzyang17@gmail.com>
 #
 
 '''
@@ -31,6 +31,7 @@ from pyscf.lib import logger
 from pyscf.pbc.soscf import kciah
 from pyscf.lo import orth, cholesky_mos
 from pyscf.lo import boys
+from pyscf.lo import iao
 from pyscf.lo.stability import stability_newton
 from pyscf.pbc.lo.stability import stability_jacobi
 from pyscf.pbc.lib.kpts import KPoints
@@ -144,7 +145,7 @@ def get_QP(cell, mo_coeff, kpts, exponent, method='meta_lowdin', s=None, charge_
     return QP
 
 
-def atomic_pops(cell, mo_coeff, kpts, method='meta_lowdin', s=None, charge_matrices=None):
+def atomic_pops(cell, mo_coeff, kpts, method='meta_lowdin', proj_data=None):
     '''
     Kwargs:
         method : string
@@ -169,10 +170,8 @@ def atomic_pops(cell, mo_coeff, kpts, method='meta_lowdin', s=None, charge_matri
     scell, phase = k2gamma.get_phase(cell, kpts, kmesh=kmesh)
     proj = numpy.empty((scell.natm,nkpts,nkpts,nmo,nmo), dtype=mo_coeff.dtype)
 
-    if s is None:
-        s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
-
     if method == 'mulliken':
+        s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
         proj_coeff = lib.einsum('Rk,kmi->Rmki', phase, mo_coeff) / nkpts**0.5
         proj_coeff = proj_coeff.reshape(-1,nkpts*nmo)
         s_scell = lib.einsum('Rk,kmn,Sk->RmSn', phase, s, phase.conj()).reshape(nkpts*nao,-1)
@@ -182,40 +181,56 @@ def atomic_pops(cell, mo_coeff, kpts, method='meta_lowdin', s=None, charge_matri
             proj[i] = proj1.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3) * 0.5
 
     elif method in ('lowdin', 'meta-lowdin'):
-        s_scell = lib.einsum('Rk,kmn,Sk->RmSn', phase, s, phase.conj()).reshape(nkpts*nao,-1)
-        proj_coeff = orth.orth_ao(scell, method, 'ANO', s=s_scell).reshape(nkpts,nao,nkpts,-1)
-        proj_coeff = lib.einsum('Rk,RmSx->kmSx', phase.conj(), proj_coeff) / nkpts**0.5
+        if proj_data is None:
+            s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
+            s_scell = lib.einsum('Rk,kmn,Sk->RmSn', phase, s, phase.conj()).reshape(nkpts*nao,-1)
+            proj_coeff = orth.orth_ao(scell, method, 'ANO', s=s_scell).reshape(nkpts,nao,nkpts,-1)
+            proj_coeff = lib.einsum('Rk,RmSx->kmSx', phase.conj(), proj_coeff) / nkpts**0.5
+            offset_nr_by_atom = scell.offset_nr_by_atom()
+        else:
+            proj_coeff, s, offset_nr_by_atom = proj_data
+
         kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
         kcsc = kcsc.reshape(nkpts*nmo,-1)
-        for i, (b0, b1, p0, p1) in enumerate(scell.offset_nr_by_atom()):
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
             proj1 = numpy.dot(kcsc[:,p0:p1], kcsc[:,p0:p1].conj().T)
             proj[i] = proj1.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3)
 
     elif method in ('iao', 'ibo', 'iao-biorth'):
-        from pyscf.lo import iao
-
-        iao_coeff = iao.iao(cell, mo_coeff, kpts=kpts)
+        if proj_data is None:
+            s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
+            iao_coeff = iao.iao(cell, mo_coeff, kpts=kpts)
+            iao_scell = iao.reference_mol(scell)
+            offset_nr_by_atom = iao_scell.offset_nr_by_atom()
 
         if method == 'iao-biorth':
-            proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
-            ovlp = lib.einsum('kmx,kmn,kny->kxy', iao_coeff.conj(), s, iao_coeff)
-            iaotild_coeff = numpy.asarray([numpy.linalg.solve(ovlp[k],
-                                           iao_coeff[k].conj().T).conj().T
-                                           for k in range(nkpts)], order='C')
-            projtild_coeff = lib.einsum('kmx,Sk->kmSx', iaotild_coeff, phase.conj()) / nkpts**0.5
+            if proj_data is None:
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
+                ovlp = lib.einsum('kmx,kmn,kny->kxy', iao_coeff.conj(), s, iao_coeff)
+                iaotild_coeff = numpy.asarray([numpy.linalg.solve(ovlp[k],
+                                               iao_coeff[k].conj().T).conj().T
+                                               for k in range(nkpts)], order='C')
+                projtild_coeff = lib.einsum('kmx,Sk->kmSx', iaotild_coeff,
+                                            phase.conj()) / nkpts**0.5
+            else:
+                proj_coeff, projtild_coeff, s, offset_nr_by_atom = proj_data
 
             kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
             kcsctild = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, projtild_coeff)
             kcsc = kcsc.reshape(nkpts*nmo,-1)
             kcsctild = kcsctild.reshape(nkpts*nmo,-1)
-            iao_scell = iao.reference_mol(scell)
-            for i, (b0, b1, p0, p1) in enumerate(iao_scell.offset_nr_by_atom()):
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj1 = numpy.dot(kcsc[:,p0:p1], kcsctild[:,p0:p1].conj().T)
                 proj1 += numpy.dot(kcsctild[:,p0:p1], kcsc[:,p0:p1].conj().T)
                 proj[i] = proj1.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3) * 0.5
         else:
-            proj_coeff = numpy.asarray([orth.vec_lowdin(iao_coeff[k], s[k]) for k in range(nkpts)])
-            proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
+            if proj_data is None:
+                proj_coeff = numpy.asarray([orth.vec_lowdin(iao_coeff[k], s[k])
+                                            for k in range(nkpts)])
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
+            else:
+                proj_coeff, s, offset_nr_by_atom = proj_data
+
             kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
             kcsc = kcsc.reshape(nkpts*nmo,-1)
             iao_scell = iao.reference_mol(scell)
@@ -244,7 +259,7 @@ class KptsOrbitalLocalizer(lib.StreamObject, kciah.SubspaceCIAHOptimizerMixin):
     _keys = {
         'conv_tol', 'conv_tol_grad', 'max_cycle', 'max_iters',
         'max_stepsize', 'ah_trust_region', 'ah_start_tol',
-        'ah_max_cycle', 'init_guess', 'cell', 'mo_coeff', 'kpts',
+        'ah_max_cycle', 'init_guess', 'cell', 'mo_coeff', 'kpts'
     }
 
     def __init__(self, cell, mo_coeff, kpts):
@@ -324,9 +339,6 @@ class KptsOrbitalLocalizer(lib.StreamObject, kciah.SubspaceCIAHOptimizerMixin):
         u00 = u.sum(axis=0) / len(self.kpts)
         sorted_idx = mo_mapping.mo_1to1map(u00)
         return self.rotate_orb([uk[:,sorted_idx] for uk in u])
-
-    def stability(self, verbose=None, return_status=False):
-        return stability_newton(self, verbose=verbose, return_status=return_status)
 
     kernel = boys.kernel
 
@@ -446,17 +458,66 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
     conv_tol = getattr(__config__, 'lo_pipek_PM_conv_tol', 1e-6)
     exponent = getattr(__config__, 'lo_pipek_PM_exponent', 2)  # any integer >= 2
 
-    _keys = {'pop_method', 'conv_tol', 'exponent'}
+    _keys = {'pop_method', 'conv_tol', 'exponent', '_proj_data'}
 
     def __init__(self, cell, mo_coeff, kpts, pop_method=None):
         KptsOrbitalLocalizer.__init__(self, cell, mo_coeff, kpts)
         if pop_method is not None:
             self.pop_method = pop_method
+        self._proj_data = None
 
     def dump_flags(self, verbose=None):
         KptsOrbitalLocalizer.dump_flags(self, verbose)
         logger.info(self, 'pop_method = %s',self.pop_method)
         logger.info(self, 'exponent = %s',self.exponent)
+
+    def get_proj_data(self, cell=None, mo_coeff=None, method=None, kpts=None):
+        if cell is None: cell = self.cell
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if method is None: method = self.pop_method.lower().replace('_', '-')
+        if kpts is None: kpts = self.kpts
+
+        mo_coeff = numpy.asarray(mo_coeff)
+        nkpts,nao,nmo = mo_coeff.shape
+        kmesh = get_kmesh(cell, kpts)
+        scell, phase = k2gamma.get_phase(cell, kpts, kmesh=kmesh)
+
+        if method == 'mulliken':
+            proj_data = None
+
+        elif method in ('lowdin', 'meta-lowdin'):
+            s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
+            s_scell = lib.einsum('Rk,kmn,Sk->RmSn', phase, s, phase.conj()).reshape(nkpts*nao,-1)
+            proj_coeff = orth.orth_ao(scell, method, 'ANO', s=s_scell).reshape(nkpts,nao,nkpts,-1)
+            proj_coeff = lib.einsum('Rk,RmSx->kmSx', phase.conj(), proj_coeff) / nkpts**0.5
+            offset_nr_by_atom = scell.offset_nr_by_atom()
+            proj_data = (proj_coeff, s, offset_nr_by_atom)
+
+        elif method in ('iao', 'ibo', 'iao-biorth'):
+            s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
+            iao_coeff = iao.iao(cell, mo_coeff, kpts=kpts)
+            iao_scell = iao.reference_mol(scell)
+            offset_nr_by_atom = iao_scell.offset_nr_by_atom()
+
+            if method == 'iao-biorth':
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
+                ovlp = lib.einsum('kmx,kmn,kny->kxy', iao_coeff.conj(), s, iao_coeff)
+                iaotild_coeff = numpy.asarray([numpy.linalg.solve(ovlp[k],
+                                               iao_coeff[k].conj().T).conj().T
+                                               for k in range(nkpts)], order='C')
+                projtild_coeff = lib.einsum('kmx,Sk->kmSx', iaotild_coeff,
+                                            phase.conj()) / nkpts**0.5
+                proj_data = (proj_coeff, projtild_coeff, s, offset_nr_by_atom)
+            else:
+                proj_coeff = numpy.asarray([orth.vec_lowdin(iao_coeff[k], s[k])
+                                            for k in range(nkpts)])
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
+                proj_data = (proj_coeff, s, offset_nr_by_atom)
+
+        else:
+            raise KeyError('method = %s' % method)
+
+        return proj_data
 
     def gen_g_hop(self, u=None):
         exponent = self.exponent
@@ -536,12 +597,31 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
         return (lib.einsum('ktxii->xi', proj.real)**self.exponent).sum()
 
     @lib.with_doc(atomic_pops.__doc__)
-    def atomic_pops(self, u=None, mode='kk'):
+    def atomic_pops(self, u=None):
         mo_coeff = self.rotate_orb(u)
-        return atomic_pops(self.cell, mo_coeff, self.kpts, method=self.pop_method).transpose(1,2,0,3,4)
+        return atomic_pops(self.cell, mo_coeff, self.kpts, method=self.pop_method,
+                           proj_data=self._proj_data).transpose(1,2,0,3,4)
+
+    def kernel(self, mo_coeff=None, callback=None, verbose=None):
+        self._proj_data = self.get_proj_data()
+        mo_coeff = boys.kernel(self, mo_coeff, callback, verbose)
+        self._proj_data = None
+
+        return mo_coeff
 
     def stability_jacobi(self, verbose=None, return_status=False):
-        return stability_jacobi(self, verbose=verbose, return_status=return_status)
+        self._proj_data = self.get_proj_data()
+        res = stability_jacobi(self, verbose=verbose, return_status=return_status)
+        self._proj_data = None
+
+        return res
+
+    def stability(self, verbose=None, return_status=False):
+        self._proj_data = self.get_proj_data()
+        res = stability_newton(self, verbose=verbose, return_status=return_status)
+        self._proj_data = None
+
+        return res
 
 
 KPM = KPipek = KptsPipekMezey
