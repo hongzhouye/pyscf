@@ -419,7 +419,7 @@ class KptsOrbitalLocalizer(lib.StreamObject, kciah.SubspaceCIAHOptimizerMixin):
             S = cell.pbc_intor('int1e_ovlp', kpt=kpts[0])
             u00 = numpy.linalg.multi_dot([mo0.T, S, mo_init])
         else:
-            u00 = numpy.eye(nmo)
+            return self.identity_rotation()
 
         # diabatization: align phase of MO[k] to MO[0]
         def align_phase(mo, mo0):
@@ -1039,7 +1039,7 @@ if __name__ == '__main__':
     H          0.00000        0.75545       -0.47116
     H          0.00000       -0.75545       -0.47116
     '''
-    cell.a = numpy.eye(3) * 5
+    cell.a = numpy.eye(3) * 20
     cell.basis = 'ccpvdz'
     cell.build()
 
