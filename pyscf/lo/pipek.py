@@ -228,6 +228,7 @@ class PipekMezey(boys.OrbitalLocalizer):
 
     def __init__(self, mol, mo_coeff=None, pop_method=None, kpt=None):
         boys.OrbitalLocalizer.__init__(self, mol, mo_coeff)
+        self.maximize = True
         if pop_method is not None:
             self.pop_method = pop_method
         self.kpt = kpt
@@ -396,6 +397,7 @@ PM = Pipek = PipekMezey
 class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
     def __init__(self, mol, mo_coeff=None, pop_method=None, kpt=None):
         boys.OrbitalLocalizerComplex.__init__(self, mol, mo_coeff)
+        self.maximize = True
         if pop_method is not None:
             self.pop_method = pop_method
         self.kpt = kpt
@@ -528,6 +530,19 @@ if __name__ == '__main__':
     while True:
         mo, stable = mlo.stability_jacobi(return_status=True)
         # mo, stable = mlo.stability(return_status=True)
+        if stable:
+            break
+        mlo.kernel(mo)
+
+    mo = mf.mo_coeff[:,mf.mo_occ>1e-6]
+    mlo = PM(cell, mo, kpt=kpt)
+    mlo.algorithm = 'bfgs'
+    mlo.kernel()
+
+    # stability check
+    while True:
+        # mo, stable = mlo.stability_jacobi(return_status=True)
+        mo, stable = mlo.stability(return_status=True)
         if stable:
             break
         mlo.kernel(mo)

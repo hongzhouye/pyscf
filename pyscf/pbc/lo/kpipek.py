@@ -359,11 +359,13 @@ class KptsOrbitalLocalizer(lib.StreamObject, kciah.SubspaceCIAHOptimizerMixin):
     ah_start_tol = getattr(__config__, 'pbc_lo_kpipek_KPipek_ah_start_tol', 1e9)
     ah_max_cycle = getattr(__config__, 'pbc_lo_kpipek_KPipek_ah_max_cycle', 40)
     init_guess = getattr(__config__, 'pbc_lo_kpipek_KPipek_init_guess', 'atomic')
+    algorithm = getattr(__config__, 'pbc_lo_kpipek_KPipek_init_guess', 'ciah')
+    maximize = getattr(__config__, 'pbc_lo_kpipek_KPipek_init_guess', False)
 
     _keys = {
         'conv_tol', 'conv_tol_grad', 'max_cycle', 'max_iters',
         'max_stepsize', 'ah_trust_region', 'ah_start_tol',
-        'ah_max_cycle', 'init_guess', 'cell', 'mo_coeff', 'kpts'
+        'ah_max_cycle', 'init_guess', 'algorithm', 'cell', 'mo_coeff', 'kpts'
     }
 
     def __init__(self, cell, mo_coeff, kpts):
@@ -566,6 +568,7 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
 
     def __init__(self, cell, mo_coeff, kpts, pop_method=None):
         KptsOrbitalLocalizer.__init__(self, cell, mo_coeff, kpts)
+        self.maximize = True
         if pop_method is not None:
             self.pop_method = pop_method
         self._proj_data = None
@@ -791,6 +794,7 @@ class KptsPipekMezeyReal(KptsOrbitalLocalizerReal,KptsPipekMezey):
 
     def __init__(self, cell, mo_coeff, kpts, pop_method=None):
         KptsOrbitalLocalizerReal.__init__(self, cell, mo_coeff, kpts)
+        self.maximize = True
         if pop_method is not None:
             self.pop_method = pop_method
 
@@ -1078,6 +1082,8 @@ if __name__ == '__main__':
     # mo0 = mo0 + numpy.random.rand(*mo0.shape) * (0.1+0.1j)
     # mlo = PM(cell, mo0)
     mlo = KPM(cell, mo0, kpts)
+    # mlo.algorithm = 'bfgs'
+    mlo.conv_tol = 1e-8
     # mlo = KPMReal(cell, mo0, kpts)
 
     wann_coeff = mlo.get_wannier_function()
@@ -1091,8 +1097,8 @@ if __name__ == '__main__':
 
     # stability check
     while True:
-        mo, stable = mlo.stability_jacobi(return_status=True)
-        # mo, stable = mlo.stability(return_status=True)
+        # mo, stable = mlo.stability_jacobi(return_status=True)
+        mo, stable = mlo.stability(return_status=True)
         if stable:
             break
         mlo.kernel(mo)

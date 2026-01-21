@@ -27,6 +27,7 @@ from functools import reduce
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.soscf import ciah
+from pyscf.soscf import bfgs
 from pyscf.lo import orth, cholesky_mos
 from pyscf.lo.stability import stability_newton
 from pyscf.tools import mo_mapping
@@ -66,7 +67,15 @@ def kernel(localizer, mo_coeff=None, callback=None, verbose=None):
     norm_gorb = numpy.linalg.norm(g_orb)
     log.info('Init f(x)= %.14g  |g|= %g', e0, norm_gorb)
 
-    rotaiter = ciah.rotate_orb_cc(localizer, u0, conv_tol_grad, verbose=log.verbose-1)
+    if localizer.algorithm == 'ciah':
+        rotaiter = ciah.rotate_orb_cc(localizer, u0, conv_tol_grad, verbose=log.verbose-1)
+    elif localizer.algorithm == 'bfgs':
+        rotaiter = bfgs.rotate_orb_cc(localizer, u0, conv_tol_grad, verbose=log.verbose-1,
+                                      maximize=localizer.maximize)
+    else:
+        raise KeyError('Unknown algorithm %s' % (str(localizer.algorithm)))
+
+    # rotaiter = rotate_orb_cc(localizer, u0, conv_tol_grad, verbose=log.verbose-1)
     u, g_orb, stat = next(rotaiter)
     cput1 = log.timer('initializing CIAH', *cput0)
 
@@ -147,11 +156,14 @@ class OrbitalLocalizer(lib.StreamObject, ciah.CIAHOptimizerMixin):
     ah_start_tol = getattr(__config__, 'lo_boys_Boys_ah_start_tol', 1e9)
     ah_max_cycle = getattr(__config__, 'lo_boys_Boys_ah_max_cycle', 40)
     init_guess = getattr(__config__, 'lo_boys_Boys_init_guess', 'atomic')
+    algorithm = getattr(__config__, 'lo_boys_Boys_init_guess', 'ciah')
+    maximize = getattr(__config__, 'lo_boys_Boys_init_guess', False)
 
     _keys = {
         'conv_tol', 'conv_tol_grad', 'max_cycle', 'max_iters',
         'max_stepsize', 'ah_trust_region', 'ah_start_tol',
-        'ah_max_cycle', 'init_guess', 'mol', 'mo_coeff',
+        'ah_max_cycle', 'init_guess', 'algorithm', 'maximize',
+        'mol', 'mo_coeff',
     }
 
     def __init__(self, mol, mo_coeff):
@@ -187,6 +199,7 @@ class OrbitalLocalizer(lib.StreamObject, ciah.CIAHOptimizerMixin):
         log.info('ah_max_cycle = %s'   , self.ah_max_cycle   )
         log.info('ah_trust_region = %s', self.ah_trust_region)
         log.info('init_guess = %s'     , self.init_guess     )
+        log.info('algorithm = %s'      , self.algorithm      )
 
     def get_init_guess(self, key='atomic'):
         '''Generate initial guess for localization.
@@ -204,6 +217,8 @@ class OrbitalLocalizer(lib.StreamObject, ciah.CIAHOptimizerMixin):
             u0 = self.identity_rotation()
         if (isinstance(key, str) and key.lower().startswith('rand')
             or numpy.linalg.norm(self.get_grad(u0)) < 1e-5):
+            logger.warn(self, 'Initial orbitals are close to convergence. Adding a '
+                        'small perturbation.')
             # Add noise to kick initial guess out of saddle point
             dr = numpy.cos(numpy.arange(self.pdim)) * 1e-3
             u0 = self.extract_rotation(dr)
@@ -409,6 +424,7 @@ if __name__ == '__main__':
 
     mo = mf.mo_coeff[:,:mol.nelectron//2]
     mlo = Boys(mol, mo).set(verbose=4)
+    mlo.algorithm = 'bfgs'
     mlo.kernel()
 
     # stability check

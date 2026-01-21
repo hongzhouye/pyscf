@@ -28,6 +28,8 @@ from pyscf.lo import boys
 
 class EdmistonRuedenberg(boys.OrbitalLocalizer):
 
+    maximize = True
+
     def get_jk(self, u):
         mo_coeff = numpy.dot(self.mo_coeff, u)
         nmo = mo_coeff.shape[1]
@@ -86,4 +88,7 @@ if __name__ == '__main__':
     mol.build()
     mf = scf.RHF(mol).run()
 
-    mo = ER(mol).kernel(mf.mo_coeff[:,:2], verbose=4)
+    mo = mf.mo_coeff[:,:2]
+    mlo = ER(mol, mo).set(verbose=4)
+    mlo.algorithm = 'bfgs'
+    mlo.kernel()
