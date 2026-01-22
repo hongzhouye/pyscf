@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 # Author: Hong-Zhou Ye <hzyechem@gmail.com>
-#         Genzhi Yang <genzyang17@gmail.com>
+#         Gengzhi Yang <genzyang17@gmail.com>
 #
 
 
@@ -31,12 +31,11 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
     ''' Check whether Jacobi sweep.
     '''
     log = logger.new_logger(mlo, verbose)
+    exponent = mlo.exponent
 
     tril_ijdx = numpy.tril_indices(mlo.norb, k=-1)
     tril_idx, tril_jdx = tril_ijdx
-    thetas = numpy.asarray([1,3,5,7])*0.25*numpy.pi
-    c2ts = numpy.cos(thetas*2)
-    s2ts = numpy.sin(thetas*2)
+    thetapool = numpy.asarray([1,2,3])*0.25*numpy.pi
 
     def update_rotation_local_(u, theta, i, j):
         for x in u:
@@ -48,16 +47,23 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
     u = mlo.identity_rotation()
     stable = True
     while True:
-        Lij = mlo.atomic_pops(u, mode='00').real
-        Lji = Lij.transpose(0,2,1)
-        Lii = lib.einsum('xii->xi', Lij)
-        Lijji = Lij + Lji
-        Liijj = Lii[:,:,None] - Lii[:,None,:]
+        Pij = mlo.atomic_pops(u, mode='00').real
+        Qi = lib.einsum('xii->xi', Pij)
+        Qiexp = Qi**exponent
+        Lij = (Qiexp[:,None,:] + Qiexp[:,:,None]).sum(axis=0)[tril_ijdx]
+        dLij = numpy.zeros_like(Lij)
+        thetas = numpy.zeros_like(Lij)
 
-        Aij = (Lijji**2 - Liijj**2).sum(axis=0)[tril_ijdx]
-        Bij = (Lijji * Liijj).sum(axis=0)[tril_ijdx]
-        dLijt = Aij[:,None] * s2ts**2*0.5 - Bij[:,None] * s2ts*c2ts
-        dLij = dLijt.max(axis=-1)
+        for theta in thetapool:
+            c = numpy.cos(theta)
+            s = numpy.sin(theta)
+
+            Qitild = (Qi*c**2)[:,:,None] + (Qi*s**2)[:,None,:] + 2*c*s*Pij
+            Qjtild = (Qi*s**2)[:,:,None] + (Qi*c**2)[:,None,:] - 2*c*s*Pij
+            dLijtild = (Qitild**exponent+Qjtild**exponent).sum(axis=0)[tril_ijdx] - Lij
+            mask = dLijtild > dLij + mlo.conv_tol
+            thetas[mask] = theta
+            dLij[mask] = dLijtild[mask]
 
         idxs = numpy.where(dLij > mlo.conv_tol)[0]
 
@@ -73,7 +79,7 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
                 continue
             done[i] = done[j] = True
 
-            theta = thetas[dLijt[idx].argmax(axis=-1)]
+            theta = thetas[idx]
             log.info('Rotating orbital pair (%d,%d) by %.2f Pi. delta_f= %.14g',
                       i, j, theta/numpy.pi, dLij[idx])
             update_rotation_local_(u, theta, i, j)
