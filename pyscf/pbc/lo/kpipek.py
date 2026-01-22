@@ -934,19 +934,15 @@ class KptsPipekMezeyReal(KptsOrbitalLocalizerReal,KptsPipekMezey):
 KPMReal = KPipekReal = KptsPipekMezeyReal
 
 
-def get_kmesh(cell, kpts, tol=1e-6, nmax=100):
+def get_kmesh(cell, kpts, tol=1e-6, nmax=1000):
     scaled_kpts = cell.get_scaled_kpts(kpts-kpts[0])
-    kmesh = []
-    for i in range(3):
-        found = False
-        for n in range(1,nmax+1):
-            ks = scaled_kpts[:,i]*n
-            if numpy.all(abs(ks - numpy.round(ks)) < tol):
-                found = True
-                break
-        if not found:
-            raise RuntimeError('Input kmesh is either too large or not a (shifted) regular mesh.')
-        kmesh.append(n)
+    nks = numpy.arange(1,nmax+1)
+    ks = lib.einsum('kx,n->xnk', scaled_kpts, nks)
+    mask = numpy.all(abs(ks - numpy.round(ks)) < tol, axis=-1)
+    if not numpy.all(numpy.any(mask, axis=-1)):
+        raise RuntimeError('Input kmesh is either too large or not a (shifted) regular mesh.')
+
+    kmesh = [numpy.where(mask[i])[0][0]+1 for i in range(3)]
 
     return kmesh
 
@@ -1092,13 +1088,14 @@ if __name__ == '__main__':
     # mlo = KPMReal(cell, mo0, kpts)
     mlo.verbose = 4
     mlo.init_guess = 'cho'
+    mlo.exponent = 4
     # mlo.pop_method = 'iao'
     mlo.kernel()
 
     # stability check
     while True:
-        # mo, stable = mlo.stability_jacobi(return_status=True)
-        mo, stable = mlo.stability(return_status=True)
+        mo, stable = mlo.stability_jacobi(return_status=True)
+        # mo, stable = mlo.stability(return_status=True)
         if stable:
             break
         mlo.kernel(mo)
