@@ -76,10 +76,11 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
         if proj_data is None:
             s = get_ovlp(mol, kpt)
             proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s, adjust_phase=False)
+            proj_coeff = lib.dot(s, proj_coeff)
             offset_nr_by_atom = mol.offset_nr_by_atom()
         else:
-            proj_coeff, s, offset_nr_by_atom = proj_data
-        csc = reduce(lib.dot, (mo_coeff.conj().T, s, proj_coeff))
+            proj_coeff, offset_nr_by_atom = proj_data
+        csc = reduce(lib.dot, (mo_coeff.conj().T, proj_coeff))
         for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
             proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
 
@@ -98,11 +99,13 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
                 ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
                 iaotild_coeff = numpy.asarray(numpy.linalg.solve(ovlp,
                                               iao_coeff.conj().T).conj().T, order='C')
+                iao_coeff = lib.dot(s, iao_coeff)
+                iaotild_coeff = lib.dot(s, iaotild_coeff)
             else:
-                iao_coeff, iaotild_coeff, s, offset_nr_by_atom = proj_data
+                iao_coeff, iaotild_coeff, offset_nr_by_atom = proj_data
 
-            csc = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coeff))
-            csctild = reduce(lib.dot, (mo_coeff.conj().T, s, iaotild_coeff))
+            csc = reduce(lib.dot, (mo_coeff.conj().T, iao_coeff))
+            csctild = reduce(lib.dot, (mo_coeff.conj().T, iaotild_coeff))
 
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj1 = numpy.dot(csc[:,p0:p1], csctild[:,p0:p1].conj().T)
@@ -110,10 +113,11 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
         else:
             if proj_data is None:
                 iao_coeff = orth.vec_lowdin(iao_coeff, s)
+                iao_coeff = lib.dot(s, iao_coeff)
             else:
-                iao_coeff, s, offset_nr_by_atom = proj_data
+                iao_coeff, offset_nr_by_atom = proj_data
 
-            csc = reduce(lib.dot, (mo_coeff.conj().T, s, iao_coeff))
+            csc = reduce(lib.dot, (mo_coeff.conj().T, iao_coeff))
 
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
@@ -254,7 +258,8 @@ class PipekMezey(boys.OrbitalLocalizer):
         elif method in ('lowdin', 'meta-lowdin'):
             s = get_ovlp(mol, kpt)
             proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s, adjust_phase=False)
-            proj_data = (proj_coeff, s, mol.offset_nr_by_atom())
+            proj_coeff = lib.dot(s, proj_coeff)
+            proj_data = (proj_coeff, mol.offset_nr_by_atom())
 
         elif method in ('iao', 'ibo', 'iao-biorth'):
             s = get_ovlp(mol, kpt)
@@ -268,10 +273,13 @@ class PipekMezey(boys.OrbitalLocalizer):
                 ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
                 iaotild_coeff = numpy.asarray(numpy.linalg.solve(ovlp,
                                               iao_coeff.conj().T).conj().T, order='C')
-                proj_data = (iao_coeff, iaotild_coeff, s, iao_mol.offset_nr_by_atom())
+                proj_coeff = lib.dot(s, iao_coeff)
+                projtild_coeff = lib.dot(s, iaotild_coeff)
+                proj_data = (proj_coeff, projtild_coeff, iao_mol.offset_nr_by_atom())
             else:
                 iao_coeff = orth.vec_lowdin(iao_coeff, s)
-                proj_data = (iao_coeff, s, iao_mol.offset_nr_by_atom())
+                proj_coeff = lib.dot(s, iao_coeff)
+                proj_data = (proj_coeff, iao_mol.offset_nr_by_atom())
 
         else:
             raise KeyError('method = %s' % method)
