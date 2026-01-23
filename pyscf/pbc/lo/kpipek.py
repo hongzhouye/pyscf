@@ -65,8 +65,8 @@ def atomic_pops_contract(cell, mo_coeff, kpts, exponent, method='meta_lowdin', p
     kmesh = get_kmesh(cell, kpts)
     scell, phase = k2gamma.get_phase(cell, kpts, kmesh=kmesh)
 
-    def contract_orth(mo_coeff, proj_coeff, s, offset_nr_by_atom):
-        kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
+    def contract_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
+        kcsc = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), proj_coeff)
         scsc = kcsc.sum(axis=0).reshape(nmo,-1)
         kcsc = kcsc.reshape(nkpts*nmo,-1)
 
@@ -75,22 +75,22 @@ def atomic_pops_contract(cell, mo_coeff, kpts, exponent, method='meta_lowdin', p
             proj1 = numpy.dot(scsc[:,p0:p1], kcsc[:,p0:p1].conj().T)
             proj0k[i] = proj1.reshape(nmo,nkpts,nmo)
 
-        popkk = numpy.zeros((scell.natm,nkpts,nmo), dtype=numpy.float64)
+        popk = numpy.zeros((scell.natm,nkpts,nmo), dtype=numpy.float64)
         QP = numpy.zeros((nkpts,nkpts,nmo,nmo,nmo), dtype=numpy.complex128)
         buf = numpy.empty((nkpts,nkpts,nmo,nmo), dtype=QP.dtype)
         for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
             proj1 = numpy.dot(kcsc[:,p0:p1], kcsc[:,p0:p1].conj().T)
             buf[:] = proj1.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3)
-            popkk[i] = lib.einsum('kkii->ki', buf.real)
+            popk[i] = lib.einsum('kkii->ki', buf.real)
             popexp1 = lib.einsum('ktii->i', buf.real)**(exponent-1)
             lib.outer(buf.reshape(-1), popexp1, out=QP.reshape(-1, nmo))
         buf = None
 
-        return QP, proj0k, popkk
+        return QP, proj0k, popk
 
-    def contract_biorth(mo_coeff, proj_coeff, projtild_coeff, s, offset_nr_by_atom):
-        kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
-        kcsctild = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, projtild_coeff)
+    def contract_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom):
+        kcsc = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), proj_coeff)
+        kcsctild = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), projtild_coeff)
         scsc = kcsc.sum(axis=0).reshape(nmo,-1)
         scsctild = kcsctild.sum(axis=0).reshape(nmo,-1)
         kcsc = kcsc.reshape(nkpts*nmo,-1)
@@ -102,19 +102,19 @@ def atomic_pops_contract(cell, mo_coeff, kpts, exponent, method='meta_lowdin', p
             proj1 += numpy.dot(scsctild[:,p0:p1], kcsc[:,p0:p1].conj().T)
             proj0k[i] = proj1.reshape(nmo,nkpts,nmo) * 0.5
 
-        popkk = numpy.zeros((scell.natm,nkpts,nmo), dtype=numpy.float64)
+        popk = numpy.zeros((scell.natm,nkpts,nmo), dtype=numpy.float64)
         QP = numpy.zeros((nkpts,nkpts,nmo,nmo,nmo), dtype=numpy.complex128)
         buf = numpy.empty((nkpts,nkpts,nmo,nmo), dtype=QP.dtype)
         for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
             proj1  = numpy.dot(kcsc[:,p0:p1], kcsctild[:,p0:p1].conj().T)
             proj1 += numpy.dot(kcsctild[:,p0:p1], kcsc[:,p0:p1].conj().T)
             buf[:] = proj1.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3) * 0.5
-            popkk[i] = lib.einsum('kkii->ki', buf.real)
+            popk[i] = lib.einsum('kkii->ki', buf.real)
             popexp1 = lib.einsum('ktii->i', buf.real)**(exponent-1)
             lib.outer(buf.reshape(-1), popexp1, out=QP.reshape(-1, nmo))
         buf = None
 
-        return QP, proj0k, popkk
+        return QP, proj0k, popk
 
     if method == 'mulliken':
         raise NotImplementedError
@@ -134,12 +134,13 @@ def atomic_pops_contract(cell, mo_coeff, kpts, exponent, method='meta_lowdin', p
             s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
             proj_coeff = numpy.asarray([orth.orth_ao(cell, method, 'ANO', s=s[k],
                                         adjust_phase=False) for k in range(nkpts)])
+            proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
             proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
             offset_nr_by_atom = scell.offset_nr_by_atom()
         else:
-            proj_coeff, s, offset_nr_by_atom = proj_data
+            proj_coeff, offset_nr_by_atom = proj_data
 
-        QP, proj0k, popkk = contract_orth(mo_coeff, proj_coeff, s, offset_nr_by_atom)
+        QP, proj0k, popk = contract_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
 
     elif method in ('iao', 'ibo', 'iao-biorth'):
         if proj_data is None:
@@ -150,32 +151,207 @@ def atomic_pops_contract(cell, mo_coeff, kpts, exponent, method='meta_lowdin', p
 
         if method == 'iao-biorth':
             if proj_data is None:
-                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
                 ovlp = lib.einsum('kmx,kmn,kny->kxy', iao_coeff.conj(), s, iao_coeff)
                 iaotild_coeff = numpy.asarray([numpy.linalg.solve(ovlp[k],
                                                iao_coeff[k].conj().T).conj().T
                                                for k in range(nkpts)], order='C')
+                iao_coeff = lib.einsum('kmn,knx->kmx', s, iao_coeff)
+                iaotild_coeff = lib.einsum('kmn,knx->kmx', s, iaotild_coeff)
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
                 projtild_coeff = lib.einsum('kmx,Sk->kmSx', iaotild_coeff,
                                             phase.conj()) / nkpts**0.5
             else:
-                proj_coeff, projtild_coeff, s, offset_nr_by_atom = proj_data
+                proj_coeff, projtild_coeff, offset_nr_by_atom = proj_data
 
-            QP, proj0k, popkk = contract_biorth(mo_coeff, proj_coeff, projtild_coeff, s,
-                                                offset_nr_by_atom)
+            QP, proj0k, popk = contract_biorth(mo_coeff, proj_coeff, projtild_coeff,
+                                               offset_nr_by_atom)
         else:
             if proj_data is None:
                 proj_coeff = numpy.asarray([orth.vec_lowdin(iao_coeff[k], s[k])
                                             for k in range(nkpts)])
+                proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
                 proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
             else:
-                proj_coeff, s, offset_nr_by_atom = proj_data
+                proj_coeff, offset_nr_by_atom = proj_data
 
-            QP, proj0k, popkk = contract_orth(mo_coeff, proj_coeff, s, offset_nr_by_atom)
+            QP, proj0k, popk = contract_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
 
     else:
         raise KeyError('method = %s' % method)
 
-    return QP, proj0k, popkk
+    return QP, proj0k, popk
+
+
+def atomic_pops_contract_symm(cell, mo_coeff, kpts_symm, exponent, method='meta_lowdin',
+                              proj_data=None):
+    '''
+    Kwargs:
+        method : string
+            The atomic population projection scheme. It can be mulliken,
+            lowdin, meta_lowdin, iao, or becke
+
+    Returns:
+        A 3-index tensor [A,i,j] indicates the population of any orbital-pair
+        density |i><j| for each species (atom in this case).  This tensor is
+        used to construct the population and gradients etc.
+
+        You can customize the PM localization wrt other population metric,
+        such as the charge of a site, the charge of a fragment (a group of
+        atoms) by overwriting this tensor.  See also the example
+        pyscf/examples/loc_orb/40-hubbard_model_PM_localization.py for the PM
+        localization of site-based population for hubbard model.
+    '''
+    kpts = kpts_symm.kpts
+    nkpts_ibz = kpts_symm.nkpts_ibz
+    method = method.lower().replace('_', '-')
+    mo_coeff = numpy.asarray(mo_coeff)
+    nkpts,nao,nmo = mo_coeff.shape
+    kmesh = get_kmesh(cell, kpts)
+    scell, phase = k2gamma.get_phase(cell, kpts, kmesh=kmesh)
+
+    def contract_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
+        kcsc = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), proj_coeff)
+        scsc = kcsc.sum(axis=0).reshape(nmo,-1)
+        kcsc = kcsc.reshape(nkpts*nmo,-1)
+
+        proj0k = numpy.zeros((scell.natm,nmo,nkpts,nmo), dtype=numpy.complex128)
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+            proj1 = numpy.dot(scsc[:,p0:p1], kcsc[:,p0:p1].conj().T)
+            proj0k[i] = proj1.reshape(nmo,nkpts,nmo)
+
+        popk_plus = numpy.zeros((scell.natm,nkpts_ibz,nmo), dtype=numpy.float64)
+        popk_minus = numpy.zeros((scell.natm,nkpts_ibz,nmo), dtype=numpy.float64)
+        QP = numpy.zeros((nkpts,nkpts,nmo,nmo,nmo), dtype=numpy.complex128)
+        buf = numpy.empty((nkpts,nkpts,nmo,nmo), dtype=QP.dtype)
+        bufR = numpy.empty((nkpts,nkpts,nmo,nmo), dtype=numpy.float64)
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+            proj1 = numpy.dot(kcsc[:,p0:p1], kcsc[:,p0:p1].conj().T)
+            buf[:] = proj1.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3)
+            popexp1 = lib.einsum('ktii->i', buf.real)**(exponent-1)
+            lib.outer(buf.reshape(-1), popexp1, out=QP.reshape(-1, nmo))
+
+            bufR[:] = buf.real
+            for q in range(nkpts_ibz):
+                idx = numpy.where(kpts_symm.bz2ibz==q)[0]
+                if idx.size == 1:
+                    popk_plus[i,q] = popk_minus[i,q] = numpy.diag(bufR[idx[0],idx[0]])
+                else:
+                    k1, k2 = idx
+                    pop1 = numpy.diag(bufR[k1,k1]) + numpy.diag(bufR[k2,k2])
+                    pop2 = numpy.diag(bufR[k1,k2]) + numpy.diag(bufR[k2,k1])
+                    popk_plus[i,q] = pop1 + pop2
+                    popk_minus[i,q] = pop1 - pop2
+        buf = bufR = None
+
+        return QP, proj0k, popk_plus, popk_minus
+
+    def contract_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom):
+        kcsc = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), proj_coeff)
+        kcsctild = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), projtild_coeff)
+        scsc = kcsc.sum(axis=0).reshape(nmo,-1)
+        scsctild = kcsctild.sum(axis=0).reshape(nmo,-1)
+        kcsc = kcsc.reshape(nkpts*nmo,-1)
+        kcsctild = kcsctild.reshape(nkpts*nmo,-1)
+
+        proj0k = numpy.empty((scell.natm,nmo,nkpts,nmo), dtype=mo_coeff.dtype)
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+            proj1  = numpy.dot(scsc[:,p0:p1], kcsctild[:,p0:p1].conj().T)
+            proj1 += numpy.dot(scsctild[:,p0:p1], kcsc[:,p0:p1].conj().T)
+            proj0k[i] = proj1.reshape(nmo,nkpts,nmo) * 0.5
+
+        popk_plus = numpy.zeros((scell.natm,nkpts_ibz,nmo), dtype=numpy.float64)
+        popk_minus = numpy.zeros((scell.natm,nkpts_ibz,nmo), dtype=numpy.float64)
+        QP = numpy.zeros((nkpts,nkpts,nmo,nmo,nmo), dtype=numpy.complex128)
+        buf = numpy.empty((nkpts,nkpts,nmo,nmo), dtype=QP.dtype)
+        bufR = numpy.empty((nkpts,nkpts,nmo,nmo), dtype=numpy.float64)
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+            proj1  = numpy.dot(kcsc[:,p0:p1], kcsctild[:,p0:p1].conj().T)
+            proj1 += numpy.dot(kcsctild[:,p0:p1], kcsc[:,p0:p1].conj().T)
+            buf[:] = proj1.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3) * 0.5
+            popexp1 = lib.einsum('ktii->i', buf.real)**(exponent-1)
+            lib.outer(buf.reshape(-1), popexp1, out=QP.reshape(-1, nmo))
+
+            bufR[:] = buf.real
+            for q in range(nkpts_ibz):
+                idx = numpy.where(kpts_symm.bz2ibz==q)[0]
+                if idx.size == 1:
+                    popk_plus[i,q] = popk_minus[i,q] = numpy.diag(bufR[idx[0],idx[0]])
+                else:
+                    k1, k2 = idx
+                    pop1 = numpy.diag(bufR[k1,k1]) + numpy.diag(bufR[k2,k2])
+                    pop2 = numpy.diag(bufR[k1,k2]) + numpy.diag(bufR[k2,k1])
+                    popk_plus[i,q] = pop1 + pop2
+                    popk_minus[i,q] = pop1 - pop2
+        buf = bufR = None
+
+        return QP, proj0k, popk_plus, popk_minus
+
+    if method == 'mulliken':
+        raise NotImplementedError
+        s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
+        proj_coeff = lib.einsum('Rk,kmi->Rmki', phase, mo_coeff) / nkpts**0.5
+        proj_coeff = proj_coeff.reshape(-1,nkpts*nmo)
+        s_scell = lib.einsum('Rk,kmn,Sk->RmSn', phase, s, phase.conj()).reshape(nkpts*nao,-1)
+        if abs(s_scell.imag).max() < 1e-10:
+            s_scell = s_scell.real
+        for i, (b0, b1, p0, p1) in enumerate(scell.offset_nr_by_atom()):
+            proj1 = reduce(numpy.dot, (proj_coeff[p0:p1].conj().T, s_scell[p0:p1], proj_coeff))
+            proj1 += proj1.conj().T
+            proj[i] = proj1.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3) * 0.5
+
+    elif method in ('lowdin', 'meta-lowdin'):
+        if proj_data is None:
+            s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
+            proj_coeff = numpy.asarray([orth.orth_ao(cell, method, 'ANO', s=s[k],
+                                        adjust_phase=False) for k in range(nkpts)])
+            proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
+            proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
+            offset_nr_by_atom = scell.offset_nr_by_atom()
+        else:
+            proj_coeff, offset_nr_by_atom = proj_data
+
+        QP, proj0k, popk_plus, popk_minus = contract_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
+
+    elif method in ('iao', 'ibo', 'iao-biorth'):
+        if proj_data is None:
+            s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
+            iao_coeff = iao.iao(cell, mo_coeff, kpts=kpts)
+            iao_scell = iao.reference_mol(scell)
+            offset_nr_by_atom = iao_scell.offset_nr_by_atom()
+
+        if method == 'iao-biorth':
+            if proj_data is None:
+                ovlp = lib.einsum('kmx,kmn,kny->kxy', iao_coeff.conj(), s, iao_coeff)
+                iaotild_coeff = numpy.asarray([numpy.linalg.solve(ovlp[k],
+                                               iao_coeff[k].conj().T).conj().T
+                                               for k in range(nkpts)], order='C')
+                iao_coeff = lib.einsum('kmn,knx->kmx', s, iao_coeff)
+                iaotild_coeff = lib.einsum('kmn,knx->kmx', s, iaotild_coeff)
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
+                projtild_coeff = lib.einsum('kmx,Sk->kmSx', iaotild_coeff,
+                                            phase.conj()) / nkpts**0.5
+            else:
+                proj_coeff, projtild_coeff, offset_nr_by_atom = proj_data
+
+            QP, proj0k, popk_plus, popk_minus = contract_biorth(mo_coeff, proj_coeff,
+                                                                projtild_coeff,
+                                                                offset_nr_by_atom)
+        else:
+            if proj_data is None:
+                proj_coeff = numpy.asarray([orth.vec_lowdin(iao_coeff[k], s[k])
+                                            for k in range(nkpts)])
+                proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
+            else:
+                proj_coeff, offset_nr_by_atom = proj_data
+
+            QP, proj0k, popk_plus, popk_minus = contract_orth(mo_coeff, proj_coeff,
+                                                              offset_nr_by_atom)
+
+    else:
+        raise KeyError('method = %s' % method)
+
+    return QP, proj0k, popk_plus, popk_minus
 
 
 def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data=None):
@@ -202,17 +378,17 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
     kmesh = get_kmesh(cell, kpts)
     scell, phase = k2gamma.get_phase(cell, kpts, kmesh=kmesh)
 
-    def proj_orth(mo_coeff, proj_coeff, s, offset_nr_by_atom):
+    def proj_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
         if mode == 'kk':
             proj = numpy.empty((scell.natm,nkpts,nmo,nkpts,nmo), dtype=mo_coeff.dtype)
-            kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
+            kcsc = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), proj_coeff)
             kcsc = kcsc.reshape(nkpts*nmo,-1)
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj1 = numpy.dot(kcsc[:,p0:p1], kcsc[:,p0:p1].conj().T)
                 proj[i] = proj1.reshape(nkpts,nmo,nkpts,nmo)
 
         elif mode in ['0k','k0']:
-            kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
+            kcsc = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), proj_coeff)
             scsc = kcsc.sum(axis=0).reshape(nmo,-1)
             kcsc = kcsc.reshape(nkpts*nmo,-1)
 
@@ -229,7 +405,7 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
 
         elif mode == '00':
             proj = numpy.empty((scell.natm,nmo,nmo), dtype=mo_coeff.dtype)
-            scsc = lib.einsum('kmi,kmn,knSx->iSx', mo_coeff.conj(), s, proj_coeff)
+            scsc = lib.einsum('kmi,kmSx->iSx', mo_coeff.conj(), proj_coeff)
             scsc = scsc.reshape(nmo,-1)
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj[i] = numpy.dot(scsc[:,p0:p1], scsc[:,p0:p1].conj().T)
@@ -239,11 +415,11 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
 
         return proj
 
-    def proj_biorth(mo_coeff, proj_coeff, projtild_coeff, s, offset_nr_by_atom):
+    def proj_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom):
         if mode == 'kk':
             proj = numpy.empty((scell.natm,nkpts,nmo,nkpts,nmo), dtype=mo_coeff.dtype)
-            kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
-            kcsctild = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, projtild_coeff)
+            kcsc = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), proj_coeff)
+            kcsctild = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), projtild_coeff)
             kcsc = kcsc.reshape(nkpts*nmo,-1)
             kcsctild = kcsctild.reshape(nkpts*nmo,-1)
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
@@ -252,8 +428,8 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
                 proj[i] = proj1.reshape(nkpts,nmo,nkpts,nmo) * 0.5
 
         elif mode in ['0k','k0']:
-            kcsc = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, proj_coeff)
-            kcsctild = lib.einsum('kmi,kmn,knSx->kiSx', mo_coeff.conj(), s, projtild_coeff)
+            kcsc = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), proj_coeff)
+            kcsctild = lib.einsum('kmi,kmSx->kiSx', mo_coeff.conj(), projtild_coeff)
             scsc = kcsc.sum(axis=0).reshape(nmo,-1)
             scsctild = kcsctild.sum(axis=0).reshape(nmo,-1)
             kcsc = kcsc.reshape(nkpts*nmo,-1)
@@ -274,8 +450,8 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
 
         elif mode == '00':
             proj = numpy.empty((scell.natm,nmo,nmo), dtype=mo_coeff.dtype)
-            scsc = lib.einsum('kmi,kmn,knSx->iSx', mo_coeff.conj(), s, proj_coeff)
-            scsctild = lib.einsum('kmi,kmn,knSx->iSx', mo_coeff.conj(), s, projtild_coeff)
+            scsc = lib.einsum('kmi,kmSx->iSx', mo_coeff.conj(), proj_coeff)
+            scsctild = lib.einsum('kmi,kmSx->iSx', mo_coeff.conj(), projtild_coeff)
             scsc = scsc.reshape(nmo,-1)
             scsctild = scsctild.reshape(nmo,-1)
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
@@ -305,12 +481,13 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
             s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
             proj_coeff = numpy.asarray([orth.orth_ao(cell, method, 'ANO', s=s[k],
                                         adjust_phase=False) for k in range(nkpts)])
+            proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
             proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
             offset_nr_by_atom = scell.offset_nr_by_atom()
         else:
-            proj_coeff, s, offset_nr_by_atom = proj_data
+            proj_coeff, offset_nr_by_atom = proj_data
 
-        proj = proj_orth(mo_coeff, proj_coeff, s, offset_nr_by_atom)
+        proj = proj_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
 
     elif method in ('iao', 'ibo', 'iao-biorth'):
         if proj_data is None:
@@ -321,26 +498,29 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
 
         if method == 'iao-biorth':
             if proj_data is None:
-                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
                 ovlp = lib.einsum('kmx,kmn,kny->kxy', iao_coeff.conj(), s, iao_coeff)
                 iaotild_coeff = numpy.asarray([numpy.linalg.solve(ovlp[k],
                                                iao_coeff[k].conj().T).conj().T
                                                for k in range(nkpts)], order='C')
+                iao_coeff = lib.einsum('kmn,knx->kmx', s, iao_coeff)
+                iaotild_coeff = lib.einsum('kmn,knx->kmx', s, iaotild_coeff)
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
                 projtild_coeff = lib.einsum('kmx,Sk->kmSx', iaotild_coeff,
                                             phase.conj()) / nkpts**0.5
             else:
-                proj_coeff, projtild_coeff, s, offset_nr_by_atom = proj_data
+                proj_coeff, projtild_coeff, offset_nr_by_atom = proj_data
 
-            proj = proj_biorth(mo_coeff, proj_coeff, projtild_coeff, s, offset_nr_by_atom)
+            proj = proj_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom)
         else:
             if proj_data is None:
                 proj_coeff = numpy.asarray([orth.vec_lowdin(iao_coeff[k], s[k])
                                             for k in range(nkpts)])
+                proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
                 proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
             else:
-                proj_coeff, s, offset_nr_by_atom = proj_data
+                proj_coeff, offset_nr_by_atom = proj_data
 
-            proj = proj_orth(mo_coeff, proj_coeff, s, offset_nr_by_atom)
+            proj = proj_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
 
     else:
         raise KeyError('method = %s' % method)
@@ -485,13 +665,15 @@ class KptsOrbitalLocalizerReal(KptsOrbitalLocalizer):
         if u is None:
             return self.mo_coeff
         else:
-            mo_coeff = numpy.zeros_like(self.mo_coeff)
-            for q in range(self.kpts_symm.nkpts_ibz):
-                idx = numpy.where(self.kpts_symm.bz2ibz==q)[0]
-                mo_coeff[idx[0]] = numpy.dot(self.mo_coeff[idx[0]], u[q])
-                if idx.size == 2:
-                    mo_coeff[idx[1]] = numpy.dot(self.mo_coeff[idx[1]], u[q].conj())
-            return mo_coeff
+            u = _unpack_ibz2bz(u, self.kpts_symm)
+            return numpy.asarray([lib.dot(xk, uk) for xk,uk in zip(self.mo_coeff, u)])
+            # mo_coeff = numpy.zeros_like(self.mo_coeff)
+            # for q in range(self.kpts_symm.nkpts_ibz):
+            #     idx = numpy.where(self.kpts_symm.bz2ibz==q)[0]
+            #     mo_coeff[idx[0]] = numpy.dot(self.mo_coeff[idx[0]], u[q])
+            #     if idx.size == 2:
+            #         mo_coeff[idx[1]] = numpy.dot(self.mo_coeff[idx[1]], u[q].conj())
+            # return mo_coeff
 
 
 class KptsPipekMezey(KptsOrbitalLocalizer):
@@ -596,9 +778,10 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
             s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
             proj_coeff = numpy.asarray([orth.orth_ao(cell, method, 'ANO', s=s[k],
                                         adjust_phase=False) for k in range(nkpts)])
+            proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
             proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
             offset_nr_by_atom = scell.offset_nr_by_atom()
-            proj_data = (proj_coeff, s, offset_nr_by_atom)
+            proj_data = (proj_coeff, offset_nr_by_atom)
 
         elif method in ('iao', 'ibo', 'iao-biorth'):
             s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
@@ -607,19 +790,22 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
             offset_nr_by_atom = iao_scell.offset_nr_by_atom()
 
             if method == 'iao-biorth':
-                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
                 ovlp = lib.einsum('kmx,kmn,kny->kxy', iao_coeff.conj(), s, iao_coeff)
                 iaotild_coeff = numpy.asarray([numpy.linalg.solve(ovlp[k],
                                                iao_coeff[k].conj().T).conj().T
                                                for k in range(nkpts)], order='C')
+                iao_coeff = lib.einsum('kmn,knx->kmx', s, iao_coeff)
+                iaotild_coeff = lib.einsum('kmn,knx->kmx', s, iaotild_coeff)
+                proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
                 projtild_coeff = lib.einsum('kmx,Sk->kmSx', iaotild_coeff,
                                             phase.conj()) / nkpts**0.5
-                proj_data = (proj_coeff, projtild_coeff, s, offset_nr_by_atom)
+                proj_data = (proj_coeff, projtild_coeff, offset_nr_by_atom)
             else:
                 proj_coeff = numpy.asarray([orth.vec_lowdin(iao_coeff[k], s[k])
                                             for k in range(nkpts)])
+                proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
                 proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
-                proj_data = (proj_coeff, s, offset_nr_by_atom)
+                proj_data = (proj_coeff, offset_nr_by_atom)
 
         else:
             raise KeyError('method = %s' % method)
@@ -631,7 +817,7 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
     #     proj = self.atomic_pops(u).transpose(1,3,0,2,4)
     #
     #     proj0k = proj.sum(axis=0)
-    #     popkk = lib.einsum('kkxii->kxi', proj)
+    #     popk = lib.einsum('kkxii->kxi', proj)
     #     pop0 = lib.einsum('kxii->xi', proj0k.real)
     #     pop0exp1 = pop0**(exponent-1)
     #     pop0exp2 = pop0**(exponent-2)
@@ -644,7 +830,7 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
     #     g2 = lib.einsum('xi,txij->tij', pop0exp2, proj0k.imag**2)
     #     h_diag = -4 * exponent * (exponent-1) * (g1 + g2 * 1j)
     #     g1 = lib.einsum('xi,kxii->ki', pop0exp1, proj0k.real)
-    #     g2 = lib.einsum('xi,kxj->kij', pop0exp1, popkk.real)
+    #     g2 = lib.einsum('xi,kxj->kij', pop0exp1, popk.real)
     #     h_diag += 2 * exponent * (g1[:,:,None] - g2) * (1 + 1j)
     #     for hk in h_diag:
     #         numpy.fill_diagonal(hk, numpy.diag(hk)*0.5)
@@ -689,7 +875,7 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
         QPkt, proj0k, popk = atomic_pops_contract(self.cell, mo_coeff, self.kpts, self.exponent,
                                                   method=self.pop_method, proj_data=self._proj_data)
         proj0k = proj0k.transpose(2,0,1,3)
-        popkk = popk.transpose(1,0,2)
+        popk = popk.transpose(1,0,2)
 
         pop0 = lib.einsum('kxii->xi', proj0k.real)
         pop0exp1 = pop0**(exponent-1)
@@ -703,7 +889,7 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
         g2 = lib.einsum('xi,txij->tij', pop0exp2, proj0k.imag**2)
         h_diag = -4 * exponent * (exponent-1) * (g1 + g2 * 1j)
         g1 = lib.einsum('xi,kxii->ki', pop0exp1, proj0k.real)
-        g2 = lib.einsum('xi,kxj->kij', pop0exp1, popkk.real)
+        g2 = lib.einsum('xi,kxj->kij', pop0exp1, popk.real)
         h_diag += 2 * exponent * (g1[:,:,None] - g2) * (1 + 1j)
         for hk in h_diag:
             numpy.fill_diagonal(hk, numpy.diag(hk)*0.5)
@@ -797,87 +983,57 @@ class KptsPipekMezeyReal(KptsOrbitalLocalizerReal,KptsPipekMezey):
         self.maximize = True
         if pop_method is not None:
             self.pop_method = pop_method
+        self._proj_data = None
 
     def gen_g_hop(self, u=None):
         exponent = self.exponent
-        proj = self.atomic_pops(u)
 
-        nkpts = len(self.kpts)
-        nkpts_ibz = self.kpts_symm.nkpts_ibz
-        kmesh = get_kmesh(self.cell, self.kpts)
-        scell, phase = k2gamma.get_phase(self.cell, self.kpts, kmesh=kmesh)
-        natm = scell.natm
+        mo_coeff = self.rotate_orb(u)
+        QPkt, proj0k, popk_plus, popk_minus = atomic_pops_contract_symm(self.cell, mo_coeff,
+                                                                        self.kpts_symm,
+                                                                        self.exponent,
+                                                                        method=self.pop_method,
+                                                                        proj_data=self._proj_data)
+        proj0k = proj0k.transpose(2,0,1,3)
+        popk_plus = popk_plus.transpose(1,0,2)
+        popk_minus = popk_minus.transpose(1,0,2)
 
-        pop0 = lib.einsum('ktxii->xi', proj.real)
+        pop0 = lib.einsum('kxii->xi', proj0k.real)
         pop0exp1 = pop0**(exponent-1)
         pop0exp2 = pop0**(exponent-2)
-        projkt = proj
-        proj0k = lib.einsum('ktxij->txij', projkt)
-        popkk = lib.einsum('kkxii->kxi', projkt)
 
         # gradient
-        g = self.get_grad(proj=proj)
+        g = self.get_grad(proj0k=proj0k)
 
         # hessian diagonal
-        Proj0k = numpy.zeros((nkpts_ibz,natm,self.norb,self.norb), dtype=numpy.complex)
-        Popkk_x = numpy.zeros((nkpts_ibz,natm,self.norb), dtype=numpy.complex)
-        Popkk_y = numpy.zeros((nkpts_ibz,natm,self.norb), dtype=numpy.complex)
-        for q in range(nkpts_ibz):
-            idx = numpy.where(self.kpts_symm.bz2ibz==q)[0]
-            if idx.size == 1:
-                Proj0k[q] = proj0k[idx[0]]
-                Popkk_x[q] = Popkk_y[q] = popkk[idx[0]]
-            else:
-                Proj0k[q] = proj0k[idx[0]] + proj0k[idx[1]].conj()
-                k1, k2 = idx
-                Popkk_x[q]  = lib.einsum('xii->xi', projkt[k1,k1])
-                Popkk_x[q] += lib.einsum('xii->xi', projkt[k2,k2])
-                Popkk_x[q] += lib.einsum('xii->xi', projkt[k1,k2])
-                Popkk_x[q] += lib.einsum('xii->xi', projkt[k2,k1])
-                Popkk_y[q]  = lib.einsum('xii->xi', projkt[k1,k1])
-                Popkk_y[q] += lib.einsum('xii->xi', projkt[k2,k2])
-                Popkk_y[q] -= lib.einsum('xii->xi', projkt[k1,k2])
-                Popkk_y[q] -= lib.einsum('xii->xi', projkt[k2,k1])
-                # Popkk[:,q] = popkk[:,idx[0]] + popkk[:,idx[1]].conj()
-        g1 = lib.einsum('xi,txij->tij', pop0exp2, Proj0k.real**2)
-        g2 = lib.einsum('xi,txij->tij', pop0exp2, Proj0k.imag**2)
+        proj0K = _pack_bz2ibz(proj0k, self.kpts_symm)
+        g1 = lib.einsum('xi,txij->tij', pop0exp2, proj0K.real**2)
+        g2 = lib.einsum('xi,txij->tij', pop0exp2, proj0K.imag**2)
         h_diag = -4 * exponent * (exponent-1) * (g1 + g2 * 1j)
-        # g1 = lib.einsum('xi,xkii->ki', pop0exp1, Proj0k.real)
-        # g2 = lib.einsum('xi,xkj->kij', pop0exp1, Popkk.real)
-        # h_diag += 2 * exponent * (g1[:,:,None] - g2) * (1 + 1j)
-        g1 = lib.einsum('xi,kxii->ki', pop0exp1, Proj0k.real)
-        g2_x = lib.einsum('xi,kxj->kij', pop0exp1, Popkk_x.real)
-        g2_y = lib.einsum('xi,kxj->kij', pop0exp1, Popkk_y.real)
-        h_diag += 2 * exponent * (g1[:,:,None] * (1 + 1j) - (g2_x + g2_y*1j))
-        for k in range(h_diag.shape[0]):
-            numpy.fill_diagonal(h_diag[k], numpy.diag(h_diag[k])*0.5)
-            h_diag[k] += h_diag[k].T
+        g1 = lib.einsum('xi,kxii->ki', pop0exp1, proj0K.real)
+        g2R = lib.einsum('xi,kxj->kij', pop0exp1, popk_plus)
+        g2I = lib.einsum('xi,kxj->kij', pop0exp1, popk_minus)
+        h_diag += 2 * exponent * ((g1[:,:,None] - g2R) + (g1[:,:,None] - g2I) * 1j)
+        for hk in h_diag:
+            numpy.fill_diagonal(hk, numpy.diag(hk)*0.5)
+            hk += hk.T
         h_diag = self.pack_uniq_var(h_diag)
-
 
         # hessian vector product
         Gk = lib.einsum('xi,kxij->kij', pop0exp1, proj0k)
 
-        def h_op(X):
-            X = self.unpack_uniq_var(X)
+        def h_op(x):
+            x = self.unpack_uniq_var(x)
 
-            x = numpy.zeros((self.kpts_symm.nkpts, self.norb, self.norb), dtype=numpy.complex128)
-            for q in range(nkpts_ibz):
-                idx = numpy.where(self.kpts_symm.bz2ibz==q)[0]
-                x[idx[0]] = X[q]
-                if idx.size == 2:
-                    x[idx[1]]= X[q].conj()
-
-            projx = lib.einsum('ktxil,tlj->kxij', projkt, x)
-            proj0xR = lib.einsum('kxij->xij', projx.real)
+            x = _unpack_ibz2bz(x, self.kpts_symm)
 
             # contributions from disconnected term
-            j0 = pop0exp2 * lib.einsum('xii->xi', proj0xR)
+            j0 = pop0exp2 * lib.einsum('txil,tli->xi', proj0k, x).real
             j1 = lib.einsum('xi,kxij->kij', j0, proj0k)
             hx = 4 * exponent * (exponent-1) * j1.astype(numpy.complex128)
 
             # contributions symmetric connected terms
-            j1 = lib.einsum('xj,kxij->kij', pop0exp1, projx)
+            j1 = lib.einsum('ktilj,tlj->kij', QPkt, x)
             hx += -2 * exponent * j1
 
             # contributions from asymmetric connected terms
@@ -889,47 +1045,29 @@ class KptsPipekMezeyReal(KptsOrbitalLocalizerReal,KptsPipekMezey):
                 numpy.fill_diagonal(hxk, numpy.diag(hxk)*0.5)
                 hxk -= hxk.conj().T
 
-            HX = numpy.zeros((nkpts_ibz, self.norb, self.norb), dtype=numpy.complex128)
-            for q in range(nkpts_ibz):
-                idx = numpy.where(self.kpts_symm.bz2ibz==q)[0]
-                if idx.size == 1:
-                    HX[q] = hx[idx[0]]
-                else:
-                    HX[q] = hx[idx[0]] + hx[idx[1]].conj()
+            hx = _pack_bz2ibz(hx, self.kpts_symm)
 
-            return self.pack_uniq_var(HX)
+            return self.pack_uniq_var(hx)
 
         return g, h_op, h_diag
 
-    def get_grad(self, u=None, proj=None):
-        if proj is None:
-            proj = self.atomic_pops(u)
-
-        kmesh = get_kmesh(self.cell, self.kpts)
-        scell, phase = k2gamma.get_phase(self.cell, self.kpts, kmesh=kmesh)
+    def get_grad(self, u=None, proj0k=None):
+        if proj0k is None:
+            proj0k = self.atomic_pops(u, mode='0k').transpose(2,0,1,3)
 
         exponent = self.exponent
 
-        pop0 = lib.einsum('ktxii->xi', proj.real)
+        pop0 = lib.einsum('kxii->xi', proj0k.real)
         pop0exp1 = pop0**(exponent-1)
-        projkt = proj
-        proj0k = lib.einsum('ktxij->txij', projkt)
         g = lib.einsum('xi,kxij->kij', pop0exp1, proj0k)
 
         for gk in g:
             numpy.fill_diagonal(gk, numpy.diag(gk)*0.5)
             gk -= gk.conj().T
 
-        G = numpy.zeros((self.kpts_symm.nkpts_ibz, self.norb, self.norb), dtype=numpy.complex128)
-        for q in range(self.kpts_symm.nkpts_ibz):
-            idx = numpy.where(self.kpts_symm.bz2ibz==q)[0]
-            if idx.size == 1:
-                G[q] = g[idx[0]]
-            else:
-                G[q] = g[idx[0]] + g[idx[1]].conj()
+        g = _pack_bz2ibz(g, self.kpts_symm)
 
-        return 2 * exponent * self.pack_uniq_var(G)
-
+        return 2 * exponent * self.pack_uniq_var(g)
 
 KPMReal = KPipekReal = KptsPipekMezeyReal
 
@@ -963,6 +1101,25 @@ def remove_trs_mo(mo_coeff_trs, kpts):
             mo_coeff[k2] = mo_coeff_trs[q]
 
     return mo_coeff
+
+def _pack_bz2ibz(g, kpts_symm, sign=1):
+    G = numpy.zeros((kpts_symm.nkpts_ibz, *g[0].shape), dtype=numpy.complex128)
+    for q in range(kpts_symm.nkpts_ibz):
+        idx = numpy.where(kpts_symm.bz2ibz==q)[0]
+        if idx.size == 1:
+            G[q] = g[idx[0]]
+        else:
+            G[q] = g[idx[0]] + sign * g[idx[1]].conj()
+    return G
+
+def _unpack_ibz2bz(G, kpts_symm, sign=1):
+    g = numpy.zeros((kpts_symm.nkpts, *G[0].shape), dtype=numpy.complex128)
+    for q in range(kpts_symm.nkpts_ibz):
+        idx = numpy.where(kpts_symm.bz2ibz==q)[0]
+        g[idx[0]] = G[q]
+        if idx.size == 2:
+            g[idx[1]] = sign * G[q].conj()
+    return g
 
 def wannierization(cell, kpts, mo_coeff, kmesh=None, refcell_only=False):
     mo_coeff = numpy.asarray(mo_coeff, order='C')
@@ -1035,13 +1192,14 @@ if __name__ == '__main__':
     H          0.00000        0.75545       -0.47116
     H          0.00000       -0.75545       -0.47116
     '''
-    cell.a = numpy.eye(3) * 20
+    cell.a = numpy.eye(3) * 5
     cell.basis = 'ccpvdz'
     cell.build()
 
     kmesh = [3,2,1]
-    kpts = cell.make_kpts(kmesh)
-    # kpts = cell.make_kpts(kmesh, time_reversal_symmetry=True)
+    # kpts = cell.make_kpts(kmesh)
+    kpts = cell.make_kpts(kmesh, time_reversal_symmetry=True)
+    kpts_symm = cell.make_kpts(kmesh, time_reversal_symmetry=True)
     # kpts = cell.make_kpts(kmesh, scaled_center=[0.37, 0.21, 0.85])
 
     mf = scf.KRHF(cell, kpts).rs_density_fit().run()
@@ -1078,18 +1236,28 @@ if __name__ == '__main__':
     # mo0 = mo0 + numpy.random.rand(*mo0.shape) * (0.1+0.1j)
     # mlo = PM(cell, mo0)
     mlo = KPM(cell, mo0, kpts)
+    # mlo = KPMReal(cell, mo0, kpts)
     # mlo.algorithm = 'bfgs'
     mlo.conv_tol = 1e-8
     # mlo = KPMReal(cell, mo0, kpts)
 
-    wann_coeff = mlo.get_wannier_function()
-    print('max|W.imag| = %.15g' % (abs(wann_coeff.imag).max()))
+    # x = numpy.random.rand(*mlo.zero_uniq_var().shape)
+    # uk = mlo.extract_rotation(x)
+    # uk = _unpack_ibz2bz(uk, kpts_symm)
+    # kmesh = get_kmesh(cell, kpts)
+    # scell, phase = k2gamma.get_phase(cell, kpts, kmesh=kmesh)
+    # nkpts = kpts_symm.nkpts
+    # U = lib.einsum('Rk,kmi,Sk->RmSi', phase, uk, phase.conj()).reshape(nkpts*uk[0].shape[0],-1)
+    # print(abs(U.imag).max())
+
+    wann_coeff0 = mlo.get_wannier_function()
+    print('max|W.imag| = %.15g' % (abs(wann_coeff0.imag).max()))
 
     # mlo = KPMReal(cell, mo0, kpts)
     mlo.verbose = 4
     mlo.init_guess = 'cho'
     mlo.exponent = 4
-    # mlo.pop_method = 'iao'
+    mlo.pop_method = 'iao-biorth'
     mlo.kernel()
 
     # stability check
@@ -1105,6 +1273,8 @@ if __name__ == '__main__':
 
     import sys
     sys.exit(1)
+
+    mlo = KPMReal(cell, mo0, kpts)
 
     # finite difference
     nkpts = len(kpts)
