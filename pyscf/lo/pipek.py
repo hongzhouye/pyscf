@@ -57,11 +57,11 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
     nmo = mo_coeff.shape[1]
     proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
 
+    if proj_data is None:
+        proj_data = get_proj_data(mol, mo_coeff, method, kpt)
+
     if method == 'becke':
-        if proj_data is None:
-            charge_matrices = becke_charge_matrices(mol)
-        else:
-            charge_matrices = proj_data
+        charge_matrices = proj_data
 
         for i in range(mol.natm):
             proj[i] = reduce(lib.dot, (mo_coeff.conj().T, charge_matrices[i], mo_coeff))
@@ -73,54 +73,28 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
             proj[i] = (csc + csc.conj().T) * .5
 
     elif method in ('lowdin', 'meta-lowdin'):
-        if proj_data is None:
-            s = get_ovlp(mol, kpt)
-            proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s, adjust_phase=False)
-            proj_coeff = lib.dot(s, proj_coeff)
-            offset_nr_by_atom = mol.offset_nr_by_atom()
-        else:
-            proj_coeff, offset_nr_by_atom = proj_data
+        proj_coeff, offset_nr_by_atom = proj_data
         csc = reduce(lib.dot, (mo_coeff.conj().T, proj_coeff))
         for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
             proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
 
-    elif method in ('iao', 'ibo', 'iao-biorth'):
-        if proj_data is None:
-            s = get_ovlp(mol, kpt)
-            if kpt is None:
-                iao_coeff = iao.iao(mol, mo_coeff)
-            else:
-                iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt])[0]
-            iao_mol = iao.reference_mol(mol)
-            offset_nr_by_atom = iao_mol.offset_nr_by_atom()
+    elif method == 'iao-biorth':
+        iao_coeff, iaotild_coeff, offset_nr_by_atom = proj_data
 
-        if method == 'iao-biorth':
-            if proj_data is None:
-                ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
-                iaotild_coeff = numpy.asarray(numpy.linalg.solve(ovlp,
-                                              iao_coeff.conj().T).conj().T, order='C')
-                iao_coeff = lib.dot(s, iao_coeff)
-                iaotild_coeff = lib.dot(s, iaotild_coeff)
-            else:
-                iao_coeff, iaotild_coeff, offset_nr_by_atom = proj_data
+        csc = reduce(lib.dot, (mo_coeff.conj().T, iao_coeff))
+        csctild = reduce(lib.dot, (mo_coeff.conj().T, iaotild_coeff))
 
-            csc = reduce(lib.dot, (mo_coeff.conj().T, iao_coeff))
-            csctild = reduce(lib.dot, (mo_coeff.conj().T, iaotild_coeff))
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+            proj1 = numpy.dot(csc[:,p0:p1], csctild[:,p0:p1].conj().T)
+            proj[i] = (proj1 + proj1.conj().T) * 0.5
 
-            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-                proj1 = numpy.dot(csc[:,p0:p1], csctild[:,p0:p1].conj().T)
-                proj[i] = (proj1 + proj1.conj().T) * 0.5
-        else:
-            if proj_data is None:
-                iao_coeff = orth.vec_lowdin(iao_coeff, s)
-                iao_coeff = lib.dot(s, iao_coeff)
-            else:
-                iao_coeff, offset_nr_by_atom = proj_data
+    elif method in ('iao', 'ibo'):  # Why is 'ibo' the same as 'iao'...?
+        iao_coeff, offset_nr_by_atom = proj_data
 
-            csc = reduce(lib.dot, (mo_coeff.conj().T, iao_coeff))
+        csc = reduce(lib.dot, (mo_coeff.conj().T, iao_coeff))
 
-            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-                proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+            proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
 
     else:
         raise KeyError('method = %s' % method)
@@ -156,6 +130,48 @@ def becke_charge_matrices(mol):
         charge_matrices.append(lib.dot(aow.conj().T, ao))
 
     return charge_matrices
+
+
+def get_proj_data(mol, mo_coeff, method, kpt):
+
+    method = method.lower().replace('_', '-')
+
+    if method == 'becke':
+        proj_data = becke_charge_matrices(mol)
+
+    elif method == 'mulliken':
+        proj_data = None
+
+    elif method in ('lowdin', 'meta-lowdin'):
+        s = get_ovlp(mol, kpt)
+        proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s, adjust_phase=False)
+        proj_coeff = lib.dot(s, proj_coeff)
+        proj_data = (proj_coeff, mol.offset_nr_by_atom())
+
+    elif method in ('iao', 'ibo', 'iao-biorth'):
+        s = get_ovlp(mol, kpt)
+        if kpt is None:
+            iao_coeff = iao.iao(mol, mo_coeff)
+        else:
+            iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt])[0]
+        iao_mol = iao.reference_mol(mol)
+
+        if method == 'iao-biorth':
+            ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
+            iaotild_coeff = numpy.asarray(numpy.linalg.solve(ovlp,
+                                          iao_coeff.conj().T).conj().T, order='C')
+            proj_coeff = lib.dot(s, iao_coeff)
+            projtild_coeff = lib.dot(s, iaotild_coeff)
+            proj_data = (proj_coeff, projtild_coeff, iao_mol.offset_nr_by_atom())
+        else:
+            iao_coeff = orth.vec_lowdin(iao_coeff, s)
+            proj_coeff = lib.dot(s, iao_coeff)
+            proj_data = (proj_coeff, iao_mol.offset_nr_by_atom())
+
+    else:
+        raise KeyError('method = %s' % method)
+
+    return proj_data
 
 
 class PipekMezey(boys.OrbitalLocalizer):
@@ -244,47 +260,7 @@ class PipekMezey(boys.OrbitalLocalizer):
         logger.info(self, 'exponent = %s',self.exponent)
 
     def get_proj_data(self, mol=None, mo_coeff=None, method=None, kpt=None):
-        if mol is None: mol = self.mol
-        if mo_coeff is None: mo_coeff = self.mo_coeff
-        if method is None: method = self.pop_method.lower().replace('_', '-')
-        if kpt is None: kpt = self.kpt
-
-        if method == 'becke':
-            proj_data = becke_charge_matrices(mol)
-
-        elif method == 'mulliken':
-            proj_data = None
-
-        elif method in ('lowdin', 'meta-lowdin'):
-            s = get_ovlp(mol, kpt)
-            proj_coeff = orth.orth_ao(mol, method, 'ANO', s=s, adjust_phase=False)
-            proj_coeff = lib.dot(s, proj_coeff)
-            proj_data = (proj_coeff, mol.offset_nr_by_atom())
-
-        elif method in ('iao', 'ibo', 'iao-biorth'):
-            s = get_ovlp(mol, kpt)
-            if kpt is None:
-                iao_coeff = iao.iao(mol, mo_coeff)
-            else:
-                iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt])[0]
-            iao_mol = iao.reference_mol(mol)
-
-            if method == 'iao-biorth':
-                ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
-                iaotild_coeff = numpy.asarray(numpy.linalg.solve(ovlp,
-                                              iao_coeff.conj().T).conj().T, order='C')
-                proj_coeff = lib.dot(s, iao_coeff)
-                projtild_coeff = lib.dot(s, iaotild_coeff)
-                proj_data = (proj_coeff, projtild_coeff, iao_mol.offset_nr_by_atom())
-            else:
-                iao_coeff = orth.vec_lowdin(iao_coeff, s)
-                proj_coeff = lib.dot(s, iao_coeff)
-                proj_data = (proj_coeff, iao_mol.offset_nr_by_atom())
-
-        else:
-            raise KeyError('method = %s' % method)
-
-        return proj_data
+        return get_proj_data(self.mol, self.mo_coeff, self.pop_method, self.kpt)
 
     def gen_g_hop(self, u=None):
         exponent = self.exponent
