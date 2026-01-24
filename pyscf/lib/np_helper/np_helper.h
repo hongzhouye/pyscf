@@ -105,13 +105,3 @@ void NPdgemm(const char trans_a, const char trans_b,
              const int offseta, const int offsetb, const int offsetc,
              double *a, double *b, double *c,
              const double alpha, const double beta);
-
-void NPomp_douter(const size_t m, const size_t n,
-                  const double *__restrict__ a,
-                  const double *__restrict__ b,
-                  double *__restrict__ c);
-
-void NPomp_zouter(const size_t m, const size_t n,
-                  const double complex *__restrict__ a,
-                  const double complex *__restrict__ b,
-                  double complex *__restrict__ c);

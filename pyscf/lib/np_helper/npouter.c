@@ -31,14 +31,29 @@ void NPomp_douter(const size_t m, const size_t n,
                   const double *__restrict__ b,
                   double *__restrict__ c)
 {
-    #pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < m; ++i) {
-        const double ai = a[i];
-        double *ci = c + i * n;
+    if (m == 0 || n == 0) return;
 
-        #pragma omp simd
+    if (2*m >= n) {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < m; ++i) {
+            const double ai = a[i];
+            double *ci = c + i * n;
+
+            #pragma omp simd
+            for (size_t j = 0; j < n; ++j) {
+                ci[j] += ai * b[j];
+            }
+        }
+    } else {
+        #pragma omp parallel for schedule(static)
         for (size_t j = 0; j < n; ++j) {
-            ci[j] += ai * b[j];
+            const double bj = b[j];
+
+            // stride by n in c, but this is the price of column-parallelism
+            #pragma omp simd
+            for (size_t i = 0; i < m; ++i) {
+                c[i * n + j] += a[i] * bj;
+            }
         }
     }
 }
@@ -53,14 +68,127 @@ void NPomp_zouter(const size_t m, const size_t n,
                   const double complex *__restrict__ b,
                   double complex *__restrict__ c)
 {
-    #pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < m; ++i) {
-        const double complex ai = a[i];
-        double complex *ci = c + i * n;
+    if (m == 0 || n == 0) return;
 
-        #pragma omp simd
+    if (2*m >= n) {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < m; ++i) {
+            const double complex ai = a[i];
+            double complex *ci = c + i * n;
+
+            #pragma omp simd
+            for (size_t j = 0; j < n; ++j) {
+                ci[j] += ai * b[j];
+            }
+        }
+    } else {
+        #pragma omp parallel for schedule(static)
         for (size_t j = 0; j < n; ++j) {
-            ci[j] += ai * b[j];
+            const double complex bj = b[j];
+
+            // stride by n in c, but this is the price of column-parallelism
+            #pragma omp simd
+            for (size_t i = 0; i < m; ++i) {
+                c[i * n + j] += a[i] * bj;
+            }
         }
     }
 }
+
+
+/*
+ * Performs the operation
+ *   C[i, j] += A[i] * B[j]
+ * where A and B are real/complex vectors and C is a complex matrix.
+ */
+void NPomp_dzouter(const size_t m, const size_t n,
+                  const double *__restrict__ a,
+                  const double complex *__restrict__ b,
+                  double complex *__restrict__ c)
+{
+    if (m == 0 || n == 0) return;
+
+    const double *__restrict__ bd = (const double *)b;
+    double *__restrict__ cd = (double *)c;
+
+    if (2*m >= n) {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < m; ++i) {
+            const double ai = a[i];
+            double *ci = cd + 2 * (i * n);
+
+            #pragma omp simd
+            for (size_t j = 0; j < n; ++j) {
+                const double br = bd[2*j];
+                const double bi = bd[2*j+1];
+
+                ci[2*j] += ai * br;
+                ci[2*j+1] += ai * bi;
+            }
+        }
+    } else {
+        #pragma omp parallel for schedule(static)
+        for (size_t j = 0; j < n; ++j) {
+            const double br = bd[2*j];
+            const double bi = bd[2*j+1];
+
+            #pragma omp simd
+            for (size_t i = 0; i < m; ++i) {
+                const double ai = a[i];
+
+                const size_t idx = 2 * (i * n + j);
+                cd[idx] += ai * br;
+                cd[idx+1] += ai * bi;
+            }
+        }
+    }
+}
+
+
+/*
+ * Performs the operation
+ *   C[i, j] += A[i] * B[j]
+ * where A and B are complex/real vectors and C is a complex matrix.
+ */
+ void NPomp_zdouter(const size_t m, const size_t n,
+                    const double complex *__restrict__ a,
+                    const double *__restrict__ b,
+                    double complex *__restrict__ c)
+ {
+     if (m == 0 || n == 0) return;
+
+     const double *__restrict__ ad = (const double *)a;
+     double *__restrict__ cd = (double *)c;
+
+     if (2*m >= n) {
+         #pragma omp parallel for schedule(static)
+         for (size_t i = 0; i < m; ++i) {
+             const double ar = ad[2*i + 0];
+             const double ai = ad[2*i + 1];
+
+             double *ci = cd + 2 * (i * n);
+
+             #pragma omp simd
+             for (size_t j = 0; j < n; ++j) {
+                 const double bj = b[j];
+                 ci[2*j + 0] += ar * bj;
+                 ci[2*j + 1] += ai * bj;
+             }
+         }
+     } else {
+         #pragma omp parallel for schedule(static)
+         for (size_t j = 0; j < n; ++j) {
+             const double bj = b[j];
+
+             #pragma omp simd
+             for (size_t i = 0; i < m; ++i) {
+                 const double ar = ad[2*i + 0];
+                 const double ai = ad[2*i + 1];
+
+                 const size_t idx = 2 * (i * n + j);
+                 cd[idx + 0] += ar * bj;
+                 cd[idx + 1] += ai * bj;
+             }
+         }
+     }
+ }

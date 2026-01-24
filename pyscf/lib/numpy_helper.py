@@ -1433,13 +1433,18 @@ def broadcast_mul(a, b, out=None):
 def outer(a, b, out=None):
     if a.dtype == numpy.float64 and b.dtype == numpy.float64:
         fn = _np_helper.NPomp_douter
+    elif a.dtype == numpy.float64 and b.dtype == numpy.complex128:
+        fn = _np_helper.NPomp_dzouter
+    elif a.dtype == numpy.complex128 and b.dtype == numpy.float64:
+        fn = _np_helper.NPomp_zdouter
     else:
         fn = _np_helper.NPomp_zouter
-        if a.dtype != numpy.complex128: a = a.astype(numpy.complex128)
-        if b.dtype != numpy.complex128: b = b.astype(numpy.complex128)
 
+    res_dtype = numpy.result_type(a, b)
     if out is None:
-        out = numpy.zeros((a.size, b.size), dtype=a.dtype)
+        out = numpy.zeros((a.size, b.size), dtype=res_dtype)
+    else:
+        assert( out.dtype == res_dtype )
 
     fn(ctypes.c_size_t(a.size),
        ctypes.c_size_t(b.size),
