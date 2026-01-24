@@ -74,27 +74,25 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
 
     elif method in ('lowdin', 'meta-lowdin'):
         proj_coeff, offset_nr_by_atom = proj_data
-        csc = reduce(lib.dot, (mo_coeff.conj().T, proj_coeff))
+        csc = lib.dot(proj_coeff.conj().T, mo_coeff)
         for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-            proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
+            lib.dot(csc[p0:p1].conj().T, csc[p0:p1], c=proj[i])
 
     elif method == 'iao-biorth':
-        iao_coeff, iaotild_coeff, offset_nr_by_atom = proj_data
+        proj_coeff, projtild_coeff, offset_nr_by_atom = proj_data
 
-        csc = reduce(lib.dot, (mo_coeff.conj().T, iao_coeff))
-        csctild = reduce(lib.dot, (mo_coeff.conj().T, iaotild_coeff))
-
+        csc = lib.dot(proj_coeff.conj().T, mo_coeff)
+        csctild = lib.dot(projtild_coeff.conj().T, mo_coeff)
         for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-            proj1 = numpy.dot(csc[:,p0:p1], csctild[:,p0:p1].conj().T)
-            proj[i] = (proj1 + proj1.conj().T) * 0.5
+            lib.dot(csc[p0:p1].conj().T, csctild[p0:p1], c=proj[i], alpha=0.5)
+            proj[i] += proj[i].conj().T
 
     elif method in ('iao', 'ibo'):  # Why is 'ibo' the same as 'iao'...?
-        iao_coeff, offset_nr_by_atom = proj_data
+        proj_coeff, offset_nr_by_atom = proj_data
 
-        csc = reduce(lib.dot, (mo_coeff.conj().T, iao_coeff))
-
+        csc = lib.dot(proj_coeff.conj().T, mo_coeff)
         for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-            proj[i] = numpy.dot(csc[:,p0:p1], csc[:,p0:p1].conj().T)
+            lib.dot(csc[p0:p1].conj().T, csc[p0:p1], c=proj[i])
 
     else:
         raise KeyError('method = %s' % method)
@@ -299,7 +297,6 @@ class PipekMezey(boys.OrbitalLocalizer):
                 hx += -2 * exponent * j1
 
                 # contributions from asymmetric connected terms
-                # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
                 j1 = numpy.dot(G, x)
                 j1 += numpy.dot(x, G)
                 hx += exponent * j1
@@ -322,7 +319,6 @@ class PipekMezey(boys.OrbitalLocalizer):
                 hx += -2 * exponent * j1
 
                 # contributions from asymmetric connected terms
-                # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
                 j1 = numpy.dot(G, x)
                 j1 += numpy.dot(x, G)
                 hx += exponent * j1
