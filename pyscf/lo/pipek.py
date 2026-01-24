@@ -421,7 +421,6 @@ class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
                 hx += -2 * exponent * j1
 
                 # contributions from asymmetric connected terms
-                # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
                 j1 = numpy.dot(G, x)
                 j1 += numpy.dot(x, G)
                 hx += exponent * j1
