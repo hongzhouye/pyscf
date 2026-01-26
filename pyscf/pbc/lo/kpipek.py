@@ -69,10 +69,10 @@ def atomic_pops_contract(cell, mo_coeff, kpts, exponent, method='meta_lowdin', p
         proj_data = get_proj_data(cell, mo_coeff, method, kpts)
 
     def contract_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
+        proj_coeff = proj_coeff.reshape(nkpts,nao,-1)
         kcsc = numpy.asarray([
             lib.dot(mo_coeff[k].conj().T, proj_coeff[k]) for k in range(nkpts)
         ])
-        kcsc = lib.einsum('kix,Sk->kiSx', kcsc, phase.conj()) / nkpts**0.5
 
         scsc = numpy.asarray(kcsc.sum(axis=0).reshape(nmo,-1), order='F')
         kcsc = numpy.asarray(kcsc.reshape(nkpts*nmo,-1), order='F')
@@ -99,12 +99,15 @@ def atomic_pops_contract(cell, mo_coeff, kpts, exponent, method='meta_lowdin', p
         return QP, proj0k, popk
 
     def contract_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom):
+        proj_coeff = proj_coeff.reshape(nkpts,nao,-1)
+        projtild_coeff = projtild_coeff.reshape(nkpts,nao,-1)
         kcsc = numpy.asarray([
             lib.dot(mo_coeff[k].conj().T, proj_coeff[k]) for k in range(nkpts)
         ])
         kcsctild = numpy.asarray([
             lib.dot(mo_coeff[k].conj().T, projtild_coeff[k]) for k in range(nkpts)
         ])
+
         kcsc = lib.einsum('kix,Sk->kiSx', kcsc, phase.conj()) / nkpts**0.5
         kcsctild = lib.einsum('kix,Sk->kiSx', kcsctild, phase.conj()) / nkpts**0.5
 
@@ -198,10 +201,10 @@ def atomic_pops_contract_symm(cell, mo_coeff, kpts_symm, exponent, method='meta_
         proj_data = get_proj_data(cell, mo_coeff, method, kpts)
 
     def contract_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
+        proj_coeff = proj_coeff.reshape(nkpts,nao,-1)
         kcsc = numpy.asarray([
             lib.dot(mo_coeff[k].conj().T, proj_coeff[k]) for k in range(nkpts)
         ])
-        kcsc = lib.einsum('kix,Sk->kiSx', kcsc, phase.conj()) / nkpts**0.5
 
         scsc = numpy.asarray(kcsc.sum(axis=0).reshape(nmo,-1), order='F')
         kcsc = numpy.asarray(kcsc.reshape(nkpts*nmo,-1), order='F')
@@ -249,12 +252,15 @@ def atomic_pops_contract_symm(cell, mo_coeff, kpts_symm, exponent, method='meta_
         return QP, proj0k, popk_plus, popk_minus
 
     def contract_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom):
+        proj_coeff = proj_coeff.reshape(nkpts,nao,-1)
+        projtild_coeff = projtild_coeff.reshape(nkpts,nao,-1)
         kcsc = numpy.asarray([
             lib.dot(mo_coeff[k].conj().T, proj_coeff[k]) for k in range(nkpts)
         ])
         kcsctild = numpy.asarray([
             lib.dot(mo_coeff[k].conj().T, projtild_coeff[k]) for k in range(nkpts)
         ])
+
         kcsc = lib.einsum('kix,Sk->kiSx', kcsc, phase.conj()) / nkpts**0.5
         kcsctild = lib.einsum('kix,Sk->kiSx', kcsctild, phase.conj()) / nkpts**0.5
 
@@ -361,10 +367,10 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
 
     def proj_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
         if mode == 'kk':
+            proj_coeff = proj_coeff.reshape(nkpts,nao,-1)
             kcsc = numpy.asarray([
                 lib.dot(mo_coeff[k].conj().T, proj_coeff[k]) for k in range(nkpts)
             ])
-            kcsc = lib.einsum('kix,Sk->kiSx', kcsc, phase.conj()) / nkpts**0.5
 
             kcsc = numpy.asarray(kcsc.reshape(nkpts*nmo,-1), order='F')
 
@@ -374,10 +380,10 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
             proj = proj.reshape(scell.natm,nkpts,nmo,nkpts,nmo)
 
         elif mode in ['0k','k0']:
+            proj_coeff = proj_coeff.reshape(nkpts,nao,-1)
             kcsc = numpy.asarray([
                 lib.dot(mo_coeff[k].conj().T, proj_coeff[k]) for k in range(nkpts)
             ])
-            kcsc = lib.einsum('kix,Sk->kiSx', kcsc, phase.conj()) / nkpts**0.5
 
             scsc = numpy.asarray(kcsc.sum(axis=0).reshape(nmo,-1), order='F')
             kcsc = numpy.asarray(kcsc.reshape(nkpts*nmo,-1), order='F')
@@ -395,8 +401,8 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
 
         elif mode == '00':
             proj = numpy.empty((scell.natm,nmo,nmo), dtype=mo_coeff.dtype)
-            proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
             proj_coeff = proj_coeff.reshape(nkpts*nao,-1)
+
             scsc = numpy.asarray(lib.dot(mo_coeff.reshape(-1,nmo).conj().T, proj_coeff), order='F')
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 lib.dot(scsc[:,p0:p1], scsc[:,p0:p1].conj().T, c=proj[i])
@@ -408,12 +414,15 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
 
     def proj_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom):
         if mode == 'kk':
+            proj_coeff = proj_coeff.reshape(nkpts,nao,-1)
+            projtild_coeff = projtild_coeff.reshape(nkpts,nao,-1)
             kcsc = numpy.asarray([
                 lib.dot(mo_coeff[k].conj().T, proj_coeff[k]) for k in range(nkpts)
             ])
             kcsctild = numpy.asarray([
                 lib.dot(mo_coeff[k].conj().T, projtild_coeff[k]) for k in range(nkpts)
             ])
+
             kcsc = lib.einsum('kix,Sk->kiSx', kcsc, phase.conj()) / nkpts**0.5
             kcsctild = lib.einsum('kix,Sk->kiSx', kcsctild, phase.conj()) / nkpts**0.5
 
@@ -428,14 +437,14 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
             proj = proj.reshape(scell.natm,nkpts,nmo,nkpts,nmo)
 
         elif mode in ['0k','k0']:
+            proj_coeff = proj_coeff.reshape(nkpts,nao,-1)
+            projtild_coeff = projtild_coeff.reshape(nkpts,nao,-1)
             kcsc = numpy.asarray([
                 lib.dot(mo_coeff[k].conj().T, proj_coeff[k]) for k in range(nkpts)
             ])
             kcsctild = numpy.asarray([
                 lib.dot(mo_coeff[k].conj().T, projtild_coeff[k]) for k in range(nkpts)
             ])
-            kcsc = lib.einsum('kix,Sk->kiSx', kcsc, phase.conj()) / nkpts**0.5
-            kcsctild = lib.einsum('kix,Sk->kiSx', kcsctild, phase.conj()) / nkpts**0.5
 
             scsc = numpy.asarray(kcsc.sum(axis=0).reshape(nmo,-1), order='F')
             scsctild = numpy.asarray(kcsctild.sum(axis=0).reshape(nmo,-1), order='F')
@@ -459,8 +468,6 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
 
         elif mode == '00':
             proj = numpy.empty((scell.natm,nmo,nmo), dtype=mo_coeff.dtype)
-            proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
-            projtild_coeff = lib.einsum('kmx,Sk->kmSx', projtild_coeff, phase.conj()) / nkpts**0.5
             proj_coeff = proj_coeff.reshape(nkpts*nao,-1)
             projtild_coeff = projtild_coeff.reshape(nkpts*nao,-1)
 
@@ -529,6 +536,7 @@ def get_proj_data(cell, mo_coeff, method, kpts):
         proj_coeff = numpy.asarray([orth.orth_ao(cell, method, 'ANO', s=s[k],
                                     adjust_phase=False) for k in range(nkpts)])
         proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
+        proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
         offset_nr_by_atom = scell.offset_nr_by_atom()
         proj_data = (proj_coeff, offset_nr_by_atom)
 
@@ -543,13 +551,17 @@ def get_proj_data(cell, mo_coeff, method, kpts):
             iaotild_coeff = numpy.asarray([numpy.linalg.solve(ovlp[k],
                                            iao_coeff[k].conj().T).conj().T
                                            for k in range(nkpts)], order='C')
-            proj_coeff = lib.einsum('kmn,knx->kmx', s, iao_coeff)
-            projtild_coeff = lib.einsum('kmn,knx->kmx', s, iaotild_coeff)
+            iao_coeff = lib.einsum('kmn,knx->kmx', s, iao_coeff)
+            iaotild_coeff = lib.einsum('kmn,knx->kmx', s, iaotild_coeff)
+            proj_coeff = lib.einsum('kmx,Sk->kmSx', iao_coeff, phase.conj()) / nkpts**0.5
+            projtild_coeff = lib.einsum('kmx,Sk->kmSx', iaotild_coeff,
+                                        phase.conj()) / nkpts**0.5
             proj_data = (proj_coeff, projtild_coeff, offset_nr_by_atom)
         else:
             proj_coeff = numpy.asarray([orth.vec_lowdin(iao_coeff[k], s[k])
                                         for k in range(nkpts)])
             proj_coeff = lib.einsum('kmn,knx->kmx', s, proj_coeff)
+            proj_coeff = lib.einsum('kmx,Sk->kmSx', proj_coeff, phase.conj()) / nkpts**0.5
             proj_data = (proj_coeff, offset_nr_by_atom)
 
     else:
@@ -797,9 +809,19 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
         if method is None: method = self.pop_method.lower().replace('_', '-')
         if kpts is None: kpts = self.kpts
 
-        return get_proj_data(cell, mo_coeff, method, kpts)
+        log = logger.new_logger(self, verbose=self.verbose-1)
+        cput0 = (logger.process_clock(), logger.perf_counter())
+
+        proj_data = get_proj_data(cell, mo_coeff, method, kpts)
+
+        log.timer('get_proj_data', *cput0)
+
+        return proj_data
 
     def gen_g_hop(self, u=None):
+        log = logger.new_logger(self, verbose=self.verbose-1)
+        cput0 = (logger.process_clock(), logger.perf_counter())
+
         exponent = self.exponent
 
         mo_coeff = self.rotate_orb(u)
@@ -852,6 +874,8 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
                 hxk -= hxk.conj().T
 
             return self.pack_uniq_var(hx)
+
+        log.timer('gen_g_hop', *cput0)
 
         return g, h_op, h_diag
 

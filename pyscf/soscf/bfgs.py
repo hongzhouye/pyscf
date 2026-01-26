@@ -91,7 +91,6 @@ def rotate_orb_cc(
         g = localizer.get_grad(u0)
         stat.tot_kf += 1
         gnorm = float(np.linalg.norm(g))
-        log.debug("L-BFGS |g|= %4.3g", gnorm)
 
         if gnorm < conv_tol_grad:
             u_step = localizer.identity_rotation()
