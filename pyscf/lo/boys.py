@@ -62,6 +62,8 @@ def kernel(localizer, mo_coeff=None, callback=None, verbose=None):
     else:
         u0 = localizer.get_init_guess(None)
 
+    cput1 = log.timer('initial guess', *cput0)
+
     e0 = localizer.cost_function(u0)
     g_orb = localizer.get_grad(u0)
     norm_gorb = numpy.linalg.norm(g_orb)
@@ -75,9 +77,8 @@ def kernel(localizer, mo_coeff=None, callback=None, verbose=None):
     else:
         raise KeyError('Unknown algorithm %s' % (str(localizer.algorithm)))
 
-    # rotaiter = rotate_orb_cc(localizer, u0, conv_tol_grad, verbose=log.verbose-1)
     u, g_orb, stat = next(rotaiter)
-    cput1 = log.timer('initializing CIAH', *cput0)
+    cput1 = log.timer('initializing CIAH', *cput1)
 
     tot_kf = stat.tot_kf
     tot_hop = stat.tot_hop

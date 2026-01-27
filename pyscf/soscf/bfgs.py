@@ -40,7 +40,7 @@ def rotate_orb_cc(
     localizer,
     u0,
     conv_tol_grad=None,
-    verbose=logger.NOTE,
+    verbose=None,
     maximize=False,
     m=10,
     c1=1e-4,
