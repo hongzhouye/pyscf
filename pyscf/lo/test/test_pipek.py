@@ -48,7 +48,9 @@ class Water(unittest.TestCase):
         def test1(mlo, loss_ref):
             for exponent in [2,3,4]:
                 mlo.set(exponent=exponent)
-                loss = mlo.cost_function()
+                loss = mlo.cost_function(mode=None) # test full projector
+                self.assertAlmostEqual(loss, loss_ref[exponent], 6)
+                loss = mlo.cost_function(mode='pop')
                 self.assertAlmostEqual(loss, loss_ref[exponent], 6)
 
         mol = self.mol

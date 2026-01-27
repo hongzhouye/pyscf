@@ -35,7 +35,7 @@ from pyscf.lo.stability import stability_jacobi, stability_newton
 from pyscf import __config__
 
 
-def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
+def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, mode=None):
     '''
     Kwargs:
         method : string
@@ -55,7 +55,34 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
     '''
     method = method.lower().replace('_', '-')
     nmo = mo_coeff.shape[1]
-    proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
+
+    def proj_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
+        csc = lib.dot(proj_coeff.conj().T, mo_coeff)
+
+        if mode == 'pop':
+            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float)
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+                proj[i] = (abs(csc[p0:p1])**2).sum(axis=0)
+        else:
+            proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+                lib.dot(csc[p0:p1].conj().T, csc[p0:p1], c=proj[i])
+        return proj
+
+    def proj_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom):
+        csc = lib.dot(proj_coeff.conj().T, mo_coeff)
+        csctild = lib.dot(projtild_coeff.conj().T, mo_coeff)
+
+        if mode == 'pop':
+            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float)
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+                proj[i] = (csc[p0:p1].conj()*csctild[p0:p1]).sum(axis=0).real
+        else:
+            proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+                lib.dot(csc[p0:p1].conj().T, csctild[p0:p1], c=proj[i], alpha=0.5)
+                proj[i] += proj[i].conj().T
+        return proj
 
     if proj_data is None:
         proj_data = get_proj_data(mol, mo_coeff, method, kpt)
@@ -63,36 +90,41 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None):
     if method == 'becke':
         charge_matrices = proj_data
 
-        for i in range(mol.natm):
-            proj[i] = reduce(lib.dot, (mo_coeff.conj().T, charge_matrices[i], mo_coeff))
+        if mode == 'pop':
+            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float)
+            for i in range(mol.natm):
+                proj[i] = lib.einsum('mi,mn,ni->i', mo_coeff.conj(), charge_matrices[i],
+                                     mo_coeff).real
+        else:
+            proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
+            for i in range(mol.natm):
+                proj[i] = reduce(lib.dot, (mo_coeff.conj().T, charge_matrices[i], mo_coeff))
 
     elif method == 'mulliken':
         s = get_ovlp(mol, kpt)
-        for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
-            csc = reduce(numpy.dot, (mo_coeff[p0:p1].conj().T, s[p0:p1], mo_coeff))
-            proj[i] = (csc + csc.conj().T) * .5
+        csc = mo_coeff
+        csctild = lib.dot(s, mo_coeff)
+        if mode == 'pop':
+            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float)
+            for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
+                proj[i] = (csc[p0:p1].conj()*csctild[p0:p1]).sum(axis=0).real
+        else:
+            proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
+            for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
+                proj[i] = lib.dot(csc[p0:p1].conj().T, csctild[p0:p1], c=proj[i], alpha=0.5)
+                proj[i] += proj[i].conj().T
 
     elif method in ('lowdin', 'meta-lowdin'):
         proj_coeff, offset_nr_by_atom = proj_data
-        csc = lib.dot(proj_coeff.conj().T, mo_coeff)
-        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-            lib.dot(csc[p0:p1].conj().T, csc[p0:p1], c=proj[i])
+        proj = proj_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
 
     elif method == 'iao-biorth':
         proj_coeff, projtild_coeff, offset_nr_by_atom = proj_data
-
-        csc = lib.dot(proj_coeff.conj().T, mo_coeff)
-        csctild = lib.dot(projtild_coeff.conj().T, mo_coeff)
-        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-            lib.dot(csc[p0:p1].conj().T, csctild[p0:p1], c=proj[i], alpha=0.5)
-            proj[i] += proj[i].conj().T
+        proj = proj_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom)
 
     elif method in ('iao', 'ibo'):  # Why is 'ibo' the same as 'iao'...?
         proj_coeff, offset_nr_by_atom = proj_data
-
-        csc = lib.dot(proj_coeff.conj().T, mo_coeff)
-        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-            lib.dot(csc[p0:p1].conj().T, csc[p0:p1], c=proj[i])
+        proj = proj_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
 
     else:
         raise KeyError('method = %s' % method)
@@ -353,17 +385,22 @@ class PipekMezey(boys.OrbitalLocalizer):
         g = lib.einsum('xi,xij->ij', popexp1, proj.real)
         return 2 * exponent * self.pack_uniq_var(g - g.T)
 
-    def cost_function(self, u=None):
-        proj = self.atomic_pops(u)
-        return (lib.einsum('xii->xi', proj.real)**self.exponent).sum()
+    def cost_function(self, u=None, mode='pop'):
+        if mode == 'pop':
+            pop = self.atomic_pops(u, mode=mode)
+            return (pop**self.exponent).sum()
+        else:
+            proj = self.atomic_pops(u)
+            return (lib.einsum('xii->xi', proj.real)**self.exponent).sum()
 
     @lib.with_doc(atomic_pops.__doc__)
-    def atomic_pops(self, u=None):
+    def atomic_pops(self, u=None, mode=None):
         mol = self.mol
         mo_coeff = self.rotate_orb(u)
         method = self.pop_method
 
-        return atomic_pops(mol, mo_coeff, method, kpt=self.kpt, proj_data=self._proj_data)
+        return atomic_pops(mol, mo_coeff, method, kpt=self.kpt, proj_data=self._proj_data,
+                           mode=mode)
 
     def kernel(self, mo_coeff=None, callback=None, verbose=None):
         self._proj_data = self.get_proj_data()
