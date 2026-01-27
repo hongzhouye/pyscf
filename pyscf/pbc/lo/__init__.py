@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pyscf.pbc.lo.kpipek import KptsPipekMezey, KPM
+from pyscf.pbc.lo.kpipek import KptsPipekMezey, KPM, KptsPipekMezeyReal, KPMReal

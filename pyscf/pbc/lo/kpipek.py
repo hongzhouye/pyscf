@@ -219,32 +219,24 @@ def atomic_pops_contract_symm(cell, mo_coeff, kpts_symm, exponent, method='meta_
             lib.dot(scsc[:,p0:p1], kcsc[:,p0:p1].conj().T, c=proj0k[i])
         proj0k = proj0k.reshape(scell.natm,nmo,nkpts,nmo)
 
-        popk = numpy.zeros((scell.natm,nkpts,nmo), dtype=numpy.float64)
-        QP = numpy.zeros((nkpts,nmo,nkpts,nmo,nmo), dtype=numpy.complex128)
-        buf = numpy.empty((nkpts*nmo,nkpts*nmo), dtype=QP.dtype)
-        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-            lib.dot(kcsc[:,p0:p1], kcsc[:,p0:p1].conj().T, c=buf)
-            popk[i] = numpy.diag(buf).real.reshape(nkpts,nmo)
-            lib.outer(buf.reshape(-1), popexp1[i], out=QP.reshape(-1, nmo))
-
         popk_plus = numpy.zeros((scell.natm,nkpts_ibz,nmo), dtype=numpy.float64)
         popk_minus = numpy.zeros((scell.natm,nkpts_ibz,nmo), dtype=numpy.float64)
         QP = numpy.zeros((nkpts,nmo,nkpts,nmo,nmo), dtype=numpy.complex128)
         buf = numpy.empty((nkpts*nmo,nkpts*nmo), dtype=QP.dtype)
-        bufR = numpy.empty((nkpts,nkpts,nmo,nmo), dtype=numpy.float64)
+        bufR = numpy.empty((nkpts,nkpts,nmo), dtype=numpy.float64)
         for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
-            numpy.dot(kcsc[:,p0:p1], kcsc[:,p0:p1].conj().T, out=buf)
+            lib.dot(kcsc[:,p0:p1], kcsc[:,p0:p1].conj().T, c=buf)
             lib.outer(buf.reshape(-1), popexp1[i], out=QP.reshape(-1, nmo))
 
-            bufR[:] = buf.real.reshape(nkpts,nmo,nkpts,nmo).transpose(0,2,1,3)
+            bufR[:] = lib.einsum('kiti->kti', buf.real.reshape(nkpts,nmo,nkpts,nmo))
             for q in range(nkpts_ibz):
                 idx = numpy.where(kpts_symm.bz2ibz==q)[0]
                 if idx.size == 1:
-                    popk_plus[i,q] = popk_minus[i,q] = numpy.diag(bufR[idx[0],idx[0]])
+                    popk_plus[i,q] = popk_minus[i,q] = bufR[idx[0],idx[0]]
                 else:
                     k1, k2 = idx
-                    pop1 = numpy.diag(bufR[k1,k1]) + numpy.diag(bufR[k2,k2])
-                    pop2 = numpy.diag(bufR[k1,k2]) + numpy.diag(bufR[k2,k1])
+                    pop1 = bufR[k1,k1] + bufR[k2,k2]
+                    pop2 = bufR[k1,k2] + bufR[k2,k1]
                     popk_plus[i,q] = pop1 + pop2
                     popk_minus[i,q] = pop1 - pop2
         buf = bufR = None
@@ -520,7 +512,7 @@ def atomic_pops(cell, mo_coeff, kpts, mode='kk', method='meta_lowdin', proj_data
     return proj
 
 
-def get_proj_data(cell, mo_coeff, method, kpts):
+def get_proj_data(cell, mo_coeff, method, kpts, minao=None):
     method = method.lower().replace('_', '-')
 
     mo_coeff = numpy.asarray(mo_coeff)
@@ -541,9 +533,10 @@ def get_proj_data(cell, mo_coeff, method, kpts):
         proj_data = (proj_coeff, offset_nr_by_atom)
 
     elif method in ('iao', 'ibo', 'iao-biorth'):
+        if minao is None: minao = 'minao'
         s = cell.pbc_intor('int1e_ovlp', hermi=1, kpts=kpts)
-        iao_coeff = iao.iao(cell, mo_coeff, kpts=kpts)
-        iao_scell = iao.reference_mol(scell)
+        iao_coeff = iao.iao(cell, mo_coeff, kpts=kpts, minao=minao)
+        iao_scell = iao.reference_mol(scell, minao=minao)
         offset_nr_by_atom = iao_scell.offset_nr_by_atom()
 
         if method == 'iao-biorth':
@@ -788,6 +781,7 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
     pop_method = getattr(__config__, 'lo_pipek_PM_pop_method', 'meta_lowdin')
     conv_tol = getattr(__config__, 'lo_pipek_PM_conv_tol', 1e-6)
     exponent = getattr(__config__, 'lo_pipek_PM_exponent', 2)  # any integer >= 2
+    minao = getattr(__config__, 'lo_pipek_PM_minao', 'minao')
 
     _keys = {'pop_method', 'conv_tol', 'exponent', '_proj_data'}
 
@@ -803,16 +797,17 @@ class KptsPipekMezey(KptsOrbitalLocalizer):
         logger.info(self, 'pop_method = %s',self.pop_method)
         logger.info(self, 'exponent = %s',self.exponent)
 
-    def get_proj_data(self, cell=None, mo_coeff=None, method=None, kpts=None):
+    def get_proj_data(self, cell=None, mo_coeff=None, method=None, kpts=None, minao=None):
         if cell is None: cell = self.cell
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if method is None: method = self.pop_method.lower().replace('_', '-')
         if kpts is None: kpts = self.kpts
+        if minao is None: minao = self.minao
 
         log = logger.new_logger(self, verbose=self.verbose-1)
         cput0 = (logger.process_clock(), logger.perf_counter())
 
-        proj_data = get_proj_data(cell, mo_coeff, method, kpts)
+        proj_data = get_proj_data(cell, mo_coeff, method, kpts, minao=minao)
 
         log.timer('get_proj_data', *cput0)
 
@@ -940,18 +935,88 @@ class KptsPipekMezeyReal(KptsOrbitalLocalizerReal,KptsPipekMezey):
             self.pop_method = pop_method
         self._proj_data = None
 
+    # def gen_g_hop(self, u=None):
+    #     log = logger.new_logger(self, verbose=self.verbose-1)
+    #     cput0 = (logger.process_clock(), logger.perf_counter())
+    #
+    #     exponent = self.exponent
+    #
+    #     mo_coeff = self.rotate_orb(u)
+    #     QPkt, proj0k, popk_plus, popk_minus = atomic_pops_contract_symm(self.cell, mo_coeff,
+    #                                                                     self.kpts_symm,
+    #                                                                     self.exponent,
+    #                                                                     method=self.pop_method,
+    #                                                                     proj_data=self._proj_data)
+    #     proj0k = proj0k.transpose(2,0,1,3)
+    #     popk_plus = popk_plus.transpose(1,0,2)
+    #     popk_minus = popk_minus.transpose(1,0,2)
+    #
+    #     pop0 = lib.einsum('kxii->xi', proj0k.real)
+    #     pop0exp1 = pop0**(exponent-1)
+    #     pop0exp2 = pop0**(exponent-2)
+    #
+    #     # gradient
+    #     g = self.get_grad(proj0k=proj0k)
+    #
+    #     # hessian diagonal
+    #     proj0K = _pack_bz2ibz(proj0k, self.kpts_symm)
+    #     g1 = lib.einsum('xi,txij->tij', pop0exp2, proj0K.real**2)
+    #     g2 = lib.einsum('xi,txij->tij', pop0exp2, proj0K.imag**2)
+    #     h_diag = -4 * exponent * (exponent-1) * (g1 + g2 * 1j)
+    #     g1 = lib.einsum('xi,kxii->ki', pop0exp1, proj0K.real)
+    #     g2R = lib.einsum('xi,kxj->kij', pop0exp1, popk_plus)
+    #     g2I = lib.einsum('xi,kxj->kij', pop0exp1, popk_minus)
+    #     h_diag += 2 * exponent * ((g1[:,:,None] - g2R) + (g1[:,:,None] - g2I) * 1j)
+    #     for hk in h_diag:
+    #         numpy.fill_diagonal(hk, numpy.diag(hk)*0.5)
+    #         hk += hk.T
+    #     h_diag = self.pack_uniq_var(h_diag)
+    #
+    #     # hessian vector product
+    #     Gk = lib.einsum('xi,kxij->kij', pop0exp1, proj0k)
+    #
+    #     def h_op(x):
+    #         x = self.unpack_uniq_var(x)
+    #
+    #         x = _unpack_ibz2bz(x, self.kpts_symm)
+    #
+    #         # contributions from disconnected term
+    #         j0 = pop0exp2 * lib.einsum('txil,tli->xi', proj0k, x).real
+    #         j1 = lib.einsum('xi,kxij->kij', j0, proj0k)
+    #         hx = 4 * exponent * (exponent-1) * numpy.asarray(j1, order='C', dtype=numpy.complex128)
+    #
+    #         # contributions symmetric connected terms
+    #         j1 = lib.einsum('kitlj,tlj->kij', QPkt, x)
+    #         hx += -2 * exponent * j1
+    #
+    #         # contributions from asymmetric connected terms
+    #         j1 = lib.einsum('kil,klj->kij', Gk, x)
+    #         j1 += lib.einsum('kil,klj->kij', x, Gk)
+    #         hx += exponent * j1
+    #
+    #         for hxk in hx:
+    #             numpy.fill_diagonal(hxk, numpy.diag(hxk)*0.5)
+    #             hxk -= hxk.conj().T
+    #
+    #         hx = _pack_bz2ibz(hx, self.kpts_symm)
+    #
+    #         return self.pack_uniq_var(hx)
+    #
+    #     log.timer('gen_g_hop', *cput0)
+    #
+    #     return g, h_op, h_diag
+
     def gen_g_hop(self, u=None):
+        log = logger.new_logger(self, verbose=self.verbose-1)
+        cput0 = (logger.process_clock(), logger.perf_counter())
+
         exponent = self.exponent
 
         mo_coeff = self.rotate_orb(u)
-        QPkt, proj0k, popk_plus, popk_minus = atomic_pops_contract_symm(self.cell, mo_coeff,
-                                                                        self.kpts_symm,
-                                                                        self.exponent,
-                                                                        method=self.pop_method,
-                                                                        proj_data=self._proj_data)
+        QPkt, proj0k, popk = atomic_pops_contract(self.cell, mo_coeff, self.kpts, self.exponent,
+                                                  method=self.pop_method, proj_data=self._proj_data)
         proj0k = proj0k.transpose(2,0,1,3)
-        popk_plus = popk_plus.transpose(1,0,2)
-        popk_minus = popk_minus.transpose(1,0,2)
+        popk = popk.transpose(1,0,2)
 
         pop0 = lib.einsum('kxii->xi', proj0k.real)
         pop0exp1 = pop0**(exponent-1)
@@ -962,13 +1027,13 @@ class KptsPipekMezeyReal(KptsOrbitalLocalizerReal,KptsPipekMezey):
 
         # hessian diagonal
         proj0K = _pack_bz2ibz(proj0k, self.kpts_symm)
+        popK = _pack_bz2ibz(popk, self.kpts_symm)
         g1 = lib.einsum('xi,txij->tij', pop0exp2, proj0K.real**2)
         g2 = lib.einsum('xi,txij->tij', pop0exp2, proj0K.imag**2)
         h_diag = -4 * exponent * (exponent-1) * (g1 + g2 * 1j)
         g1 = lib.einsum('xi,kxii->ki', pop0exp1, proj0K.real)
-        g2R = lib.einsum('xi,kxj->kij', pop0exp1, popk_plus)
-        g2I = lib.einsum('xi,kxj->kij', pop0exp1, popk_minus)
-        h_diag += 2 * exponent * ((g1[:,:,None] - g2R) + (g1[:,:,None] - g2I) * 1j)
+        g2 = lib.einsum('xi,kxj->kij', pop0exp1, popK)
+        h_diag += 2 * exponent * (g1[:,:,None] - g2) * (1 + 1j)
         for hk in h_diag:
             numpy.fill_diagonal(hk, numpy.diag(hk)*0.5)
             hk += hk.T
@@ -1004,7 +1069,10 @@ class KptsPipekMezeyReal(KptsOrbitalLocalizerReal,KptsPipekMezey):
 
             return self.pack_uniq_var(hx)
 
+        log.timer('gen_g_hop', *cput0)
+
         return g, h_op, h_diag
+
 
     def get_grad(self, u=None, proj0k=None):
         if proj0k is None:
