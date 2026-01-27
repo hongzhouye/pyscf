@@ -258,9 +258,24 @@ class PipekMezey(boys.OrbitalLocalizer):
         logger.info(self, 'exponent = %s',self.exponent)
 
     def get_proj_data(self, mol=None, mo_coeff=None, method=None, kpt=None):
-        return get_proj_data(self.mol, self.mo_coeff, self.pop_method, self.kpt)
+        if mol is None: mol = self.mol
+        if mo_coeff is None: mo_coeff = self.mo_coeff
+        if method is None: method = self.pop_method.lower().replace('_', '-')
+        if kpt is None: kpt = self.kpt
+
+        log = logger.new_logger(self, verbose=self.verbose-1)
+        cput0 = (logger.process_clock(), logger.perf_counter())
+
+        proj_data = get_proj_data(mol, mo_coeff, method, kpt)
+
+        log.timer('get_proj_data', *cput0)
+
+        return proj_data
 
     def gen_g_hop(self, u=None):
+        log = logger.new_logger(self, verbose=self.verbose-1)
+        cput0 = (logger.process_clock(), logger.perf_counter())
+
         exponent = self.exponent
         projR = self.atomic_pops(u).real    # real rotations only need proj.real
         pop = lib.einsum('xii->xi', projR)
@@ -324,6 +339,8 @@ class PipekMezey(boys.OrbitalLocalizer):
                 hx += exponent * j1
 
                 return self.pack_uniq_var(hx - hx.T)
+
+        log.timer('gen_g_hop', *cput0)
 
         return g, h_op, h_diag
 
