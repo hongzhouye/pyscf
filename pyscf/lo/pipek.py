@@ -60,7 +60,7 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, m
         csc = lib.dot(proj_coeff.conj().T, mo_coeff)
 
         if mode == 'pop':
-            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float)
+            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float64)
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj[i] = (abs(csc[p0:p1])**2).sum(axis=0)
         else:
@@ -74,7 +74,7 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, m
         csctild = lib.dot(projtild_coeff.conj().T, mo_coeff)
 
         if mode == 'pop':
-            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float)
+            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float64)
             for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
                 proj[i] = (csc[p0:p1].conj()*csctild[p0:p1]).sum(axis=0).real
         else:
@@ -91,7 +91,7 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, m
         charge_matrices = proj_data
 
         if mode == 'pop':
-            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float)
+            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float64)
             for i in range(mol.natm):
                 proj[i] = lib.einsum('mi,mn,ni->i', mo_coeff.conj(), charge_matrices[i],
                                      mo_coeff).real
@@ -105,7 +105,7 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, m
         csc = mo_coeff
         csctild = lib.dot(s, mo_coeff)
         if mode == 'pop':
-            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float)
+            proj = numpy.empty((mol.natm,nmo), dtype=numpy.float64)
             for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
                 proj[i] = (csc[p0:p1].conj()*csctild[p0:p1]).sum(axis=0).real
         else:
