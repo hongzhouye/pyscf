@@ -273,6 +273,7 @@ class PipekMezey(boys.OrbitalLocalizer):
     pop_method = getattr(__config__, 'lo_pipek_PM_pop_method', 'meta_lowdin')
     conv_tol = getattr(__config__, 'lo_pipek_PM_conv_tol', 1e-6)
     exponent = getattr(__config__, 'lo_pipek_PM_exponent', 2)  # any integer >= 2
+    direct_hop = getattr(__config__, 'lo_pipek_PM_direct_hop', False)  # any integer >= 2
 
     _keys = {'pop_method', 'conv_tol', 'exponent', 'kpt', '_proj_data'}
 
@@ -288,6 +289,7 @@ class PipekMezey(boys.OrbitalLocalizer):
         boys.OrbitalLocalizer.dump_flags(self, verbose)
         logger.info(self, 'pop_method = %s',self.pop_method)
         logger.info(self, 'exponent = %s',self.exponent)
+        logger.info(self, 'direct_hop = %s',self.direct_hop)
 
     def get_proj_data(self, mol=None, mo_coeff=None, method=None, kpt=None):
         if mol is None: mol = self.mol
@@ -329,7 +331,7 @@ class PipekMezey(boys.OrbitalLocalizer):
         G = lib.einsum('xi,xij->ij', popexp1, projR)
 
         mem_avail = self.mol.max_memory - lib.current_memory()[0]
-        if mem_avail * 0.5 > self.norb**3 * 8/1024**2:
+        if not self.direct_hop and mem_avail * 0.5 > self.norb**3 * 8/1024**2:
             QP = lib.einsum('xj,xil->ilj', popexp1, projR)
             def h_op(x):
                 x = self.unpack_uniq_var(x)
@@ -460,7 +462,7 @@ class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
         G = lib.einsum('xi,xij->ij', popexp1, proj)
 
         mem_avail = self.mol.max_memory - lib.current_memory()[0]
-        if mem_avail * 0.5 > self.norb**3 * 16/1024**2:
+        if not self.direct_hop and mem_avail * 0.5 > self.norb**3 * 16/1024**2:
             QP = lib.einsum('xj,xil->ilj', popexp1, proj)
             def h_op(x):
                 x = self.unpack_uniq_var(x)
