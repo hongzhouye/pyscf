@@ -233,7 +233,11 @@ def rotate_orb_cc(iah, u0, conv_tol_grad=None, verbose=logger.NOTE):
         t3m = log.timer('aug_hess in %d inner iters' % stat.imic, *t3m)
         u0 = (yield u, g_kf, stat)
 
+        # Separating timing of gen_g_hop from aug_hess
+        t2m = (logger.process_clock(), logger.perf_counter())
         g_kf, h_op, h_diag = iah.gen_g_hop(u0)
+        t3m = log.timer('gen h_op', *t2m)
+
         norm_gkf = numpy.linalg.norm(g_kf)
         norm_dg = numpy.linalg.norm(g_kf-g_orb)
         log.debug('    |g|= %4.3g (keyframe), |g-correction|= %4.3g',
