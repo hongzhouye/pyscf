@@ -264,7 +264,6 @@ class Boys(OrbitalLocalizer):
     Args:
         mol : Mole object
 
-    Kwargs:
         mo_coeff : size (N,N) numpy.array
             The orbital space to localize for Boys localization.
             When initializing the localization optimizer ``bopt = Boys(mo_coeff)``,

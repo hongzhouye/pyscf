@@ -41,6 +41,19 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, m
         method : string
             The atomic population projection scheme. It can be mulliken,
             lowdin, meta_lowdin, iao, or becke
+        mode : str or None
+            Specifies which matrix elements to compute.
+
+            If ``mode == 'pop'``, only diagonal elements
+                ``< i | \hat{P}_{\mathrm{atm}} | i >``
+            are evaluated. This mode is optimized for efficient computation of
+            atomic populations and the PM metric function.
+
+            For any other value of ``mode`` (including ``None``), the full matrix
+                ``< i | \hat{P}_{\mathrm{atm}} | j >``
+            is computed.
+
+            Default is ``None``.
 
     Returns:
         A 3-index tensor [A,i,j] indicates the population of any orbital-pair
@@ -55,6 +68,7 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, m
     '''
     method = method.lower().replace('_', '-')
     nmo = mo_coeff.shape[1]
+    if mode is None: mode = 'full'
 
     def proj_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
         csc = lib.dot(proj_coeff.conj().T, mo_coeff)
@@ -132,6 +146,126 @@ def atomic_pops(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, m
     return proj
 
 
+def gen_proj_op(mol, mo_coeff, method='meta_lowdin', kpt=None, proj_data=None, verbose=None):
+    '''
+    Kwargs:
+        method : string
+            The atomic population projection scheme. It can be mulliken,
+            lowdin, meta_lowdin, iao, or becke
+
+    Returns:
+        A 3-index tensor [A,i,j] indicates the population of any orbital-pair
+        density |i><j| for each species (atom in this case).  This tensor is
+        used to construct the population and gradients etc.
+
+        You can customize the PM localization wrt other population metric,
+        such as the charge of a site, the charge of a fragment (a group of
+        atoms) by overwriting this tensor.  See also the example
+        pyscf/examples/loc_orb/40-hubbard_model_PM_localization.py for the PM
+        localization of site-based population for hubbard model.
+    '''
+    method = method.lower().replace('_', '-')
+    nmo = mo_coeff.shape[1]
+
+    def get_proj_op_orth(mo_coeff, proj_coeff, offset_nr_by_atom):
+        natm = len(offset_nr_by_atom)
+
+        csc = lib.dot(proj_coeff.conj().T, mo_coeff)    # nproj,nmo
+        proj = numpy.empty((natm,nmo,nmo), dtype=csc.dtype)
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+            lib.dot(csc[p0:p1].conj().T, csc[p0:p1], c=proj[i])
+
+        def proj_op(x):
+            cscx = lib.dot(csc, x)
+            projx = numpy.empty((natm,nmo,nmo), dtype=cscx.dtype)
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+                lib.dot(csc[p0:p1].conj().T, cscx[p0:p1], c=projx[i])
+            return projx
+
+        return proj, proj_op
+
+    def get_proj_op_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom):
+        natm = len(offset_nr_by_atom)
+
+        csc = lib.dot(proj_coeff.conj().T, mo_coeff)    # nproj,nmo
+        csctild = lib.dot(projtild_coeff.conj().T, mo_coeff)    # nproj,nmo
+        proj = numpy.empty((natm,nmo,nmo), dtype=csc.dtype)
+        for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+            lib.dot(csc[p0:p1].conj().T, csctild[p0:p1], c=proj[i], alpha=0.5)
+            proj[i] += proj[i].conj().T
+
+        def proj_op(x):
+            cscx = lib.dot(csc, x)
+            csctildx = lib.dot(csctild, x)
+            projx = numpy.empty((natm,nmo,nmo), dtype=cscx.dtype)
+            for i, (b0, b1, p0, p1) in enumerate(offset_nr_by_atom):
+                lib.dot(csc[p0:p1].conj().T, csctildx[p0:p1], c=projx[i])
+                lib.dot(csctild[p0:p1].conj().T, cscx[p0:p1], c=projx[i], beta=1)
+            projx *= 0.5
+            return projx
+
+        return proj, proj_op
+
+
+    if proj_data is None:
+        proj_data = get_proj_data(mol, mo_coeff, method, kpt)
+
+    if method == 'becke':
+        charge_matrices = proj_data
+        natm = len(charge_matrices)
+
+        cms = [lib.dot(mo_coeff.conj().T, charge_matrices[i]) for i in range(natm)]
+
+        proj = numpy.empty((natm,nmo,nmo), dtype=mo_coeff.dtype)
+        for i in range(natm):
+            proj[i] = lib.dot(cms[i], mo_coeff)
+
+        def proj_op(x):
+            cx = lib.dot(mo_coeff, x)
+            projx = numpy.empty((natm,nmo,nmo), dtype=cx.dtype)
+            for i in range(natm):
+                projx[i] = lib.dot(cms[i], cx)
+            return projx
+
+    elif method == 'mulliken':
+        natm = mol.natm
+        s = get_ovlp(mol, kpt)
+        csc = mo_coeff
+        csctild = lib.dot(s, mo_coeff)
+
+        proj = numpy.empty((mol.natm,nmo,nmo), dtype=mo_coeff.dtype)
+        for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
+            lib.dot(csc[p0:p1].conj().T, csctild[p0:p1], c=proj[i], alpha=0.5)
+            proj[i] += proj[i].conj().T
+
+        def proj_op(x):
+            cscx = lib.dot(csc, x)
+            csctildx = lib.dot(csctild, x)
+            projx = numpy.empty((natm, nmo, nmo), dtype=cscx.dtype)
+            for i, (b0, b1, p0, p1) in enumerate(mol.offset_nr_by_atom()):
+                lib.dot(csc[p0:p1].conj().T, csctildx[p0:p1], c=projx[i])
+                lib.dot(csctild[p0:p1].conj().T, cscx[p0:p1], c=projx[i], beta=1)
+            projx *= 0.5
+            return projx
+
+    elif method in ('lowdin', 'meta-lowdin'):
+        proj_coeff, offset_nr_by_atom = proj_data
+        proj, proj_op = get_proj_op_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
+
+    elif method == 'iao-biorth':
+        proj_coeff, projtild_coeff, offset_nr_by_atom = proj_data
+        proj, proj_op = get_proj_op_biorth(mo_coeff, proj_coeff, projtild_coeff, offset_nr_by_atom)
+
+    elif method in ('iao', 'ibo'):  # Why is 'ibo' the same as 'iao'...?
+        proj_coeff, offset_nr_by_atom = proj_data
+        proj, proj_op = get_proj_op_orth(mo_coeff, proj_coeff, offset_nr_by_atom)
+
+    else:
+        raise KeyError('method = %s' % method)
+
+    return proj, proj_op
+
+
 def get_ovlp(mol, kpt=None):
     if getattr(mol, 'pbc_intor', None):  # whether mol object is a cell
         s = mol.pbc_intor('int1e_ovlp', hermi=1, kpt=kpt)
@@ -162,7 +296,7 @@ def becke_charge_matrices(mol):
     return charge_matrices
 
 
-def get_proj_data(mol, mo_coeff, method, kpt):
+def get_proj_data(mol, mo_coeff, method, kpt, minao=None):
 
     method = method.lower().replace('_', '-')
 
@@ -179,12 +313,13 @@ def get_proj_data(mol, mo_coeff, method, kpt):
         proj_data = (proj_coeff, mol.offset_nr_by_atom())
 
     elif method in ('iao', 'ibo', 'iao-biorth'):
+        if minao is None: minao = 'minao'
         s = get_ovlp(mol, kpt)
         if kpt is None:
-            iao_coeff = iao.iao(mol, mo_coeff)
+            iao_coeff = iao.iao(mol, mo_coeff, minao=minao)
         else:
-            iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt])[0]
-        iao_mol = iao.reference_mol(mol)
+            iao_coeff = iao.iao(mol, [mo_coeff], kpts=[kpt], minao=minao)[0]
+        iao_mol = iao.reference_mol(mol, minao=minao)
 
         if method == 'iao-biorth':
             ovlp = reduce(lib.dot, (iao_coeff.conj().T, s, iao_coeff))
@@ -206,12 +341,11 @@ def get_proj_data(mol, mo_coeff, method, kpt):
 
 class PipekMezey(boys.OrbitalLocalizer):
     '''The Pipek-Mezey localization optimizer that maximizes the orbital
-    population
+    population using real orthogonal rotation.
 
     Args:
         mol : Mole object
 
-    Kwargs:
         mo_coeff : size (N,N) numpy.array
             The orbital space to localize for PM localization.
             When initializing the localization optimizer ``bopt = PM(mo_coeff)``,
@@ -254,13 +388,21 @@ class PipekMezey(boys.OrbitalLocalizer):
             - 'meta-lowdin' (default) as defined in JCTC 10, 3784 (2014)
             - 'mulliken' original Pipek-Mezey scheme, JCP 90, 4916 (1989)
             - 'lowdin' Lowdin charges, JCTC 10, 642 (2014)
-            - 'iao' or 'ibo' intrinsic atomic orbitals, JCTC 9, 4384 (2013)
+            - 'iao' or 'ibo' intrinsic atomic orbitals with symmetric (i.e., Lowdin)
+              orthogonalization, JCTC 9, 4384 (2013)
+            - 'iao-biorth' biorthogonalized IAOs, JPCA 128, 8570 (2024)
             - 'becke' Becke charges, JCTC 10, 642 (2014)
             The IAO and Becke charges do not depend explicitly on the
             basis set, and have a complete basis set limit [JCTC 10,
             642 (2014)].
         exponent : int
-            The power to define norm. It can be 2 or 4. Default 2.
+            The power to define norm. It can be any integer >= 2. Default 2.
+        algorithm : str
+            Algorithm for maximizing the PM metric function. Currently support
+            'ciah' and 'bfgs'. Default 'ciah'.
+        minao : str or basis
+            MINAO for constructing IAO. This switch only affects calculations with
+            `pop_method` = 'iao'/'ibo'/'iao-biorth'. Default 'minao'.
 
     Saved results
 
@@ -272,12 +414,12 @@ class PipekMezey(boys.OrbitalLocalizer):
 
     pop_method = getattr(__config__, 'lo_pipek_PM_pop_method', 'meta_lowdin')
     conv_tol = getattr(__config__, 'lo_pipek_PM_conv_tol', 1e-6)
-    exponent = getattr(__config__, 'lo_pipek_PM_exponent', 2)  # any integer >= 2
-    direct_hop = getattr(__config__, 'lo_pipek_PM_direct_hop', False)  # any integer >= 2
+    exponent = getattr(__config__, 'lo_pipek_PM_exponent', 2)   # any integer >= 2
+    minao = getattr(__config__, 'lo_pipek_PM_minao', 'minao')   # allow user defined MINAO
 
-    _keys = {'pop_method', 'conv_tol', 'exponent', 'kpt', '_proj_data'}
+    _keys = {'pop_method', 'conv_tol', 'exponent', 'kpt', '_proj_data', 'minao'}
 
-    def __init__(self, mol, mo_coeff=None, pop_method=None, kpt=None):
+    def __init__(self, mol, mo_coeff, pop_method=None, kpt=None):
         boys.OrbitalLocalizer.__init__(self, mol, mo_coeff)
         self.maximize = True
         if pop_method is not None:
@@ -289,102 +431,79 @@ class PipekMezey(boys.OrbitalLocalizer):
         boys.OrbitalLocalizer.dump_flags(self, verbose)
         logger.info(self, 'pop_method = %s',self.pop_method)
         logger.info(self, 'exponent = %s',self.exponent)
-        logger.info(self, 'direct_hop = %s',self.direct_hop)
 
-    def get_proj_data(self, mol=None, mo_coeff=None, method=None, kpt=None):
+    def get_proj_data(self, mol=None, mo_coeff=None, method=None, kpt=None, minao=None):
         if mol is None: mol = self.mol
         if mo_coeff is None: mo_coeff = self.mo_coeff
         if method is None: method = self.pop_method.lower().replace('_', '-')
         if kpt is None: kpt = self.kpt
+        if minao is None: minao = self.minao
 
         log = logger.new_logger(self, verbose=self.verbose-1)
         cput0 = (logger.process_clock(), logger.perf_counter())
 
-        proj_data = get_proj_data(mol, mo_coeff, method, kpt)
+        proj_data = get_proj_data(mol, mo_coeff, method, kpt, minao=minao)
 
         log.timer('get_proj_data', *cput0)
 
         return proj_data
 
     def gen_g_hop(self, u=None):
-        log = logger.new_logger(self, verbose=self.verbose-1)
-        cput0 = (logger.process_clock(), logger.perf_counter())
-
         exponent = self.exponent
-        projR = self.atomic_pops(u).real    # real rotations only need proj.real
-        pop = lib.einsum('xii->xi', projR)
+        mo_coeff = self.rotate_orb(u)
+        proj, proj_op = gen_proj_op(self.mol, mo_coeff, method=self.pop_method, kpt=self.kpt,
+                                    proj_data=self._proj_data, verbose=self.verbose)
+
+        # Only the real part of proj is needed for real rotations
+        proj = numpy.ascontiguousarray(proj.real.transpose(1,2,0)) # i,j,x
+        pop = numpy.ascontiguousarray(lib.einsum('iix->ix', proj))
         popexp1 = pop**(exponent-1)
         popexp2 = pop**(exponent-2)
 
         # gradient
-        g = self.get_grad(proj=projR)
+        g = self.get_grad(u, proj=proj)
 
         # hessian diagonal
-        g1 = lib.einsum('xi,xi->i', popexp1, pop)
-        g2 = lib.einsum('xi,xj->ij', popexp1, pop)
+        g1 = lib.einsum('ix,ix->i', popexp1, pop)
+        g2 = lib.einsum('ix,jx->ij', popexp1, pop)
         h_diag  = 2 * exponent * (g1[:,None] - g2)
-        g1 = lib.einsum('xi,xij->ij', popexp2, projR**2)
+        g1 = lib.einsum('ijx,jx->ij', proj**2, popexp2)
         h_diag += -4 * exponent * (exponent-1) * g1
         h_diag = self.pack_uniq_var(h_diag + h_diag.T)
 
         # hessian vector product
-        G = lib.einsum('xi,xij->ij', popexp1, projR)
+        G = lib.einsum('ijx,jx->ij', proj, popexp1)
 
-        mem_avail = self.mol.max_memory - lib.current_memory()[0]
-        if not self.direct_hop and mem_avail * 0.5 > self.norb**3 * 8/1024**2:
-            QP = lib.einsum('xj,xil->ilj', popexp1, projR)
-            def h_op(x):
-                x = self.unpack_uniq_var(x)
+        def h_op(x):
+            x = self.unpack_uniq_var(x)
 
-                # contributions from disconnected term
-                j0 = popexp2 * lib.einsum('xik,ki->xi', projR, x)
-                j1 = lib.einsum('xi,xij->ij', j0, projR)
-                hx = 4 * exponent * (exponent-1) * j1
+            # Only the real part of projx is needed for real rotations
+            projx = numpy.ascontiguousarray(proj_op(x).real.transpose(1,2,0))
 
-                # contributions symmetric connected terms
-                j1 = lib.einsum('ilj,lj->ij', QP, x)
-                hx += -2 * exponent * j1
+            # disconnected
+            j0 = popexp2 * numpy.ascontiguousarray(lib.einsum('iix->ix', projx.real))
+            j1 = lib.einsum('ijx,jx->ij', proj, j0)
+            hx = -4 * exponent * (exponent-1) * j1
 
-                # contributions from asymmetric connected terms
-                j1 = numpy.dot(G, x)
-                j1 += numpy.dot(x, G)
-                hx += exponent * j1
+            # connected symmetric
+            hx += -2 * exponent * lib.einsum('ijx,jx->ij', projx, popexp1)
 
-                return self.pack_uniq_var(hx - hx.T)
+            # connected asymmetric
+            hx += -exponent * lib.dot(G, x.T)
+            hx += exponent * lib.einsum('ijx,ix->ij', projx, popexp1)
 
-        else:
-            def h_op(x):
-                x = self.unpack_uniq_var(x)
-
-                projx = lib.einsum('xik,kj->xij', projR, x)
-
-                # contributions from disconnected term
-                j0 = popexp2 * lib.einsum('xii->xi', projx)
-                j1 = lib.einsum('xi,xij->ij', j0, projR)
-                hx = 4 * exponent * (exponent-1) * j1
-
-                # contributions symmetric connected terms
-                j1 = lib.einsum('xj,xij->ij', popexp1, projx)
-                hx += -2 * exponent * j1
-
-                # contributions from asymmetric connected terms
-                j1 = numpy.dot(G, x)
-                j1 += numpy.dot(x, G)
-                hx += exponent * j1
-
-                return self.pack_uniq_var(hx - hx.T)
-
-        log.timer('gen_g_hop', *cput0)
+            return self.pack_uniq_var(hx - hx.T)
 
         return g, h_op, h_diag
 
     def get_grad(self, u=None, proj=None):
         if proj is None:
-            proj = self.atomic_pops(u)
+            # Only the real part of proj is needed for real rotations
+            proj = numpy.ascontiguousarray(self.atomic_pops(u).real.transpose(1,2,0))   # i,j,x
 
         exponent = self.exponent
-        popexp1 = lib.einsum('xii->xi', proj.real)**(exponent-1)
-        g = lib.einsum('xi,xij->ij', popexp1, proj.real)
+        popexp1 = numpy.ascontiguousarray(lib.einsum('iix->ix', proj.real))**(exponent-1)
+        g = -lib.einsum('ijx,jx->ij', proj, popexp1)
         return 2 * exponent * self.pack_uniq_var(g - g.T)
 
     def cost_function(self, u=None, mode='pop'):
@@ -431,7 +550,12 @@ PM = Pipek = PipekMezey
 
 @lib.with_doc(PipekMezey.__doc__)
 class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
-    def __init__(self, mol, mo_coeff=None, pop_method=None, kpt=None):
+    '''The Pipek-Mezey localization optimizer that maximizes the orbital
+    population using complex unitary rotation.
+
+    See the docstring of PipekMezey for Args/Kwargs.
+    '''
+    def __init__(self, mol, mo_coeff, pop_method=None, kpt=None):
         boys.OrbitalLocalizerComplex.__init__(self, mol, mo_coeff)
         self.maximize = True
         if pop_method is not None:
@@ -441,80 +565,58 @@ class PipekMezeyComplex(PipekMezey, boys.OrbitalLocalizerComplex):
 
     def gen_g_hop(self, u=None):
         exponent = self.exponent
-        proj = self.atomic_pops(u)
-        pop = lib.einsum('xii->xi', proj.real)
+        mo_coeff = self.rotate_orb(u)
+        proj, proj_op = gen_proj_op(self.mol, mo_coeff, method=self.pop_method, kpt=self.kpt,
+                                    proj_data=self._proj_data, verbose=self.verbose)
+
+        proj = numpy.ascontiguousarray(proj.transpose(1,2,0)) # i,j,x
+        pop = numpy.ascontiguousarray(lib.einsum('iix->ix', proj.real))
         popexp1 = pop**(exponent-1)
         popexp2 = pop**(exponent-2)
 
         # gradient
-        g = self.get_grad(proj=proj)
+        g = self.get_grad(u, proj=proj)
 
         # hessian diagonal
-        g1 = lib.einsum('xi->i', pop**exponent)
-        g2 = lib.einsum('xi,xj->ij', popexp1, pop)
-        h_diag = 2*exponent * (g1[:,None] - g2) * (1 + 1j)
-        g1 = lib.einsum('xi,xij->ij', popexp2, proj.real**2)
-        g2 = lib.einsum('xi,xij->ij', popexp2, proj.imag**2)
-        h_diag += -4*exponent*(exponent-1) * (g1 + g2 * 1j)
+        g1 = lib.einsum('ix,ix->i', popexp1, pop)
+        g2 = lib.einsum('ix,jx->ij', popexp1, pop)
+        h_diag = 2 * exponent * (g1[:,None] - g2) * (1 + 1j)
+        g1 = lib.einsum('ijx,jx->ij', proj.real**2, popexp2)
+        g2 = lib.einsum('ijx,jx->ij', proj.imag**2, popexp2)
+        h_diag += -4 * exponent * (exponent - 1) * (g1 + g2 * 1j)
         h_diag = self.pack_uniq_var(h_diag + h_diag.T)
 
         # hessian vector product
-        G = lib.einsum('xi,xij->ij', popexp1, proj)
+        G = lib.einsum('ijx,jx->ij', proj, popexp1)
 
-        mem_avail = self.mol.max_memory - lib.current_memory()[0]
-        if not self.direct_hop and mem_avail * 0.5 > self.norb**3 * 16/1024**2:
-            QP = lib.einsum('xj,xil->ilj', popexp1, proj)
-            def h_op(x):
-                x = self.unpack_uniq_var(x)
+        def h_op(x):
+            x = self.unpack_uniq_var(x)
 
-                # contributions from disconnected term
-                j0 = popexp2 * lib.einsum('xik,ki->xi', proj, x).real
-                j1 = lib.einsum('xi,xij->ij', j0, proj)
-                hx = 4 * exponent * (exponent-1) * j1.astype(numpy.complex128)
+            projx = numpy.ascontiguousarray(proj_op(x).transpose(1,2,0))
 
-                # contributions symmetric connected terms
-                j1 = lib.einsum('ilj,lj->ij', QP, x)
-                hx += -2 * exponent * j1
+            # disconnected
+            j0 = popexp2 * numpy.ascontiguousarray(lib.einsum('iix->ix', projx.real))
+            j1 = lib.einsum('ijx,jx->ij', proj, j0)
+            hx = -4 * exponent * (exponent-1) * j1.astype(numpy.complex128)
 
-                # contributions from asymmetric connected terms
-                j1 = numpy.dot(G, x)
-                j1 += numpy.dot(x, G)
-                hx += exponent * j1
+            # connected symmetric
+            hx += -2 * exponent * lib.einsum('ijx,jx->ij', projx, popexp1)
 
-                return self.pack_uniq_var(hx - hx.conj().T)
+            # connected asymmetric
+            hx += -exponent * lib.dot(G, x.conj().T)
+            hx += exponent * lib.einsum('ijx,ix->ij', projx, popexp1)
 
-        else:
-            def h_op(x):
-                x = self.unpack_uniq_var(x)
-
-                projx = lib.einsum('xik,kj->xij', proj, x)
-
-                # contributions from disconnected term
-                j0 = popexp2 * lib.einsum('xii->xi', projx.real)
-                j1 = lib.einsum('xi,xij->ij', j0, proj)
-                hx = 4 * exponent * (exponent-1) * j1.astype(numpy.complex128)
-
-                # contributions symmetric connected terms
-                j1 = lib.einsum('xj,xij->ij', popexp1, projx)
-                hx += -2 * exponent * j1
-
-                # contributions from asymmetric connected terms
-                # j1 = lib.einsum('xi,xij->ij', popexp1, projx)
-                j1 = numpy.dot(G, x)
-                j1 += numpy.dot(x, G)
-                hx += exponent * j1
-
-                return self.pack_uniq_var(hx - hx.conj().T)
+            return self.pack_uniq_var(hx - hx.conj().T)
 
         return g, h_op, h_diag
 
     def get_grad(self, u=None, proj=None):
         if proj is None:
-            proj = self.atomic_pops(u)
+            proj = numpy.ascontiguousarray(self.atomic_pops(u).transpose(1,2,0))   # i,j,x
 
         exponent = self.exponent
-        popexp1 = lib.einsum('xii->xi', proj.real)**(exponent-1)
-        g = lib.einsum('xi,xij->ij', popexp1, proj)
+        popexp1 = numpy.ascontiguousarray(lib.einsum('iix->ix', proj.real))**(exponent-1)
+        g = -lib.einsum('ijx,jx->ij', proj, popexp1)
         return 2 * exponent * self.pack_uniq_var(g - g.conj().T)
 
 
@@ -618,8 +720,8 @@ if __name__ == '__main__':
     #         g[i] = (func(x+dx) - func(x-dx)) / delta
     #     return g
     #
-    # def findiff_hess(func, x, delta=1e-4):
-    #     ''' Finite-difference Hessian
+    # def semifindiff_hess(fgrad, x, delta=1e-4):
+    #     ''' Finite-difference Hessian from gradient
     #     '''
     #     x = numpy.asarray(x)
     #     n = x.size
@@ -627,18 +729,19 @@ if __name__ == '__main__':
     #     for i in range(n):
     #         dxi = numpy.zeros_like(x)
     #         dxi[i] = delta*0.5
-    #         for j in range(i+1):
-    #             dxj = numpy.zeros_like(x)
-    #             dxj[j] = delta*0.5
-    #             hij = (func(x+dxi+dxj) + func(x-dxi-dxj) - func(x+dxi-dxj) - func(x-dxi+dxj)) / delta**2
-    #             h[i,j] = h[j,i] = hij
+    #         h[i] = (fgrad(x+dxi) - fgrad(x-dxi)) / delta
+    #     h = (h + h.T) * 0.5
     #     return h
     #
     # mo0 = mf.mo_coeff[:,mf.mo_occ>1e-6]
-    # # mo0 = mo0 + numpy.random.rand(*mo0.shape) * (0.1)
-    # mo0 = mo0 + numpy.random.rand(*mo0.shape) * (0.1+0.1j)
+    # mo0 = mo0 + numpy.random.rand(*mo0.shape) * (0.1)
+    # # mo0 = mo0 + numpy.random.rand(*mo0.shape) * (0.1+0.1j)
     # # mlo = PM(mol, mo0)
     # mlo = PMComplex(mol, mo0)
+    #
+    # # mlo.pop_method = 'iao-biorth'
+    # # mlo.pop_method = 'becke'
+    # # mlo.pop_method = 'mulliken'
     #
     # g, h_op, h_diag = mlo.gen_g_hop()
     # x = mlo.zero_uniq_var()
@@ -648,16 +751,30 @@ if __name__ == '__main__':
     #     h[:,i] = h_op(x)
     #     x[i] = 0
     #
+    # # g0, h_op0, h_diag0 = mlo.gen_g_hop_old()
+    # # h0 = numpy.zeros((mlo.pdim,mlo.pdim))
+    # # for i in range(mlo.pdim):
+    # #     x[i] = 1
+    # #     h0[:,i] = h_op0(x)
+    # #     x[i] = 0
+    # #
+    # # err = abs(h-h0).max()
+    # # print(f'Herr= {err:.3e}')
+    #
     # # finite difference
     # def func(x):
     #     u = mlo.extract_rotation(x)
     #     return -mlo.cost_function(u)
     #
+    # def fgrad(x):
+    #     u = mlo.extract_rotation(x)
+    #     return mlo.get_grad(u)
+    #
     # g1 = findiff_grad(func, x)
     # g_err = abs(g-g1).max()
     # print(f'Grad err: {g_err:.3e}')
     #
-    # h1 = findiff_hess(func, x)
+    # h1 = semifindiff_hess(fgrad, x)
     # h_err = abs(h-h1).max()
     # print(f'Hess err: {h_err:.3e}')
     #
