@@ -19,7 +19,8 @@ def stability_newton(mlo, verbose=None, return_status=False, nroots=STAB_NROOTS,
     x0 = numpy.zeros_like(g)
     mask = abs(g) > 1e-10
     x0[mask] = 1. / hdiag[mask]
-    x0 = numpy.vstack((x0, numpy.random.rand(5, x0.size)))  # add a few random vectors
+    # add a few preconditioned random vectors
+    x0 = numpy.vstack((x0, precond(numpy.random.rand(10, x0.size), 0, None)))
     e, v = lib.davidson(hop, x0, precond, tol=tol, verbose=log.verbose-1, nroots=nroots)
     log.info('stability: lowest eigs of H = %s', e)
     if nroots != 1:
@@ -38,50 +39,85 @@ def stability_newton(mlo, verbose=None, return_status=False, nroots=STAB_NROOTS,
 
 
 def stability_jacobi(mlo, verbose=None, return_status=False):
-    ''' Check whether Jacobi sweep.
+    '''Check Jacobi-sweep stability.
     '''
     log = logger.new_logger(mlo, verbose)
     exponent = mlo.exponent
 
     tril_ijdx = numpy.tril_indices(mlo.norb, k=-1)
     tril_idx, tril_jdx = tril_ijdx
-    thetapool = numpy.asarray([1,2,3])*0.25*numpy.pi
+    npair = tril_idx.size
+
+    thetapool = numpy.asarray([1, 2, 3]) * 0.25 * numpy.pi
 
     def update_rotation_local_(u, theta, i, j):
-        ui = u[:,i].copy()
-        uj = u[:,j].copy()
-        u[:,i] = ui*numpy.cos(theta) + uj*numpy.sin(theta)
-        u[:,j] = -ui*numpy.sin(theta) + uj*numpy.cos(theta)
+        ui = u[:, i].copy()
+        uj = u[:, j].copy()
+        c = numpy.cos(theta)
+        s = numpy.sin(theta)
+        u[:, i] = ui * c + uj * s
+        u[:, j] = -ui * s + uj * c
 
     u = mlo.identity_rotation()
     stable = True
+
     while True:
         Pij = mlo.atomic_pops(u).real
         Qi = lib.einsum('xii->xi', Pij)
-        Qiexp = Qi**exponent
-        Lij = (Qiexp[:,None,:] + Qiexp[:,:,None]).sum(axis=0)[tril_ijdx]
+        Qi_exp = Qi**exponent
+        Lij = (Qi_exp[:, tril_idx] + Qi_exp[:, tril_jdx]).sum(axis=0)
+
         dLij = numpy.zeros_like(Lij)
         thetas = numpy.zeros_like(Lij)
 
+        mem_avail = mlo.mol.max_memory - lib.current_memory()[0]
+        natm = Pij.shape[0]
+        blkpair = max(1, min(npair, numpy.floor(mem_avail*0.5 / (5*natm*8/1e6))))
+
+        # Loop over theta candidates and update best (theta, dL) for each pair
         for theta in thetapool:
             c = numpy.cos(theta)
             s = numpy.sin(theta)
+            c2 = c * c
+            s2 = s * s
+            cs2 = 2.0 * c * s
 
-            Qitild = (Qi*c**2)[:,:,None] + (Qi*s**2)[:,None,:] + 2*c*s*Pij
-            Qjtild = (Qi*s**2)[:,:,None] + (Qi*c**2)[:,None,:] - 2*c*s*Pij
-            dLijtild = (Qitild**exponent+Qjtild**exponent).sum(axis=0)[tril_ijdx] - Lij
-            mask = dLijtild > dLij + mlo.conv_tol
-            thetas[mask] = theta
-            dLij[mask] = dLijtild[mask]
+            # loop over pairs to save memory
+            for p0,p1 in lib.prange(0, npair, blkpair):
+                ps = slice(p0,p1)
+
+                ii = tril_idx[ps]
+                jj = tril_jdx[ps]
+
+                # Population after rotations
+                Qi_i = Qi[:, ii]
+                Qi_j = Qi[:, jj]
+                Pij_ij = Pij[:, ii, jj]
+                Qitild = Qi_i * c2 + Qi_j * s2 + cs2 * Pij_ij
+                Qjtild = Qi_i * s2 + Qi_j * c2 - cs2 * Pij_ij
+                Qi_i = Qi_j = Pij_ij = None
+
+                # Population change
+                dL_blk = (Qitild**exponent + Qjtild**exponent).sum(axis=0) - Lij[ps]
+                Qitild = Qjtild = None
+
+                # Find theta that increases the PM objective
+                mask = dL_blk > (dLij[ps] + mlo.conv_tol)
+                if numpy.any(mask):
+                    dLij[ps][mask] = dL_blk[mask]
+                    thetas[ps][mask] = theta
 
         idxs = numpy.where(dLij > mlo.conv_tol)[0]
-
         if idxs.size == 0:
             break
+
+        # Sort idxs in decreasing order
+        idxs = idxs[numpy.argsort(dLij[idxs])[::-1]]
 
         # Remove overlapping pairs using a greedy algorithm
         stable = False
         done = numpy.zeros(mlo.norb, dtype=bool)
+
         for idx in idxs:
             i, j = tril_idx[idx], tril_jdx[idx]
             if done[i] or done[j]:
@@ -90,11 +126,9 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
 
             theta = thetas[idx]
             log.info('Rotating orbital pair (%d,%d) by %.2f Pi. delta_f= %.14g',
-                      i, j, theta/numpy.pi, dLij[idx])
-            e0 = mlo.cost_function(u)
+                     i, j, theta/numpy.pi, dLij[idx])
+
             update_rotation_local_(u, theta, i, j)
-            e1 = mlo.cost_function(u)
-            print(f'{e0:.10f}  {e1:.10f}  {e1-e0:.10f}')
 
     if stable:
         log.info(f'{mlo.__class__.__name__} is stable in the Jacobi stability analysis')
@@ -102,7 +136,4 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
     else:
         mo_coeff = mlo.rotate_orb(u)
 
-    if return_status:
-        return mo_coeff, stable
-    else:
-        return mo_coeff
+    return (mo_coeff, stable) if return_status else mo_coeff
