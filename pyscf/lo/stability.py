@@ -72,7 +72,7 @@ def stability_jacobi(mlo, verbose=None, return_status=False):
 
         mem_avail = mlo.mol.max_memory - lib.current_memory()[0]
         natm = Pij.shape[0]
-        blkpair = max(1, min(npair, numpy.floor(mem_avail*0.5 / (5*natm*8/1e6))))
+        blkpair = max(1, min(npair, int(numpy.floor(mem_avail*0.5 / (5*natm*8/1e6)))))
 
         # Loop over theta candidates and update best (theta, dL) for each pair
         for theta in thetapool:
