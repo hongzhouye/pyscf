@@ -77,9 +77,7 @@ def get_k(mytdm, dm, hermi=1, kpts=None, kpts_band=None, omega=None):
         vks.append(_contract_k(
             cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
             mytdm.direct_scf_tol, mytdm.extent_tol,
-            mytdm.profile, mytdm.verbose,
-            getattr(mytdm, '_k_kernel', 'reference'),
-            getattr(mytdm, '_use_cintopt', False)))
+            mytdm.profile, mytdm.verbose))
 
     return np.asarray(vks).reshape(dm_shape)
 
@@ -94,8 +92,7 @@ def _k_to_real(a_kpts, phase, imag_tol=1e-4):
 
 
 def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
-                direct_scf_tol, extent_tol, profile=False, verbose=None,
-                kernel='reference', use_cintopt=False):
+                direct_scf_tol, extent_tol, profile=False, verbose=None):
     log = lib.logger.new_logger(cell, verbose)
     cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
 
@@ -111,11 +108,8 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
     intor = gto.moleintor._get_intor_and_comp(
         cell._add_suffix('int2e'), None)[0]
     fintor = getattr(gto.moleintor.libcgto, intor)
-    if use_cintopt:
-        cintopt = _vhf.make_cintopt(atm, bas, env, intor)
-        libpbc.CINTdel_pairdata_optimizer(cintopt)
-    else:
-        cintopt = lib.c_null_ptr()
+    cintopt = _vhf.make_cintopt(atm, bas, env, intor)
+    libpbc.CINTdel_pairdata_optimizer(cintopt)
     ao_loc = gto.moleintor.make_loc(bas, intor)
 
     as_double = {'dtype': np.float64, 'order': 'C'}
@@ -129,18 +123,10 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
     eri_Ls = np.asarray(eri_Ls, **as_double)
     bvk_cell_loc = np.asarray(bvk_cell_loc, **as_int)
 
-    if kernel == 'reference':
-        fcontract = libpbc.PBCtdm_contract_eri_dm
-        t_mod = bvk_Ts[:,None] - bvk_Ts
-    elif kernel == 'inverted':
-        fcontract = libpbc.PBCtdm_contract_eri_dm_inverted
-        t_mod = bvk_Ts[:,None] + bvk_Ts
-    else:
-        raise ValueError('Unknown TDM K kernel %s' % kernel)
-    t_mod = t_mod.reshape(-1, 3).T
+    t_mod = (bvk_Ts[:,None] + bvk_Ts).reshape(-1, 3).T
     t_mod %= np.asarray(kmesh)[:,None]
-    bbvk_loc = np.ravel_multi_index(t_mod, kmesh)
-    bbvk_loc = np.asarray(bbvk_loc, **as_int)
+    bvkadd_loc = np.ravel_multi_index(t_mod, kmesh)
+    bvkadd_loc = np.asarray(bvkadd_loc, **as_int)
 
     trans = np.linalg.solve(
         lattice_vectors.T, (dm_Ls[:,None] + eri_Ls).reshape(-1, 3).T)
@@ -163,8 +149,6 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
                  bvk_ncells, cell.nbas, nao)
         log.info('TDM profile: DM cells = %d, ERI cells = %d, threads = %d',
                  len(dm_Ls), len(eri_Ls), lib.num_threads())
-        log.info('TDM profile: kernel = %s, cintopt = %s',
-                 kernel, use_cintopt)
         log.info('TDM profile: direct_scf_tol = %.1e', direct_scf_tol)
 
     wall0 = lib.logger.perf_counter()
@@ -181,7 +165,7 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
 
     vk_bvk = np.zeros((bvk_ncells, nao, nao), **as_double)
     args = (
-        fintor, fcontract,
+        fintor,
         vk_bvk.ctypes.data_as(ctypes.c_void_p), cintopt,
         ctypes.c_int(len(dm_Ls)),
         dm_Ls.ctypes.data_as(ctypes.c_void_p),
@@ -190,7 +174,7 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
         eri_Ls.ctypes.data_as(ctypes.c_void_p),
         ctypes.c_int(len(bvk_Ls)),
         bvk_cell_loc.ctypes.data_as(ctypes.c_void_p),
-        bbvk_loc.ctypes.data_as(ctypes.c_void_p),
+        bvkadd_loc.ctypes.data_as(ctypes.c_void_p),
         bvkidx_by_dmcell.ctypes.data_as(ctypes.c_void_p),
         q_cond.ctypes.data_as(ctypes.c_void_p),
         ext_cond.ctypes.data_as(ctypes.c_void_p),

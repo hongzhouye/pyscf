@@ -52,8 +52,6 @@ class TDM(lib.StreamObject):
         self.dm_rcut = None
         self.ws_search_mesh = None
         self.profile = False
-        self._k_kernel = 'reference'
-        self._use_cintopt = False
 
     def dump_flags(self, verbose=None):
         log = lib.logger.new_logger(self, verbose)
