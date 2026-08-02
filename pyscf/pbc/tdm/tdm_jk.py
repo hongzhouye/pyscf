@@ -103,8 +103,8 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
         cell._atm, cell._bas, cell._env)
     atm, bas, env = gto.conc_env(atm, bas, env, atm, bas, env)
 
-    drv = getattr(libpbc, 'molexx_drv_3')
-    fcontract = getattr(libpbc, 'contract_eri_dm_3')
+    drv = libpbc.PBCtdm_k_drv
+    fcontract = libpbc.PBCtdm_contract_eri_dm
     intor = gto.moleintor._get_intor_and_comp(
         cell._add_suffix('int2e'), None)[0]
     fintor = getattr(gto.moleintor.libcgto, intor)
@@ -180,7 +180,7 @@ def _precompute_q_cond(cell, Ls):
         cell._atm, cell._bas, cell._env,
         cell._atm, cell._bas, cell._env)
 
-    drv = getattr(libpbc, 'precompute_q_cond')
+    drv = libpbc.PBCtdm_q_cond
     intor = gto.moleintor._get_intor_and_comp(
         cell._add_suffix('int2e'), None)[0]
     fintor = getattr(gto.moleintor.libcgto, intor)
