@@ -24,6 +24,7 @@ import numpy as np
 
 from pyscf import gto
 from pyscf import lib
+from pyscf.scf import _vhf
 from pyscf.pbc.lo.base import get_kmesh
 from pyscf.pbc.tdm import truncation
 
@@ -76,7 +77,9 @@ def get_k(mytdm, dm, hermi=1, kpts=None, kpts_band=None, omega=None):
         vks.append(_contract_k(
             cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
             mytdm.direct_scf_tol, mytdm.extent_tol,
-            mytdm.profile, mytdm.verbose))
+            mytdm.profile, mytdm.verbose,
+            getattr(mytdm, '_k_kernel', 'reference'),
+            getattr(mytdm, '_use_cintopt', False)))
 
     return np.asarray(vks).reshape(dm_shape)
 
@@ -91,7 +94,8 @@ def _k_to_real(a_kpts, phase, imag_tol=1e-4):
 
 
 def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
-                direct_scf_tol, extent_tol, profile=False, verbose=None):
+                direct_scf_tol, extent_tol, profile=False, verbose=None,
+                kernel='reference', use_cintopt=False):
     log = lib.logger.new_logger(cell, verbose)
     cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
 
@@ -104,11 +108,14 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
         cell._atm, cell._bas, cell._env)
     atm, bas, env = gto.conc_env(atm, bas, env, atm, bas, env)
 
-    fcontract = libpbc.PBCtdm_contract_eri_dm
     intor = gto.moleintor._get_intor_and_comp(
         cell._add_suffix('int2e'), None)[0]
     fintor = getattr(gto.moleintor.libcgto, intor)
-    cintopt = lib.c_null_ptr()
+    if use_cintopt:
+        cintopt = _vhf.make_cintopt(atm, bas, env, intor)
+        libpbc.CINTdel_pairdata_optimizer(cintopt)
+    else:
+        cintopt = lib.c_null_ptr()
     ao_loc = gto.moleintor.make_loc(bas, intor)
 
     as_double = {'dtype': np.float64, 'order': 'C'}
@@ -122,7 +129,15 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
     eri_Ls = np.asarray(eri_Ls, **as_double)
     bvk_cell_loc = np.asarray(bvk_cell_loc, **as_int)
 
-    t_mod = (bvk_Ts[:,None] - bvk_Ts).reshape(-1, 3).T
+    if kernel == 'reference':
+        fcontract = libpbc.PBCtdm_contract_eri_dm
+        t_mod = bvk_Ts[:,None] - bvk_Ts
+    elif kernel == 'inverted':
+        fcontract = libpbc.PBCtdm_contract_eri_dm_inverted
+        t_mod = bvk_Ts[:,None] + bvk_Ts
+    else:
+        raise ValueError('Unknown TDM K kernel %s' % kernel)
+    t_mod = t_mod.reshape(-1, 3).T
     t_mod %= np.asarray(kmesh)[:,None]
     bbvk_loc = np.ravel_multi_index(t_mod, kmesh)
     bbvk_loc = np.asarray(bbvk_loc, **as_int)
@@ -148,6 +163,8 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
                  bvk_ncells, cell.nbas, nao)
         log.info('TDM profile: DM cells = %d, ERI cells = %d, threads = %d',
                  len(dm_Ls), len(eri_Ls), lib.num_threads())
+        log.info('TDM profile: kernel = %s, cintopt = %s',
+                 kernel, use_cintopt)
         log.info('TDM profile: direct_scf_tol = %.1e', direct_scf_tol)
 
     wall0 = lib.logger.perf_counter()
