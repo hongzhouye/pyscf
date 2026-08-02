@@ -75,7 +75,8 @@ def get_k(mytdm, dm, hermi=1, kpts=None, kpts_band=None, omega=None):
         dm_real = truncation.apply_weights(cell, atmweights, dm_real)
         vks.append(_contract_k(
             cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
-            mytdm.direct_scf_tol, mytdm.extent_tol, mytdm.verbose))
+            mytdm.direct_scf_tol, mytdm.extent_tol,
+            mytdm.profile, mytdm.verbose))
 
     return np.asarray(vks).reshape(dm_shape)
 
@@ -90,7 +91,7 @@ def _k_to_real(a_kpts, phase, imag_tol=1e-4):
 
 
 def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
-                direct_scf_tol, extent_tol, verbose=None):
+                direct_scf_tol, extent_tol, profile=False, verbose=None):
     log = lib.logger.new_logger(cell, verbose)
     cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
 
@@ -103,7 +104,6 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
         cell._atm, cell._bas, cell._env)
     atm, bas, env = gto.conc_env(atm, bas, env, atm, bas, env)
 
-    drv = libpbc.PBCtdm_k_drv
     fcontract = libpbc.PBCtdm_contract_eri_dm
     intor = gto.moleintor._get_intor_and_comp(
         cell._add_suffix('int2e'), None)[0]
@@ -143,12 +143,28 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
     dm_cond = np.asarray(dm_cond.transpose(1, 2, 0), **as_double)
     dm_Ls = np.asarray(dm_Ls, **as_double)
 
+    if profile:
+        log.info('TDM profile: nkpts = %d, nbas = %d, nao = %d',
+                 bvk_ncells, cell.nbas, nao)
+        log.info('TDM profile: DM cells = %d, ERI cells = %d, threads = %d',
+                 len(dm_Ls), len(eri_Ls), lib.num_threads())
+        log.info('TDM profile: direct_scf_tol = %.1e', direct_scf_tol)
+
+    wall0 = lib.logger.perf_counter()
     q_cond = _precompute_q_cond(cell, eri_Ls)
+    if profile:
+        log.info('TDM profile: q_cond wall time = %.3f sec',
+                 lib.logger.perf_counter() - wall0)
+    wall0 = lib.logger.perf_counter()
     ext_cond, r_cond = _precompute_extent(cell, eri_Ls, extent_tol)
+    if profile:
+        log.info('TDM profile: extent wall time = %.3f sec',
+                 lib.logger.perf_counter() - wall0)
     log.timer('TDM integral screening', *cpu0)
 
     vk_bvk = np.zeros((bvk_ncells, nao, nao), **as_double)
-    drv(fintor, fcontract,
+    args = (
+        fintor, fcontract,
         vk_bvk.ctypes.data_as(ctypes.c_void_p), cintopt,
         ctypes.c_int(len(dm_Ls)),
         dm_Ls.ctypes.data_as(ctypes.c_void_p),
@@ -169,10 +185,43 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
         bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.nbas*4),
         env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
 
+    wall0 = lib.logger.perf_counter()
+    if profile:
+        counts = np.zeros(11, dtype=np.uint64)
+        times = np.zeros(3)
+        libpbc.PBCtdm_k_drv_profile(
+            *args, counts.ctypes.data_as(ctypes.c_void_p),
+            times.ctypes.data_as(ctypes.c_void_p))
+        _log_profile(log, counts, times,
+                     lib.logger.perf_counter() - wall0)
+    else:
+        libpbc.PBCtdm_k_drv(*args)
+
     phase = np.exp(1j*np.dot(kpts, bvk_Ls.T))
     vk = np.einsum('kR,Rpq->kpq', phase, vk_bvk)
     log.timer('TDM K build', *cpu0)
     return vk
+
+
+def _log_profile(log, counts, times, wall_time):
+    def screening(label, tested, skipped):
+        kept = tested - skipped
+        fraction = kept/tested if tested else 0
+        log.info('TDM profile: %-4s kept %d / %d (%.1f%%)',
+                 label, kept, tested, fraction*100)
+
+    log.info('TDM profile: C driver wall time = %.3f sec', wall_time)
+    screening('DM', counts[0], counts[1])
+    screening('bra', counts[2], counts[3])
+    screening('ket', counts[4], counts[5])
+    screening('QQR', counts[6], counts[7])
+    screening('ERI', counts[8], counts[8]-counts[9])
+    log.info('TDM profile: contraction calls = %d', counts[10])
+    log.info('TDM profile: thread time = %.3f sec', times[0])
+    log.info('TDM profile: integral time = %.3f sec', times[1])
+    log.info('TDM profile: contraction time = %.3f sec', times[2])
+    log.info('TDM profile: other/idle time = %.3f sec',
+             max(times[0]-times[1]-times[2], 0))
 
 
 def _precompute_q_cond(cell, Ls):

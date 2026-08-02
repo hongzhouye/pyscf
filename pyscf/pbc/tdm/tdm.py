@@ -29,6 +29,7 @@ class TDM(lib.StreamObject):
     _keys = {
         'cell', 'kpts', 'dm_trunc_level', 'dm_trunc_shape', 'ws_weight',
         'dm_rcut', 'ws_search_mesh', 'direct_scf_tol', 'extent_tol',
+        'profile',
     }
 
     def __init__(self, cell, kpts=np.zeros((1, 3))):
@@ -50,6 +51,7 @@ class TDM(lib.StreamObject):
         # Do not set these attributes unless you know what you are doing
         self.dm_rcut = None
         self.ws_search_mesh = None
+        self.profile = False
 
     def dump_flags(self, verbose=None):
         log = lib.logger.new_logger(self, verbose)
@@ -65,6 +67,8 @@ class TDM(lib.StreamObject):
             log.info('ws_search_mesh = %g', self.ws_search_mesh)
         log.info('direct_scf_tol = %g', self.direct_scf_tol)
         log.info('extent_tol = %g', self.extent_tol)
+        if self.profile:
+            log.info('TDM profiling = %s', self.profile)
         return self
 
     def reset(self, cell=None):

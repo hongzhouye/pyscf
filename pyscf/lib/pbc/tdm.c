@@ -18,13 +18,47 @@
 
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <math.h>
+#include <sys/time.h>
 #include "cint.h"
 #include "np_helper/np_helper.h"
 
 int GTOmax_shell_dim(int *ao_loc, int *shls_slice, int ncenter);
 int GTOmax_cache_size(int (*intor)(), int *shls_slice, int ncenter,
                       int *atm, int natm, int *bas, int nbas, double *env);
+
+enum {
+    TDM_DM_TEST,
+    TDM_DM_SKIP,
+    TDM_BRA_TEST,
+    TDM_BRA_SKIP,
+    TDM_KET_TEST,
+    TDM_KET_SKIP,
+    TDM_QQR_TEST,
+    TDM_QQR_SKIP,
+    TDM_INTOR_CALL,
+    TDM_INTOR_NONZERO,
+    TDM_CONTRACT_CALL,
+    TDM_NCOUNTS
+};
+
+enum {
+    TDM_TOTAL_TIME,
+    TDM_INTOR_TIME,
+    TDM_CONTRACT_TIME,
+    TDM_NTIMES
+};
+
+#define TDM_COUNT(profile, index) \
+    do { if (profile != NULL) { profile[index]++; } } while (0)
+
+static inline double wall_time(void)
+{
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return t.tv_sec + t.tv_usec * 1e-6;
+}
 
 static void shift_bas(double *env_loc, double *env, double *Ls, int ptr, int iL)
 {
@@ -201,7 +235,8 @@ void PBCtdm_contract_eri_dm(int (*intor)(), double *ij_out,
                             int ishr, int jshr,
                             int *ao_loc, int *atm, int natm,
                             int *bas, int nbas, double *env, int nenv,
-                            double *env_loc)
+                            double *env_loc, uint64_t *profile_counts,
+                            double *profile_times)
 {
     const size_t Nbas = nbas/4;
     const size_t Nao = ao_loc[Nbas] - ao_loc[0];
@@ -236,6 +271,8 @@ void PBCtdm_contract_eri_dm(int (*intor)(), double *ij_out,
 
     double *dm_pL, *pL, *pL2;
     double vtmp1[3], vtmp2[3];
+    double tick;
+    int intor_nonzero;
 
     for (lshr = 0; lshr < Nbas; lshr++) {
         lsh = lshr + lsh0;
@@ -265,7 +302,9 @@ void PBCtdm_contract_eri_dm(int (*intor)(), double *ij_out,
                     dm_pL = dm_Ls + dm_iL*3;
                     // dm cond
                     cond_dm = lk_dm_cond[dm_iL];
+                    TDM_COUNT(profile_counts, TDM_DM_TEST);
                     if (cond_dm < thresh_K) {
+                        TDM_COUNT(profile_counts, TDM_DM_SKIP);
                         continue;
                     }
                     for (i = 0; i < dilkj; i++) {
@@ -273,7 +312,9 @@ void PBCtdm_contract_eri_dm(int (*intor)(), double *ij_out,
                     }
                     for (iL = 0; iL < nimgs; iL++) {
                         // q_bra cond
+                        TDM_COUNT(profile_counts, TDM_BRA_TEST);
                         if (il_q_cond[iL] < thresh_K) {
+                            TDM_COUNT(profile_counts, TDM_BRA_SKIP);
                             continue;
                         }
                         cond_R_bra = il_R_cond + iL*3;
@@ -289,10 +330,13 @@ void PBCtdm_contract_eri_dm(int (*intor)(), double *ij_out,
                         for (jL = bvk_cell_loc[bvk_kL];
                              jL < bvk_cell_loc[bvk_kL+1]; jL++) {
                             // q_ket cond
+                            TDM_COUNT(profile_counts, TDM_KET_TEST);
                             if (kj_q_cond[jL] < thresh_K) {
+                                TDM_COUNT(profile_counts, TDM_KET_SKIP);
                                 continue;
                             }
                             // qqr cond
+                            TDM_COUNT(profile_counts, TDM_QQR_TEST);
                             cond_R_ket = kj_R_cond + jL*3;
                             // v2 = dm_L + Li + R_ket
                             vec3_add(vtmp2, vtmp1, cond_R_ket, 1.);
@@ -301,14 +345,26 @@ void PBCtdm_contract_eri_dm(int (*intor)(), double *ij_out,
                                         1.);
                             numer = il_q_dm_cond * kj_q_cond[jL];
                             if (numer/denom < thresh_K) {
+                                TDM_COUNT(profile_counts, TDM_QQR_SKIP);
                                 continue;
                             }
                             pL2 = Ls + jL*3;
                             // v2 = dm_L + Li + Lj  =  bvk_Lj + T
                             vec3_add(vtmp2, vtmp1, pL2, 1.);
                             shift_bas(env_loc, env, vtmp2, jptrxyz, 0);
-                            if (0 != (*intor)(buf, NULL, shls, atm, natm, bas, nbas,
-                                              env_loc, cintopt, cache)) {
+                            TDM_COUNT(profile_counts, TDM_INTOR_CALL);
+                            if (profile_times != NULL) {
+                                tick = wall_time();
+                            }
+                            intor_nonzero = (*intor)(
+                                buf, NULL, shls, atm, natm, bas, nbas,
+                                env_loc, cintopt, cache);
+                            if (profile_times != NULL) {
+                                profile_times[TDM_INTOR_TIME] +=
+                                    wall_time() - tick;
+                            }
+                            if (intor_nonzero != 0) {
+                                TDM_COUNT(profile_counts, TDM_INTOR_NONZERO);
                                 for (i = 0; i < dilkj; i++) {
                                     eri[i] += buf[i];
                                 }
@@ -317,8 +373,16 @@ void PBCtdm_contract_eri_dm(int (*intor)(), double *ij_out,
                     } // iL
 
                     lk_dm = dm + dm_iL*Nao*Nao + laor*Nao + kaor;
+                    TDM_COUNT(profile_counts, TDM_CONTRACT_CALL);
+                    if (profile_times != NULL) {
+                        tick = wall_time();
+                    }
                     contract_eri_dm_shl(bvk_ij_out, eri, lk_dm,
                                         di, dl, dk, dj, Nao);
+                    if (profile_times != NULL) {
+                        profile_times[TDM_CONTRACT_TIME] +=
+                            wall_time() - tick;
+                    }
 
                 } // dm_iL
             } // bvk_jL
@@ -326,15 +390,16 @@ void PBCtdm_contract_eri_dm(int (*intor)(), double *ij_out,
     } // lshr
 }
 
-void PBCtdm_k_drv(int (*intor)(), void (*contract)(), double *out,
-                  CINTOpt *cintopt, int dm_nimgs, double *dm_Ls, double *dm,
-                  int nimgs, double *Ls,
-                  int bvk_nimgs, int *bvk_cell_loc, int *bbvk_loc,
-                  int *bvkidx_by_dmcell,
-                  double *q_cond, double *ext_cond, double *R_cond,
-                  double *dm_cond, double thresh_K,
-                  int *ao_loc, int *atm, int natm,
-                  int *bas, int nbas, double *env, int nenv)
+static void tdm_k_drv(int (*intor)(), void (*contract)(), double *out,
+                      CINTOpt *cintopt, int dm_nimgs, double *dm_Ls, double *dm,
+                      int nimgs, double *Ls,
+                      int bvk_nimgs, int *bvk_cell_loc, int *bbvk_loc,
+                      int *bvkidx_by_dmcell,
+                      double *q_cond, double *ext_cond, double *R_cond,
+                      double *dm_cond, double thresh_K,
+                      int *ao_loc, int *atm, int natm,
+                      int *bas, int nbas, double *env, int nenv,
+                      uint64_t *profile_counts, double *profile_times)
 {
     const int Nbas = nbas/4;
     const int Nao = ao_loc[Nbas] - ao_loc[0];
@@ -347,16 +412,34 @@ void PBCtdm_k_drv(int (*intor)(), void (*contract)(), double *out,
     const size_t dlmax = GTOmax_shell_dim(ao_loc, shls_slice+2, 1);
     const size_t dkmax = GTOmax_shell_dim(ao_loc, shls_slice+4, 1);
     const size_t djmax = GTOmax_shell_dim(ao_loc, shls_slice+6, 1);
+    size_t ip;
+
+    if (profile_counts != NULL) {
+        for (ip = 0; ip < TDM_NCOUNTS; ip++) {
+            profile_counts[ip] = 0;
+        }
+    }
+    if (profile_times != NULL) {
+        for (ip = 0; ip < TDM_NTIMES; ip++) {
+            profile_times[ip] = 0.;
+        }
+    }
 
 #pragma omp parallel
 {
     size_t ij, ish, jsh, ijao;
+    uint64_t counts[TDM_NCOUNTS] = {0};
+    double times[TDM_NTIMES] = {0.};
+    double tick;
     int ishr, jshr;
     // buf = [eribuf1, eribuf2, Lsbuf, cache]
     double *buf = malloc(sizeof(double) * (dimax*dlmax*dkmax*djmax*2+cache_size));
     double *env_loc = malloc(sizeof(double)*nenv);
     NPdcopy(env_loc, env, nenv);
     double *ij_out;
+    if (profile_times != NULL) {
+        tick = wall_time();
+    }
 #pragma omp for schedule(dynamic)
     for (ij = 0; ij < Nbas*Nbas; ij++) {
         ishr = ij/Nbas;
@@ -374,9 +457,63 @@ void PBCtdm_k_drv(int (*intor)(), void (*contract)(), double *out,
                     bvkidx_by_dmcell,
                     ishr, jshr,
                     ao_loc, atm, natm, bas, nbas,
-                    env, nenv, env_loc);
+                    env, nenv, env_loc,
+                    profile_counts == NULL ? NULL : counts,
+                    profile_times == NULL ? NULL : times);
     } // ij
+    if (profile_times != NULL) {
+        times[TDM_TOTAL_TIME] += wall_time() - tick;
+    }
+#pragma omp critical
+    {
+        if (profile_counts != NULL) {
+            for (ip = 0; ip < TDM_NCOUNTS; ip++) {
+                profile_counts[ip] += counts[ip];
+            }
+        }
+        if (profile_times != NULL) {
+            for (ip = 0; ip < TDM_NTIMES; ip++) {
+                profile_times[ip] += times[ip];
+            }
+        }
+    }
     free(buf);
     free(env_loc);
 }
+}
+
+void PBCtdm_k_drv(int (*intor)(), void (*contract)(), double *out,
+                  CINTOpt *cintopt, int dm_nimgs, double *dm_Ls, double *dm,
+                  int nimgs, double *Ls,
+                  int bvk_nimgs, int *bvk_cell_loc, int *bbvk_loc,
+                  int *bvkidx_by_dmcell,
+                  double *q_cond, double *ext_cond, double *R_cond,
+                  double *dm_cond, double thresh_K,
+                  int *ao_loc, int *atm, int natm,
+                  int *bas, int nbas, double *env, int nenv)
+{
+    tdm_k_drv(intor, contract, out, cintopt,
+              dm_nimgs, dm_Ls, dm, nimgs, Ls,
+              bvk_nimgs, bvk_cell_loc, bbvk_loc, bvkidx_by_dmcell,
+              q_cond, ext_cond, R_cond, dm_cond, thresh_K,
+              ao_loc, atm, natm, bas, nbas, env, nenv, NULL, NULL);
+}
+
+void PBCtdm_k_drv_profile(int (*intor)(), void (*contract)(), double *out,
+                          CINTOpt *cintopt, int dm_nimgs, double *dm_Ls,
+                          double *dm, int nimgs, double *Ls,
+                          int bvk_nimgs, int *bvk_cell_loc, int *bbvk_loc,
+                          int *bvkidx_by_dmcell,
+                          double *q_cond, double *ext_cond, double *R_cond,
+                          double *dm_cond, double thresh_K,
+                          int *ao_loc, int *atm, int natm,
+                          int *bas, int nbas, double *env, int nenv,
+                          uint64_t *profile_counts, double *profile_times)
+{
+    tdm_k_drv(intor, contract, out, cintopt,
+              dm_nimgs, dm_Ls, dm, nimgs, Ls,
+              bvk_nimgs, bvk_cell_loc, bbvk_loc, bvkidx_by_dmcell,
+              q_cond, ext_cond, R_cond, dm_cond, thresh_K,
+              ao_loc, atm, natm, bas, nbas, env, nenv,
+              profile_counts, profile_times);
 }
