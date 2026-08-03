@@ -77,6 +77,7 @@ def get_k(mytdm, dm, hermi=1, kpts=None, kpts_band=None, omega=None):
         vks.append(_contract_k(
             cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
             mytdm.direct_scf_tol, mytdm.extent_tol,
+            mytdm.dm_cond, mytdm.use_qqr,
             hermi, mytdm.profile, mytdm.verbose))
 
     return np.asarray(vks).reshape(dm_shape)
@@ -92,7 +93,8 @@ def _k_to_real(a_kpts, phase, imag_tol=1e-4):
 
 
 def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
-                direct_scf_tol, extent_tol, hermi=1,
+                direct_scf_tol, extent_tol, dm_cond='absmax', use_qqr=True,
+                hermi=1,
                 profile=False, verbose=None):
     log = lib.logger.new_logger(cell, verbose)
     cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
@@ -140,9 +142,8 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
     log.timer('TDM BvK indices', *cpu0)
 
     dm_real = np.asarray(dm_real, **as_double)
-    dm_cond = np.asarray([
-        lib.condense('NP_absmax', x, ao_loc0) for x in dm_real])
-    dm_cond = np.asarray(dm_cond.transpose(1, 2, 0), **as_double)
+    dm_cond = np.asarray(
+        _get_dm_cond(dm_real, ao_loc0, dm_cond), **as_double)
     dm_Ls = np.asarray(dm_Ls, **as_double)
 
     if profile:
@@ -157,11 +158,17 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
     if profile:
         log.info('TDM profile: q_cond wall time = %.3f sec',
                  lib.logger.perf_counter() - wall0)
-    wall0 = lib.logger.perf_counter()
-    ext_cond, r_cond = _precompute_extent(cell, eri_Ls, extent_tol)
-    if profile:
-        log.info('TDM profile: extent wall time = %.3f sec',
-                 lib.logger.perf_counter() - wall0)
+    if use_qqr:
+        wall0 = lib.logger.perf_counter()
+        ext_cond, r_cond = _precompute_extent(cell, eri_Ls, extent_tol)
+        if profile:
+            log.info('TDM profile: extent wall time = %.3f sec',
+                     lib.logger.perf_counter() - wall0)
+        ext_cond_ptr = ext_cond.ctypes.data_as(ctypes.c_void_p)
+        r_cond_ptr = r_cond.ctypes.data_as(ctypes.c_void_p)
+    else:
+        ext_cond_ptr = lib.c_null_ptr()
+        r_cond_ptr = lib.c_null_ptr()
     log.timer('TDM integral screening', *cpu0)
 
     vk_bvk = np.zeros((bvk_ncells, nao, nao), **as_double)
@@ -178,8 +185,8 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
         bvkadd_loc.ctypes.data_as(ctypes.c_void_p),
         bvkidx_by_dmcell.ctypes.data_as(ctypes.c_void_p),
         q_cond.ctypes.data_as(ctypes.c_void_p),
-        ext_cond.ctypes.data_as(ctypes.c_void_p),
-        r_cond.ctypes.data_as(ctypes.c_void_p),
+        ext_cond_ptr,
+        r_cond_ptr,
         dm_cond.ctypes.data_as(ctypes.c_void_p),
         ctypes.c_double(direct_scf_tol),
         ao_loc.ctypes.data_as(ctypes.c_void_p),
@@ -197,7 +204,7 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
             *args, counts.ctypes.data_as(ctypes.c_void_p),
             times.ctypes.data_as(ctypes.c_void_p))
         _log_profile(log, counts, times,
-                     lib.logger.perf_counter() - wall0)
+                     lib.logger.perf_counter() - wall0, use_qqr)
     else:
         drv = (libpbc.PBCtdm_k_drv_hermi if hermi == 1 else
                libpbc.PBCtdm_k_drv)
@@ -212,6 +219,19 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
     return vk
 
 
+def _get_dm_cond(dm_real, ao_loc, cond):
+    ops = {
+        'absmax': 'NP_absmax',
+        'norm': 'NP_norm',
+        'abssum': 'NP_abssum',
+    }
+    if cond not in ops:
+        raise ValueError('Unknown DM condition %s' % cond)
+    dm_cond = np.asarray([
+        lib.condense(ops[cond], x, ao_loc) for x in dm_real])
+    return dm_cond.transpose(1, 2, 0)
+
+
 def _fill_hermi(vk_bvk, bvk_Ts, kmesh, ao_loc):
     t_mod = (-bvk_Ts).T % np.asarray(kmesh)[:,None]
     bvk_inv = np.ravel_multi_index(t_mod, kmesh)
@@ -223,7 +243,7 @@ def _fill_hermi(vk_bvk, bvk_Ts, kmesh, ao_loc):
                 vk_bvk[bvk_inv,j0:j1,i0:i1].transpose(0, 2, 1))
 
 
-def _log_profile(log, counts, times, wall_time):
+def _log_profile(log, counts, times, wall_time, use_qqr=True):
     def screening(label, tested, skipped):
         kept = tested - skipped
         fraction = kept/tested if tested else 0
@@ -234,7 +254,7 @@ def _log_profile(log, counts, times, wall_time):
     screening('DM', counts[0], counts[1])
     screening('bra', counts[2], counts[3])
     screening('ket', counts[4], counts[5])
-    screening('QQR', counts[6], counts[7])
+    screening('QQR' if use_qqr else 'QQ', counts[6], counts[7])
     screening('ERI', counts[8], counts[8]-counts[9])
     log.info('TDM profile: contraction calls = %d', counts[10])
     log.info('TDM profile: thread time = %.3f sec', times[0])
