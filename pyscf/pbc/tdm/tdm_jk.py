@@ -77,7 +77,7 @@ def get_k(mytdm, dm, hermi=1, kpts=None, kpts_band=None, omega=None):
         vks.append(_contract_k(
             cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
             mytdm.direct_scf_tol, mytdm.extent_tol,
-            mytdm.profile, mytdm.verbose))
+            hermi, mytdm.profile, mytdm.verbose))
 
     return np.asarray(vks).reshape(dm_shape)
 
@@ -92,7 +92,8 @@ def _k_to_real(a_kpts, phase, imag_tol=1e-4):
 
 
 def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
-                direct_scf_tol, extent_tol, profile=False, verbose=None):
+                direct_scf_tol, extent_tol, hermi=1,
+                profile=False, verbose=None):
     log = lib.logger.new_logger(cell, verbose)
     cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
 
@@ -190,18 +191,36 @@ def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
     if profile:
         counts = np.zeros(11, dtype=np.uint64)
         times = np.zeros(3)
-        libpbc.PBCtdm_k_drv_profile(
+        drv = (libpbc.PBCtdm_k_drv_hermi_profile if hermi == 1 else
+               libpbc.PBCtdm_k_drv_profile)
+        drv(
             *args, counts.ctypes.data_as(ctypes.c_void_p),
             times.ctypes.data_as(ctypes.c_void_p))
         _log_profile(log, counts, times,
                      lib.logger.perf_counter() - wall0)
     else:
-        libpbc.PBCtdm_k_drv(*args)
+        drv = (libpbc.PBCtdm_k_drv_hermi if hermi == 1 else
+               libpbc.PBCtdm_k_drv)
+        drv(*args)
+
+    if hermi == 1:
+        _fill_hermi(vk_bvk, bvk_Ts, kmesh, ao_loc0)
 
     phase = np.exp(1j*np.dot(kpts, bvk_Ls.T))
     vk = np.einsum('kR,Rpq->kpq', phase, vk_bvk)
     log.timer('TDM K build', *cpu0)
     return vk
+
+
+def _fill_hermi(vk_bvk, bvk_Ts, kmesh, ao_loc):
+    t_mod = (-bvk_Ts).T % np.asarray(kmesh)[:,None]
+    bvk_inv = np.ravel_multi_index(t_mod, kmesh)
+    for ish in range(len(ao_loc)-1):
+        i0, i1 = ao_loc[ish:ish+2]
+        for jsh in range(ish):
+            j0, j1 = ao_loc[jsh:jsh+2]
+            vk_bvk[:,i0:i1,j0:j1] = (
+                vk_bvk[bvk_inv,j0:j1,i0:i1].transpose(0, 2, 1))
 
 
 def _log_profile(log, counts, times, wall_time):

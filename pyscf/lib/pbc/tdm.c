@@ -402,7 +402,8 @@ static void tdm_k_drv(int (*intor)(), double *out,
                       double *dm_cond, double thresh_K,
                       int *ao_loc, int *atm, int natm,
                       int *bas, int nbas, double *env, int nenv,
-                      uint64_t *profile_counts, double *profile_times)
+                      int hermi, uint64_t *profile_counts,
+                      double *profile_times)
 {
     const int Nbas = nbas/4;
     const int Nao = ao_loc[Nbas] - ao_loc[0];
@@ -448,6 +449,9 @@ static void tdm_k_drv(int (*intor)(), double *out,
     for (ij = 0; ij < Nbas*Nbas; ij++) {
         ishr = ij/Nbas;
         jshr = ij%Nbas;
+        if (hermi && ishr > jshr) {
+            continue;
+        }
         ish = ishr + ish0;
         jsh = jshr + jsh0;
         ijao = (ao_loc[ish]-ao_loc[ish0])*Nao + ao_loc[jsh]-ao_loc[jsh0];
@@ -501,7 +505,24 @@ void PBCtdm_k_drv(int (*intor)(), double *out,
               dm_nimgs, dm_Ls, dm, nimgs, Ls,
               bvk_nimgs, bvk_cell_loc, bvkadd_loc, bvkidx_by_dmcell,
               q_cond, ext_cond, R_cond, dm_cond, thresh_K,
-              ao_loc, atm, natm, bas, nbas, env, nenv, NULL, NULL);
+              ao_loc, atm, natm, bas, nbas, env, nenv, 0, NULL, NULL);
+}
+
+void PBCtdm_k_drv_hermi(int (*intor)(), double *out,
+                        CINTOpt *cintopt, int dm_nimgs, double *dm_Ls,
+                        double *dm, int nimgs, double *Ls,
+                        int bvk_nimgs, int *bvk_cell_loc, int *bvkadd_loc,
+                        int *bvkidx_by_dmcell,
+                        double *q_cond, double *ext_cond, double *R_cond,
+                        double *dm_cond, double thresh_K,
+                        int *ao_loc, int *atm, int natm,
+                        int *bas, int nbas, double *env, int nenv)
+{
+    tdm_k_drv(intor, out, cintopt,
+              dm_nimgs, dm_Ls, dm, nimgs, Ls,
+              bvk_nimgs, bvk_cell_loc, bvkadd_loc, bvkidx_by_dmcell,
+              q_cond, ext_cond, R_cond, dm_cond, thresh_K,
+              ao_loc, atm, natm, bas, nbas, env, nenv, 1, NULL, NULL);
 }
 
 void PBCtdm_k_drv_profile(int (*intor)(), double *out,
@@ -520,5 +541,25 @@ void PBCtdm_k_drv_profile(int (*intor)(), double *out,
               bvk_nimgs, bvk_cell_loc, bvkadd_loc, bvkidx_by_dmcell,
               q_cond, ext_cond, R_cond, dm_cond, thresh_K,
               ao_loc, atm, natm, bas, nbas, env, nenv,
-              profile_counts, profile_times);
+              0, profile_counts, profile_times);
+}
+
+void PBCtdm_k_drv_hermi_profile(
+        int (*intor)(), double *out,
+        CINTOpt *cintopt, int dm_nimgs, double *dm_Ls,
+        double *dm, int nimgs, double *Ls,
+        int bvk_nimgs, int *bvk_cell_loc, int *bvkadd_loc,
+        int *bvkidx_by_dmcell,
+        double *q_cond, double *ext_cond, double *R_cond,
+        double *dm_cond, double thresh_K,
+        int *ao_loc, int *atm, int natm,
+        int *bas, int nbas, double *env, int nenv,
+        uint64_t *profile_counts, double *profile_times)
+{
+    tdm_k_drv(intor, out, cintopt,
+              dm_nimgs, dm_Ls, dm, nimgs, Ls,
+              bvk_nimgs, bvk_cell_loc, bvkadd_loc, bvkidx_by_dmcell,
+              q_cond, ext_cond, R_cond, dm_cond, thresh_K,
+              ao_loc, atm, natm, bas, nbas, env, nenv,
+              1, profile_counts, profile_times);
 }
