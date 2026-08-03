@@ -93,7 +93,7 @@ def _k_to_real(a_kpts, phase, imag_tol=1e-4):
 
 
 def _contract_k(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
-                direct_scf_tol, extent_tol, dm_cond='absmax', use_qqr=True,
+                direct_scf_tol, extent_tol, dm_cond='norm', use_qqr=True,
                 hermi=1,
                 profile=False, verbose=None):
     log = lib.logger.new_logger(cell, verbose)

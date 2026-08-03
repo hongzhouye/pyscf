@@ -24,7 +24,32 @@ from pyscf import lib
 
 
 class TDM(lib.StreamObject):
-    '''Truncated density matrix builder for periodic HF exchange.'''
+    '''Truncated density matrix builder for periodic HF exchange.
+
+    Attributes:
+        dm_trunc_level : str
+            Level at which the density matrix is truncated. It can be
+            ``'atom'`` or ``'cell'``. Default is ``'atom'``.
+        dm_trunc_shape : str
+            Shape of the truncation region. It can be ``'ws'`` or ``'sph'``.
+            Default is ``'ws'``.
+        ws_weight : bool
+            Whether to weight density-matrix blocks on the Wigner--Seitz
+            boundary. Default is False.
+        direct_scf_tol : float
+            Screening threshold for the exchange build. Default is
+            ``cell.precision * 0.1``.
+        dm_cond : str
+            Density-matrix shell-block condition used for screening. It can
+            be ``'absmax'``, ``'norm'``, or ``'abssum'``. Default is
+            ``'norm'``.
+        use_qqr : bool
+            Whether to use distance-dependent QQR screening. If False, only
+            QQ screening is used. Default is True.
+
+    For conservative screening, set ``dm_cond = 'abssum'`` and
+    ``use_qqr = False``.
+    '''
 
     _keys = {
         'cell', 'kpts', 'dm_trunc_level', 'dm_trunc_shape', 'ws_weight',
@@ -46,13 +71,13 @@ class TDM(lib.StreamObject):
 
         # Accuracy control attributes
         self.direct_scf_tol = cell.precision * .1
-        self.extent_tol = .1
-
-        # Do not set these attributes unless you know what you are doing
-        self.dm_rcut = None
-        self.ws_search_mesh = None
         self.dm_cond = 'norm'
         self.use_qqr = True
+
+        # Do not set these attributes unless you know what you are doing
+        self.extent_tol = .1
+        self.dm_rcut = None
+        self.ws_search_mesh = None
         self.profile = False
 
     def dump_flags(self, verbose=None):
