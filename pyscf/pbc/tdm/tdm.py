@@ -51,7 +51,7 @@ class TDM(lib.StreamObject):
         # Do not set these attributes unless you know what you are doing
         self.dm_rcut = None
         self.ws_search_mesh = None
-        self.dm_cond = 'absmax'
+        self.dm_cond = 'norm'
         self.use_qqr = True
         self.profile = False
 
