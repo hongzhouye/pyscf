@@ -50,6 +50,14 @@ enum {
     TDM_NTIMES
 };
 
+enum {
+    TDM_LATE_PARENT_CALL,
+    TDM_LATE_PRIM_CALL,
+    TDM_LATE_PRIM_NONZERO,
+    TDM_LATE_CONTRACT_CALL,
+    TDM_LATE_NCOUNTS
+};
+
 #define TDM_COUNT(profile, index) \
     do { if (profile != NULL) { profile[index]++; } } while (0)
 
@@ -584,4 +592,448 @@ void PBCtdm_k_drv_hermi_profile(
               q_cond, ext_cond, R_cond, dm_cond, thresh_K,
               ao_loc, atm, natm, bas, nbas, env, nenv,
               1, profile_counts, profile_times);
+}
+
+static void add_primitive_eri(double *eri, const double *buf,
+                              size_t dpi, size_t dpl, size_t dpk,
+                              size_t ip0, size_t lp0, size_t kp0, size_t jp0,
+                              size_t di, size_t dl, size_t dk, size_t dj)
+{
+    size_t i, l, k, j, n;
+    size_t out;
+    n = 0;
+    for (j = 0; j < dj; j++) {
+    for (k = 0; k < dk; k++) {
+    for (l = 0; l < dl; l++) {
+    for (i = 0; i < di; i++, n++) {
+        out = ip0+i + dpi*(lp0+l + dpl*(kp0+k + dpk*(jp0+j)));
+        eri[out] += buf[n];
+    } } } }
+}
+
+static void contract_primitive_eri_dm(
+        double *vk, const double *eri, const double *dm,
+        const double *ci, const double *cj,
+        size_t dpi, size_t dpl, size_t dpk, size_t dpj,
+        size_t di, size_t dj, size_t plaor, size_t pkaor,
+        size_t iaor, size_t jaor, size_t pnao, size_t nao)
+{
+    size_t ip, lp, kp, jp, i, j;
+    size_t eri_off;
+    double v, vcj;
+    for (jp = 0; jp < dpj; jp++) {
+    for (ip = 0; ip < dpi; ip++) {
+        v = 0.;
+        for (kp = 0; kp < dpk; kp++) {
+        for (lp = 0; lp < dpl; lp++) {
+            eri_off = ip + dpi*(lp + dpl*(kp + dpk*jp));
+            v += eri[eri_off] * dm[(plaor+lp)*pnao+pkaor+kp];
+        } }
+        for (j = 0; j < dj; j++) {
+            vcj = v * cj[jp*dj+j];
+            for (i = 0; i < di; i++) {
+                vk[(iaor+i)*nao+jaor+j] += ci[ip*di+i] * vcj;
+            }
+        }
+    } }
+}
+
+static void contract_eri_dm_late(
+        int (*intor)(), double *out, CINTOpt *cintopt,
+        double *q_cond, double *q_cond_max,
+        double *ext_cond, double *R_cond,
+        double *dm_cond, double thresh_K,
+        int dm_nimgs, double *dm_Ls, double *dm,
+        int nimgs, double *Ls,
+        int bvk_nimgs, int *bvk_cell_loc, int *bvksub_loc,
+        int *bvkidx_by_dmcell, int bvk_batch_size,
+        double *coeff, int *coeff_loc,
+        int *pbas_loc, int *pao_loc0, int *cao_loc, int Nbas,
+        int *pao_loc, int *atm, int natm,
+        int *bas, int nbas, double *env, int nenv,
+        int ishr, int jshr, double *env_loc,
+        double *eri_batch, double *buf,
+        uint64_t *profile_counts, double *profile_times)
+{
+    const size_t pNbas = nbas/4;
+    const size_t pNao = pao_loc[pNbas] - pao_loc[0];
+    const size_t Nao = cao_loc[Nbas] - cao_loc[0];
+    const size_t di = cao_loc[ishr+1] - cao_loc[ishr];
+    const size_t dj = cao_loc[jshr+1] - cao_loc[jshr];
+    const size_t dpi = pao_loc0[ishr+1] - pao_loc0[ishr];
+    const size_t dpj = pao_loc0[jshr+1] - pao_loc0[jshr];
+    const size_t iaor = cao_loc[ishr] - cao_loc[0];
+    const size_t jaor = cao_loc[jshr] - cao_loc[0];
+    const double *ci = coeff + coeff_loc[ishr];
+    const double *cj = coeff + coeff_loc[jshr];
+    const size_t ipsh0 = pbas_loc[ishr];
+    const size_t ipsh1 = pbas_loc[ishr+1];
+    const size_t jpsh0 = pbas_loc[jshr] + pNbas*3;
+    const size_t jpsh1 = pbas_loc[jshr+1] + pNbas*3;
+    const size_t jptrxyz =
+        atm[PTR_COORD+bas[ATOM_OF+jpsh0*BAS_SLOTS]*ATM_SLOTS];
+
+    size_t lshr, kshr, lpsh0, lpsh1, kpsh0, kpsh1;
+    size_t ipsh, lpsh, kpsh, jpsh;
+    size_t dpl, dpk, plaor, pkaor, dquart, batch_quart;
+    size_t ip0, lp0, kp0, jp0, pdi, pdl, pdk, pdj;
+    size_t i, dm_iL, iL, jL, bvk_iL, bvk_tL, bvk_kL;
+    size_t t0, tb, nt;
+    size_t il_shift, kj_shift;
+    size_t lptrxyz, kptrxyz;
+    const double *il_q_cond, *kj_q_cond, *lk_dm_cond;
+    const double *il_ext_cond, *kj_ext_cond;
+    const double *il_R_cond, *kj_R_cond;
+    const double *cond_R_bra, *cond_R_ket;
+    double cond_dm, il_q_max, kj_q_max, il_q_dm_cond;
+    double R_bra_ket, denom, numer;
+    double *dm_pL, *pL, *pL2, *eri, *vk;
+    double vtmp1[3], vtmp2[3];
+    double tick;
+    int intor_nonzero;
+    int shls[4];
+
+    for (lshr = 0; lshr < Nbas; lshr++) {
+        lpsh0 = pbas_loc[lshr] + pNbas;
+        lpsh1 = pbas_loc[lshr+1] + pNbas;
+        lptrxyz =
+            atm[PTR_COORD+bas[ATOM_OF+lpsh0*BAS_SLOTS]*ATM_SLOTS];
+        dpl = pao_loc0[lshr+1] - pao_loc0[lshr];
+        plaor = pao_loc0[lshr];
+        il_shift = (ishr*Nbas+lshr) * nimgs;
+        il_q_cond = q_cond + il_shift;
+        il_q_max = q_cond_max[ishr*Nbas+lshr];
+        if (R_cond != NULL) {
+            il_ext_cond = ext_cond + il_shift;
+            il_R_cond = R_cond + il_shift*3;
+        }
+        for (kshr = 0; kshr < Nbas; kshr++) {
+            kpsh0 = pbas_loc[kshr] + pNbas*2;
+            kpsh1 = pbas_loc[kshr+1] + pNbas*2;
+            kptrxyz =
+                atm[PTR_COORD+bas[ATOM_OF+kpsh0*BAS_SLOTS]*ATM_SLOTS];
+            dpk = pao_loc0[kshr+1] - pao_loc0[kshr];
+            pkaor = pao_loc0[kshr];
+            dquart = dpi*dpl*dpk*dpj;
+            kj_shift = (kshr*Nbas+jshr) * nimgs;
+            kj_q_cond = q_cond + kj_shift;
+            kj_q_max = q_cond_max[kshr*Nbas+jshr];
+            if (R_cond != NULL) {
+                kj_ext_cond = ext_cond + kj_shift;
+                kj_R_cond = R_cond + kj_shift*3;
+            }
+            lk_dm_cond = dm_cond + (lshr*Nbas+kshr) * dm_nimgs;
+            for (dm_iL = 0; dm_iL < dm_nimgs; dm_iL++) {
+                cond_dm = lk_dm_cond[dm_iL];
+                if (cond_dm*il_q_max*kj_q_max < thresh_K) {
+                    continue;
+                }
+                dm_pL = dm_Ls + dm_iL*3;
+                for (t0 = 0; t0 < bvk_nimgs; t0 += bvk_batch_size) {
+                    nt = MIN((size_t)bvk_batch_size, bvk_nimgs-t0);
+                    batch_quart = nt*dquart;
+                    for (i = 0; i < batch_quart; i++) {
+                        eri_batch[i] = 0.;
+                    }
+                    for (iL = 0; iL < nimgs; iL++) {
+                        il_q_dm_cond = il_q_cond[iL] * cond_dm;
+                        if (il_q_dm_cond*kj_q_max < thresh_K) {
+                            continue;
+                        }
+                        if (R_cond != NULL) {
+                            cond_R_bra = il_R_cond + iL*3;
+                        }
+                        bvk_iL = bvkidx_by_dmcell[dm_iL*nimgs+iL];
+                        pL = Ls + iL*3;
+                        shift_bas(env_loc, env, Ls, lptrxyz, iL);
+                        vec3_add(vtmp1, dm_pL, pL, 1.);
+                        shift_bas(env_loc, env, vtmp1, kptrxyz, 0);
+                        for (tb = 0; tb < nt; tb++) {
+                            bvk_tL = t0 + tb;
+                            bvk_kL =
+                                bvksub_loc[bvk_tL*bvk_nimgs+bvk_iL];
+                            eri = eri_batch + tb*dquart;
+                            for (jL = bvk_cell_loc[bvk_kL];
+                                 jL < bvk_cell_loc[bvk_kL+1]; jL++) {
+                                numer = il_q_dm_cond * kj_q_cond[jL];
+                                if (numer < thresh_K) {
+                                    continue;
+                                }
+                                if (R_cond != NULL) {
+                                    cond_R_ket = kj_R_cond + jL*3;
+                                    vec3_add(vtmp2, vtmp1, cond_R_ket, 1.);
+                                    R_bra_ket = vec3_dist(cond_R_bra, vtmp2);
+                                    denom = MAX(R_bra_ket-il_ext_cond[iL]
+                                                -kj_ext_cond[jL], 1.);
+                                    if (numer/denom < thresh_K) {
+                                        continue;
+                                    }
+                                }
+                                pL2 = Ls + jL*3;
+                                vec3_add(vtmp2, vtmp1, pL2, 1.);
+                                shift_bas(env_loc, env, vtmp2, jptrxyz, 0);
+                                TDM_COUNT(profile_counts,
+                                          TDM_LATE_PARENT_CALL);
+                                if (profile_times != NULL) {
+                                    tick = wall_time();
+                                }
+                                for (jpsh = jpsh0; jpsh < jpsh1; jpsh++) {
+                                for (kpsh = kpsh0; kpsh < kpsh1; kpsh++) {
+                                for (lpsh = lpsh0; lpsh < lpsh1; lpsh++) {
+                                for (ipsh = ipsh0; ipsh < ipsh1; ipsh++) {
+                                    shls[0] = ipsh;
+                                    shls[1] = lpsh;
+                                    shls[2] = kpsh;
+                                    shls[3] = jpsh;
+                                    pdi = pao_loc[ipsh+1]-pao_loc[ipsh];
+                                    pdl = pao_loc[lpsh+1]-pao_loc[lpsh];
+                                    pdk = pao_loc[kpsh+1]-pao_loc[kpsh];
+                                    pdj = pao_loc[jpsh+1]-pao_loc[jpsh];
+                                    TDM_COUNT(profile_counts,
+                                              TDM_LATE_PRIM_CALL);
+                                    intor_nonzero = (*intor)(
+                                        buf, NULL, shls,
+                                        atm, natm, bas, nbas,
+                                        env_loc, cintopt,
+                                        buf + pdi*pdl*pdk*pdj);
+                                    if (intor_nonzero != 0) {
+                                        TDM_COUNT(profile_counts,
+                                                  TDM_LATE_PRIM_NONZERO);
+                                        ip0 = pao_loc[ipsh]-pao_loc[ipsh0];
+                                        lp0 = pao_loc[lpsh]-pao_loc[lpsh0];
+                                        kp0 = pao_loc[kpsh]-pao_loc[kpsh0];
+                                        jp0 = pao_loc[jpsh]-pao_loc[jpsh0];
+                                        add_primitive_eri(
+                                            eri, buf, dpi, dpl, dpk,
+                                            ip0, lp0, kp0, jp0,
+                                            pdi, pdl, pdk, pdj);
+                                    }
+                                } } } }
+                                if (profile_times != NULL) {
+                                    profile_times[TDM_INTOR_TIME] +=
+                                        wall_time() - tick;
+                                }
+                            }
+                        }
+                    }
+                    for (tb = 0; tb < nt; tb++) {
+                        vk = out + (t0+tb)*Nao*Nao;
+                        eri = eri_batch + tb*dquart;
+                        TDM_COUNT(profile_counts,
+                                  TDM_LATE_CONTRACT_CALL);
+                        if (profile_times != NULL) {
+                            tick = wall_time();
+                        }
+                        contract_primitive_eri_dm(
+                            vk, eri, dm + dm_iL*pNao*pNao,
+                            ci, cj, dpi, dpl, dpk, dpj, di, dj,
+                            plaor, pkaor, iaor, jaor, pNao, Nao);
+                        if (profile_times != NULL) {
+                            profile_times[TDM_CONTRACT_TIME] +=
+                                wall_time() - tick;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void tdm_k_drv_late(
+        int (*intor)(), double *out, CINTOpt *cintopt,
+        int dm_nimgs, double *dm_Ls, double *dm,
+        int nimgs, double *Ls,
+        int bvk_nimgs, int *bvk_cell_loc, int *bvksub_loc,
+        int *bvkidx_by_dmcell, int bvk_batch_size,
+        double *q_cond, double *ext_cond, double *R_cond,
+        double *dm_cond, double thresh_K,
+        double *coeff, int *coeff_loc,
+        int *pbas_loc, int *pao_loc0, int *cao_loc, int Nbas,
+        int *pao_loc, int *atm, int natm,
+        int *bas, int nbas, double *env, int nenv, int hermi,
+        uint64_t *profile_counts, double *profile_times)
+{
+    const int pNbas = nbas/4;
+    int shls_slice[] = {0, pNbas, pNbas, pNbas*2,
+                        pNbas*2, pNbas*3, pNbas*3, pNbas*4};
+    const size_t cache_size = GTOmax_cache_size(
+        intor, shls_slice, 4, atm, natm, bas, nbas, env);
+    const size_t dimax = GTOmax_shell_dim(pao_loc, shls_slice+0, 1);
+    const size_t dlmax = GTOmax_shell_dim(pao_loc, shls_slice+2, 1);
+    const size_t dkmax = GTOmax_shell_dim(pao_loc, shls_slice+4, 1);
+    const size_t djmax = GTOmax_shell_dim(pao_loc, shls_slice+6, 1);
+    const size_t intbuf_size = dimax*dlmax*dkmax*djmax;
+    size_t ip, iL, pdmax, pd;
+    double qmax;
+    double *q_cond_max = malloc(sizeof(double) * Nbas*Nbas);
+    for (ip = 0; ip < Nbas*Nbas; ip++) {
+        qmax = 0.;
+        for (iL = 0; iL < nimgs; iL++) {
+            qmax = MAX(qmax, q_cond[ip*nimgs+iL]);
+        }
+        q_cond_max[ip] = qmax;
+    }
+    pdmax = 0;
+    for (ip = 0; ip < Nbas; ip++) {
+        pd = pao_loc0[ip+1] - pao_loc0[ip];
+        pdmax = MAX(pdmax, pd);
+    }
+    if (profile_counts != NULL) {
+        for (ip = 0; ip < TDM_LATE_NCOUNTS; ip++) {
+            profile_counts[ip] = 0;
+        }
+    }
+    if (profile_times != NULL) {
+        for (ip = 0; ip < TDM_NTIMES; ip++) {
+            profile_times[ip] = 0.;
+        }
+    }
+
+#pragma omp parallel
+{
+    size_t ij, n;
+    int ishr, jshr;
+    uint64_t counts[TDM_LATE_NCOUNTS] = {0};
+    double times[TDM_NTIMES] = {0.};
+    double tick;
+    double *buf = malloc(sizeof(double) * (intbuf_size+cache_size));
+    double *env_loc = malloc(sizeof(double) * nenv);
+    double *eri_batch = malloc(sizeof(double) * bvk_batch_size
+                               *pdmax*pdmax*pdmax*pdmax);
+    NPdcopy(env_loc, env, nenv);
+    if (profile_times != NULL) {
+        tick = wall_time();
+    }
+#pragma omp for schedule(dynamic)
+    for (ij = 0; ij < (size_t)Nbas*Nbas; ij++) {
+        ishr = ij/Nbas;
+        jshr = ij%Nbas;
+        if (hermi && ishr > jshr) {
+            continue;
+        }
+        contract_eri_dm_late(
+            intor, out, cintopt, q_cond, q_cond_max,
+            ext_cond, R_cond, dm_cond, thresh_K,
+            dm_nimgs, dm_Ls, dm, nimgs, Ls,
+            bvk_nimgs, bvk_cell_loc, bvksub_loc,
+            bvkidx_by_dmcell, bvk_batch_size,
+            coeff, coeff_loc, pbas_loc, pao_loc0, cao_loc, Nbas,
+            pao_loc, atm, natm, bas, nbas, env, nenv,
+            ishr, jshr, env_loc, eri_batch, buf,
+            profile_counts == NULL ? NULL : counts,
+            profile_times == NULL ? NULL : times);
+    }
+    if (profile_times != NULL) {
+        times[TDM_TOTAL_TIME] += wall_time() - tick;
+    }
+#pragma omp critical
+    {
+        if (profile_counts != NULL) {
+            for (n = 0; n < TDM_LATE_NCOUNTS; n++) {
+                profile_counts[n] += counts[n];
+            }
+        }
+        if (profile_times != NULL) {
+            for (n = 0; n < TDM_NTIMES; n++) {
+                profile_times[n] += times[n];
+            }
+        }
+    }
+    free(eri_batch);
+    free(env_loc);
+    free(buf);
+}
+    free(q_cond_max);
+}
+
+void PBCtdm_k_drv_late(
+        int (*intor)(), double *out, CINTOpt *cintopt,
+        int dm_nimgs, double *dm_Ls, double *dm,
+        int nimgs, double *Ls,
+        int bvk_nimgs, int *bvk_cell_loc, int *bvksub_loc,
+        int *bvkidx_by_dmcell, int bvk_batch_size,
+        double *q_cond, double *ext_cond, double *R_cond,
+        double *dm_cond, double thresh_K,
+        double *coeff, int *coeff_loc,
+        int *pbas_loc, int *pao_loc0, int *cao_loc, int Nbas,
+        int *pao_loc, int *atm, int natm,
+        int *bas, int nbas, double *env, int nenv)
+{
+    tdm_k_drv_late(
+        intor, out, cintopt, dm_nimgs, dm_Ls, dm,
+        nimgs, Ls, bvk_nimgs, bvk_cell_loc, bvksub_loc,
+        bvkidx_by_dmcell, bvk_batch_size,
+        q_cond, ext_cond, R_cond, dm_cond, thresh_K,
+        coeff, coeff_loc, pbas_loc, pao_loc0, cao_loc, Nbas,
+        pao_loc, atm, natm, bas, nbas, env, nenv, 0, NULL, NULL);
+}
+
+void PBCtdm_k_drv_late_hermi(
+        int (*intor)(), double *out, CINTOpt *cintopt,
+        int dm_nimgs, double *dm_Ls, double *dm,
+        int nimgs, double *Ls,
+        int bvk_nimgs, int *bvk_cell_loc, int *bvksub_loc,
+        int *bvkidx_by_dmcell, int bvk_batch_size,
+        double *q_cond, double *ext_cond, double *R_cond,
+        double *dm_cond, double thresh_K,
+        double *coeff, int *coeff_loc,
+        int *pbas_loc, int *pao_loc0, int *cao_loc, int Nbas,
+        int *pao_loc, int *atm, int natm,
+        int *bas, int nbas, double *env, int nenv)
+{
+    tdm_k_drv_late(
+        intor, out, cintopt, dm_nimgs, dm_Ls, dm,
+        nimgs, Ls, bvk_nimgs, bvk_cell_loc, bvksub_loc,
+        bvkidx_by_dmcell, bvk_batch_size,
+        q_cond, ext_cond, R_cond, dm_cond, thresh_K,
+        coeff, coeff_loc, pbas_loc, pao_loc0, cao_loc, Nbas,
+        pao_loc, atm, natm, bas, nbas, env, nenv, 1, NULL, NULL);
+}
+
+void PBCtdm_k_drv_late_profile(
+        int (*intor)(), double *out, CINTOpt *cintopt,
+        int dm_nimgs, double *dm_Ls, double *dm,
+        int nimgs, double *Ls,
+        int bvk_nimgs, int *bvk_cell_loc, int *bvksub_loc,
+        int *bvkidx_by_dmcell, int bvk_batch_size,
+        double *q_cond, double *ext_cond, double *R_cond,
+        double *dm_cond, double thresh_K,
+        double *coeff, int *coeff_loc,
+        int *pbas_loc, int *pao_loc0, int *cao_loc, int Nbas,
+        int *pao_loc, int *atm, int natm,
+        int *bas, int nbas, double *env, int nenv,
+        uint64_t *profile_counts, double *profile_times)
+{
+    tdm_k_drv_late(
+        intor, out, cintopt, dm_nimgs, dm_Ls, dm,
+        nimgs, Ls, bvk_nimgs, bvk_cell_loc, bvksub_loc,
+        bvkidx_by_dmcell, bvk_batch_size,
+        q_cond, ext_cond, R_cond, dm_cond, thresh_K,
+        coeff, coeff_loc, pbas_loc, pao_loc0, cao_loc, Nbas,
+        pao_loc, atm, natm, bas, nbas, env, nenv, 0,
+        profile_counts, profile_times);
+}
+
+void PBCtdm_k_drv_late_hermi_profile(
+        int (*intor)(), double *out, CINTOpt *cintopt,
+        int dm_nimgs, double *dm_Ls, double *dm,
+        int nimgs, double *Ls,
+        int bvk_nimgs, int *bvk_cell_loc, int *bvksub_loc,
+        int *bvkidx_by_dmcell, int bvk_batch_size,
+        double *q_cond, double *ext_cond, double *R_cond,
+        double *dm_cond, double thresh_K,
+        double *coeff, int *coeff_loc,
+        int *pbas_loc, int *pao_loc0, int *cao_loc, int Nbas,
+        int *pao_loc, int *atm, int natm,
+        int *bas, int nbas, double *env, int nenv,
+        uint64_t *profile_counts, double *profile_times)
+{
+    tdm_k_drv_late(
+        intor, out, cintopt, dm_nimgs, dm_Ls, dm,
+        nimgs, Ls, bvk_nimgs, bvk_cell_loc, bvksub_loc,
+        bvkidx_by_dmcell, bvk_batch_size,
+        q_cond, ext_cond, R_cond, dm_cond, thresh_K,
+        coeff, coeff_loc, pbas_loc, pao_loc0, cao_loc, Nbas,
+        pao_loc, atm, natm, bas, nbas, env, nenv, 1,
+        profile_counts, profile_times);
 }

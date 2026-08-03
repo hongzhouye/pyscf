@@ -74,13 +74,177 @@ def get_k(mytdm, dm, hermi=1, kpts=None, kpts_band=None, omega=None):
         phase = np.exp(-1j*np.dot(kpts, dm_Ls.T))
         dm_real = _k_to_real(dm_kpts, phase)
         dm_real = truncation.apply_weights(cell, atmweights, dm_real)
-        vks.append(_contract_k(
-            cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
-            mytdm.direct_scf_tol, mytdm.extent_tol,
-            mytdm.dm_cond, mytdm.use_qqr,
-            hermi, mytdm.profile, mytdm.verbose))
+        if mytdm.late_contraction:
+            vk = _contract_k_late(
+                cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
+                mytdm.direct_scf_tol, mytdm.extent_tol,
+                mytdm.dm_cond, mytdm.use_qqr, mytdm.bvk_batch_size,
+                hermi, mytdm.profile, mytdm.verbose)
+        else:
+            vk = _contract_k(
+                cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
+                mytdm.direct_scf_tol, mytdm.extent_tol,
+                mytdm.dm_cond, mytdm.use_qqr,
+                hermi, mytdm.profile, mytdm.verbose)
+        vks.append(vk)
 
     return np.asarray(vks).reshape(dm_shape)
+
+
+def _contract_k_late(cell, kpts, kmesh, eri_Ls, dm_Ls, dm_real,
+                     direct_scf_tol, extent_tol, dm_cond='norm', use_qqr=True,
+                     bvk_batch_size=1, hermi=1,
+                     profile=False, verbose=None):
+    log = lib.logger.new_logger(cell, verbose)
+    cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+
+    ao_loc0 = cell.ao_loc_nr()
+    nao = cell.nao_nr()
+    lattice_vectors = cell.lattice_vectors()
+    bvk_ncells = int(np.prod(kmesh))
+    bvk_batch_size = int(bvk_batch_size)
+    if bvk_batch_size < 1:
+        raise ValueError('Invalid BvK batch size %s' % bvk_batch_size)
+    bvk_batch_size = min(bvk_batch_size, bvk_ncells)
+
+    pcell, coeff = cell.decontract_basis(aggregate=False)
+    if len(coeff) != cell.nbas:
+        raise RuntimeError('Failed to preserve shell grouping in decontraction')
+    pbas_loc = np.append(0, np.cumsum([cell.bas_nprim(i)
+                                      for i in range(cell.nbas)]))
+    if pbas_loc[-1] != pcell.nbas:
+        raise RuntimeError('Inconsistent decontracted shell mapping')
+    pao_loc0 = np.append(0, np.cumsum([c.shape[0] for c in coeff]))
+    if pao_loc0[-1] != pcell.nao_nr():
+        raise RuntimeError('Inconsistent decontracted AO mapping')
+
+    pnao = pcell.nao_nr()
+    coeff_full = np.zeros((pnao, nao))
+    coeff_loc = np.zeros(cell.nbas+1, dtype=np.int32)
+    coeff_buf = []
+    for ish, c in enumerate(coeff):
+        i0, i1 = ao_loc0[ish:ish+2]
+        p0, p1 = pao_loc0[ish:ish+2]
+        coeff_full[p0:p1,i0:i1] = c
+        coeff_buf.append(np.asarray(c, order='C').ravel())
+        coeff_loc[ish+1] = coeff_loc[ish] + c.size
+    coeff_buf = np.asarray(np.hstack(coeff_buf), dtype=np.float64, order='C')
+
+    wall0 = lib.logger.perf_counter()
+    dm_prim = np.asarray([
+        coeff_full.dot(x).dot(coeff_full.T) for x in dm_real], order='C')
+    if profile:
+        log.info('TDM profile: primitive DM wall time = %.3f sec',
+                 lib.logger.perf_counter() - wall0)
+
+    atm, bas, env = gto.conc_env(
+        pcell._atm, pcell._bas, pcell._env,
+        pcell._atm, pcell._bas, pcell._env)
+    atm, bas, env = gto.conc_env(atm, bas, env, atm, bas, env)
+    intor = gto.moleintor._get_intor_and_comp(
+        pcell._add_suffix('int2e'), None)[0]
+    fintor = getattr(gto.moleintor.libcgto, intor)
+    cintopt = _vhf.make_cintopt(atm, bas, env, intor)
+    libpbc.CINTdel_pairdata_optimizer(cintopt)
+    pao_loc = gto.moleintor.make_loc(bas, intor)
+
+    as_double = {'dtype': np.float64, 'order': 'C'}
+    as_int = {'dtype': np.int32, 'order': 'C'}
+    bvk_Ts = lib.cartesian_prod([np.arange(x) for x in kmesh])
+    bvk_Ls = np.dot(bvk_Ts, lattice_vectors)
+
+    eri_Ls, bvk_cell_loc = _sort_Ls_bvk(cell, eri_Ls, kmesh)
+    eri_Ls = np.asarray(eri_Ls, **as_double)
+    bvk_cell_loc = np.asarray(bvk_cell_loc, **as_int)
+
+    t_mod = (bvk_Ts[:,None] - bvk_Ts).reshape(-1, 3).T
+    t_mod %= np.asarray(kmesh)[:,None]
+    bvksub_loc = np.ravel_multi_index(t_mod, kmesh)
+    bvksub_loc = np.asarray(bvksub_loc, **as_int)
+
+    trans = np.linalg.solve(
+        lattice_vectors.T, (dm_Ls[:,None] + eri_Ls).reshape(-1, 3).T)
+    t_mod = trans.round(3).astype(int)
+    t_mod %= np.asarray(kmesh)[:,None]
+    bvkidx_by_dmcell = np.ravel_multi_index(t_mod, kmesh)
+    bvkidx_by_dmcell = bvkidx_by_dmcell.reshape(len(dm_Ls), len(eri_Ls))
+    bvkidx_by_dmcell = np.asarray(bvkidx_by_dmcell, **as_int)
+
+    dm_cond0 = np.asarray(
+        _get_dm_cond(dm_real, ao_loc0, dm_cond), **as_double)
+    dm_Ls = np.asarray(dm_Ls, **as_double)
+    pbas_loc = np.asarray(pbas_loc, **as_int)
+    pao_loc0 = np.asarray(pao_loc0, **as_int)
+    ao_loc0 = np.asarray(ao_loc0, **as_int)
+
+    wall0 = lib.logger.perf_counter()
+    q_cond = _precompute_q_cond(cell, eri_Ls)
+    if use_qqr:
+        ext_cond, r_cond = _precompute_extent(cell, eri_Ls, extent_tol)
+        ext_cond_ptr = ext_cond.ctypes.data_as(ctypes.c_void_p)
+        r_cond_ptr = r_cond.ctypes.data_as(ctypes.c_void_p)
+    else:
+        ext_cond_ptr = lib.c_null_ptr()
+        r_cond_ptr = lib.c_null_ptr()
+    if profile:
+        log.info('TDM profile: late-contraction setup wall time = %.3f sec',
+                 lib.logger.perf_counter() - wall0)
+
+    pdmax = np.diff(pao_loc0).max(initial=0)
+    buf_mb = bvk_batch_size * pdmax**4 * 8 / 1e6
+    log.debug('TDM late-contraction primitive buffer = %.1f MB per thread',
+              buf_mb)
+
+    vk_bvk = np.zeros((bvk_ncells, nao, nao), **as_double)
+    args = (
+        fintor, vk_bvk.ctypes.data_as(ctypes.c_void_p), cintopt,
+        ctypes.c_int(len(dm_Ls)),
+        dm_Ls.ctypes.data_as(ctypes.c_void_p),
+        dm_prim.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(len(eri_Ls)),
+        eri_Ls.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(bvk_ncells),
+        bvk_cell_loc.ctypes.data_as(ctypes.c_void_p),
+        bvksub_loc.ctypes.data_as(ctypes.c_void_p),
+        bvkidx_by_dmcell.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(bvk_batch_size),
+        q_cond.ctypes.data_as(ctypes.c_void_p),
+        ext_cond_ptr, r_cond_ptr,
+        dm_cond0.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_double(direct_scf_tol),
+        coeff_buf.ctypes.data_as(ctypes.c_void_p),
+        coeff_loc.ctypes.data_as(ctypes.c_void_p),
+        pbas_loc.ctypes.data_as(ctypes.c_void_p),
+        pao_loc0.ctypes.data_as(ctypes.c_void_p),
+        ao_loc0.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(cell.nbas),
+        pao_loc.ctypes.data_as(ctypes.c_void_p),
+        atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(pcell.natm*4),
+        bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(pcell.nbas*4),
+        env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
+
+    wall0 = lib.logger.perf_counter()
+    if profile:
+        counts = np.zeros(4, dtype=np.uint64)
+        times = np.zeros(3)
+        drv = (libpbc.PBCtdm_k_drv_late_hermi_profile if hermi == 1 else
+               libpbc.PBCtdm_k_drv_late_profile)
+        drv(
+            *args, counts.ctypes.data_as(ctypes.c_void_p),
+            times.ctypes.data_as(ctypes.c_void_p))
+        _log_late_profile(
+            log, counts, times, lib.logger.perf_counter() - wall0)
+    else:
+        drv = (libpbc.PBCtdm_k_drv_late_hermi if hermi == 1 else
+               libpbc.PBCtdm_k_drv_late)
+        drv(*args)
+
+    if hermi == 1:
+        _fill_hermi(vk_bvk, bvk_Ts, kmesh, ao_loc0)
+
+    phase = np.exp(1j*np.dot(kpts, bvk_Ls.T))
+    vk = np.einsum('kR,Rpq->kpq', phase, vk_bvk)
+    log.timer('TDM K build', *cpu0)
+    return vk
 
 
 def _k_to_real(a_kpts, phase, imag_tol=1e-4):
@@ -259,6 +423,21 @@ def _log_profile(log, counts, times, wall_time, use_qqr=True):
     log.info('TDM profile: contraction calls = %d', counts[10])
     log.info('TDM profile: thread time = %.3f sec', times[0])
     log.info('TDM profile: integral time = %.3f sec', times[1])
+    log.info('TDM profile: contraction time = %.3f sec', times[2])
+    log.info('TDM profile: other/idle time = %.3f sec',
+             max(times[0]-times[1]-times[2], 0))
+
+
+def _log_late_profile(log, counts, times, wall_time):
+    fraction = counts[2]/counts[1] if counts[1] else 0
+    log.info('TDM profile: late-contraction C driver wall time = %.3f sec',
+             wall_time)
+    log.info('TDM profile: parent translated quartets = %d', counts[0])
+    log.info('TDM profile: primitive ERIs kept %d / %d (%.1f%%)',
+             counts[2], counts[1], fraction*100)
+    log.info('TDM profile: contraction calls = %d', counts[3])
+    log.info('TDM profile: thread time = %.3f sec', times[0])
+    log.info('TDM profile: primitive ERI time = %.3f sec', times[1])
     log.info('TDM profile: contraction time = %.3f sec', times[2])
     log.info('TDM profile: other/idle time = %.3f sec',
              max(times[0]-times[1]-times[2], 0))
