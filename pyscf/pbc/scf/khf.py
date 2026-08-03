@@ -472,7 +472,7 @@ class KSCF(pbchf.SCF):
     '''
     conv_tol_grad = getattr(__config__, 'pbc_scf_KSCF_conv_tol_grad', None)
 
-    _keys = {'cell', 'exx_built', 'exxdiv', 'with_df', 'rsjk'}
+    _keys = {'cell', 'exx_built', 'exxdiv', 'with_df', 'with_tdm', 'rsjk'}
 
     mol = pbchf.SCF.mol
 
@@ -501,12 +501,17 @@ class KSCF(pbchf.SCF):
         mol_hf.SCF.__init__(self, cell)
 
         self.with_df = df.FFTDF(cell)
+        self.with_tdm = None
         # Range separation JK builder
         self.rsjk = None
 
         self.exxdiv = exxdiv
         if kpts is not None:
             self.kpts = kpts
+        if (isinstance(self.exxdiv, str) and
+                self.exxdiv.lower() == 'tdm' and
+                not isinstance(self.kpts, KPoints)):
+            self._init_tdm()
         self.conv_tol = max(cell.precision * 10, 1e-8)
 
         self.exx_built = False
@@ -534,8 +539,19 @@ class KSCF(pbchf.SCF):
     def kpts(self, x):
         kpts = np.reshape(x, (-1,3))
         self.with_df.kpts = kpts
+        if self.with_tdm is not None:
+            self.with_tdm.kpts = kpts
         if self.rsjk:
             self.rsjk.kpts = kpts
+
+    def _init_tdm(self):
+        if isinstance(self.kpts, KPoints):
+            raise NotImplementedError(
+                'TDM does not support k-point symmetry')
+        if self.with_tdm is None:
+            from pyscf.pbc import tdm
+            self.with_tdm = tdm.TDM(self.cell, self.kpts)
+        return self.with_tdm
 
     @property
     def kmesh(self):
@@ -568,9 +584,19 @@ class KSCF(pbchf.SCF):
             if not np.all(self.rsjk.kpts == kpts):
                 self.rsjk = self.rsjk.__class__(cell, kpts)
 
+        tdm_active = (isinstance(self.exxdiv, str) and
+                      self.exxdiv.lower() == 'tdm')
+        if tdm_active:
+            with_tdm = self._init_tdm()
+            if with_tdm.cell is not self.cell:
+                with_tdm.reset(self.cell)
+            with_tdm.kpts = kpts
+
         # for GDF and MDF
         with_df = self.with_df
-        if len(kpts) > 1 and getattr(with_df, '_j_only', False):
+        if tdm_active and hasattr(with_df, '_j_only'):
+            with_df._j_only = True
+        elif len(kpts) > 1 and getattr(with_df, '_j_only', False):
             logger.warn(self, 'df.j_only cannot be used with k-point HF')
             with_df._j_only = False
             with_df.reset()
@@ -581,6 +607,9 @@ class KSCF(pbchf.SCF):
 
     def reset(self, cell=None):
         pbchf.SCF.reset(self, cell)
+        if self.with_tdm is not None:
+            self.with_tdm.reset(cell)
+            self.with_tdm.kpts = self.kpts
         self.exx_built = False
         return self
 
@@ -609,6 +638,9 @@ class KSCF(pbchf.SCF):
         if not getattr(self.with_df, 'build', None):
             # .dump_flags() is called in pbc.df.build function
             self.with_df.dump_flags(verbose)
+        if (isinstance(self.exxdiv, str) and
+                self.exxdiv.lower() == 'tdm'):
+            self._init_tdm().dump_flags(verbose)
         return self
 
     def get_init_guess(self, cell=None, key='minao', s1e=None):
@@ -637,7 +669,24 @@ class KSCF(pbchf.SCF):
         if kpts is None: kpts = self.kpts
         if dm_kpts is None: dm_kpts = self.make_rdm1()
         cpu0 = (logger.process_clock(), logger.perf_counter())
-        if self.rsjk:
+        if (isinstance(self.exxdiv, str) and
+                self.exxdiv.lower() == 'tdm'):
+            vj = vk = None
+            if with_j:
+                if self.rsjk:
+                    vj = self.rsjk.get_jk(
+                        dm_kpts, hermi, kpts, kpts_band,
+                        with_j=True, with_k=False, omega=omega,
+                        exxdiv=None)[0]
+                else:
+                    vj = self.with_df.get_jk(
+                        dm_kpts, hermi, kpts, kpts_band,
+                        with_j=True, with_k=False, omega=omega,
+                        exxdiv=None)[0]
+            if with_k:
+                vk = self._init_tdm().get_k(
+                    dm_kpts, hermi, kpts, kpts_band, omega)
+        elif self.rsjk:
             vj, vk = self.rsjk.get_jk(dm_kpts, hermi, kpts, kpts_band,
                                       with_j, with_k, omega=omega, exxdiv=self.exxdiv)
         else:
@@ -818,11 +867,19 @@ class KSCF(pbchf.SCF):
 
     def density_fit(self, auxbasis=None, with_df=None):
         from pyscf.pbc.df import df_jk
-        return df_jk.density_fit(self, auxbasis, with_df=with_df)
+        mf = df_jk.density_fit(self, auxbasis, with_df=with_df)
+        if (isinstance(mf.exxdiv, str) and
+                mf.exxdiv.lower() == 'tdm'):
+            mf.with_df._j_only = True
+        return mf
 
     def rs_density_fit(self, auxbasis=None, with_df=None):
         from pyscf.pbc.df import rsdf_jk
-        return rsdf_jk.density_fit(self, auxbasis, with_df=with_df)
+        mf = rsdf_jk.density_fit(self, auxbasis, with_df=with_df)
+        if (isinstance(mf.exxdiv, str) and
+                mf.exxdiv.lower() == 'tdm'):
+            mf.with_df._j_only = True
+        return mf
 
     def mix_density_fit(self, auxbasis=None, with_df=None):
         from pyscf.pbc.df import mdf_jk

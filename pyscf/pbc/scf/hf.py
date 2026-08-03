@@ -606,7 +606,11 @@ class SCF(mol_hf.SCF):
 
     def check_sanity(self):
         lib.StreamObject.check_sanity(self)
+        with_tdm = (isinstance(self.exxdiv, str) and
+                    self.exxdiv.lower() == 'tdm' and
+                    getattr(self, 'with_tdm', None) is not None)
         if (isinstance(self.exxdiv, str) and self.exxdiv.lower() != 'ewald' and
+            not with_tdm and
             isinstance(self.with_df, df.df.DF)):
             logger.warn(self, 'exxdiv %s is not supported in DF or MDF',
                         self.exxdiv)

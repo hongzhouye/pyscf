@@ -328,6 +328,10 @@ class KsymAdaptedKSCF(khf.KSCF):
                                                        with_j, with_k, omega, **kwargs)
         if cell is None: cell = self.cell
         if kpts is None: kpts = self.kpts
+        if (isinstance(self.exxdiv, str) and
+                self.exxdiv.lower() == 'tdm'):
+            raise NotImplementedError(
+                'TDM requires the full Brillouin-zone k-point mesh')
         if dm_kpts is None: dm_kpts = self.make_rdm1()
         #get dms for each kpt in BZ
         if isinstance(dm_kpts[0], np.ndarray) and dm_kpts[0].ndim == 3:
