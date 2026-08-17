@@ -31,6 +31,17 @@ from pyscf.pbc.lib.kpts_helper import is_zero
 
 class FFTDF_STC(FFTDF):
     omega_dot_Rc = 4.
+    Rc_type = 'ws'  # inradius of WS; alternative is 'sph'
+
+    def dump_flags(self, verbose=None):
+        FFTDF.dump_flags(self, verbose)
+
+        log = logger.new_logger(self, verbose)
+        if log.verbose < logger.INFO:
+            return self
+        log.info('omega_dot_Rc= %.15g', self.omega_dot_Rc)
+        log.info('Rc_type= %s', self.Rc_type)
+        return self
 
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
                with_j=True, with_k=True, omega=None, exxdiv=None):
@@ -50,6 +61,59 @@ class FFTDF_STC(FFTDF):
             if with_j:
                 vj = fft_jk.get_j_kpts(self, dm, hermi, kpts, kpts_band)
         return vj, vk
+
+
+def ws_inradius(a, kmesh):
+    """
+    Wigner-Seitz inradius of the BvK superlattice.
+
+    Parameters
+    ----------
+    a : (3, 3) array_like
+        Primitive lattice vectors stored by rows.
+    kmesh : (3,) array_like of int
+        k-point mesh, e.g. (3, 3, 1).
+
+    Returns
+    -------
+    Rin : float
+        Inradius of the BvK Wigner-Seitz cell, in the same
+        length unit as `a`.
+    """
+    from itertools import product
+
+    a = np.asarray(a, dtype=float)
+    kmesh = np.asarray(kmesh, dtype=int)
+
+    # BvK lattice vectors, stored by rows
+    A = kmesh[:, None] * a
+
+    # Metric in lattice-coordinate space:
+    # |m @ A|^2 = m @ G @ m
+    G = A @ A.T
+
+    # The shortest lattice vector cannot be longer than
+    # the shortest generating vector.
+    best2 = np.min(np.diag(G))
+
+    # If lambda_min is the smallest eigenvalue of G,
+    # m @ G @ m >= lambda_min * |m|^2.
+    # Therefore any vector shorter than our current upper
+    # bound must satisfy |m| <= sqrt(best2/lambda_min).
+    lam_min = np.linalg.eigvalsh(G)[0]
+    mmax = int(np.ceil(np.sqrt(best2 / lam_min)))
+
+    for m in product(range(-mmax, mmax + 1), repeat=3):
+        if m == (0, 0, 0):
+            continue
+
+        m = np.asarray(m)
+        r2 = m @ G @ m
+
+        if r2 < best2:
+            best2 = r2
+
+    return 0.5 * np.sqrt(best2)
 
 
 def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
@@ -97,7 +161,15 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
 
     weight = 1./nkpts * (cell.vol/ngrids)
 
-    Rc = (3*nkpts*cell.vol/(4*np.pi))**(1./3)
+    if mydf.Rc_type.lower() == 'sph':
+        Rc = (3*nkpts*cell.vol/(4*np.pi))**(1./3)
+    elif mydf.Rc_type.lower() == 'ws':
+        from pyscf.pbc.lo.base import get_kmesh
+        kmesh = get_kmesh(cell, kpts)
+        log.warn('Using kmesh= %s to calculate WS-inradius Rc', kmesh)
+        Rc = ws_inradius(cell.lattice_vectors(), kmesh)
+    else:
+        raise NotImplementedError
     omega_stc = mydf.omega_dot_Rc / Rc
     log.warn('omega_stc = %.10f', omega_stc)
 

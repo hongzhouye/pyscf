@@ -20,6 +20,8 @@
 
 import numpy as np
 
+from pyscf.lib import logger
+
 from .rsdf import RSGDF, _RSGDFBuilder
 
 
@@ -69,7 +71,8 @@ def density_fit_j(mf, auxbasis=None, mesh=None, with_df=None):
     return with_df
 
 
-def density_fit(mf, auxbasis=None, mesh=None, with_df=None, exxdiv='vcut_ws', omega_dot_Rc=4.):
+def density_fit(mf, auxbasis=None, mesh=None, with_df=None, exxdiv='vcut_ws', omega_dot_Rc=4.,
+                Rc_type='ws'):
     '''Generate density-fitting SCF object
 
     Args:
@@ -94,6 +97,7 @@ def density_fit(mf, auxbasis=None, mesh=None, with_df=None, exxdiv='vcut_ws', om
         with_df = RSGDF_STC(mf.cell, kpts)
         with_df.exxdiv = exxdiv
         with_df.omega_dot_Rc = omega_dot_Rc
+        with_df.Rc_type = Rc_type
         with_df.max_memory = mf.max_memory
         with_df.stdout = mf.stdout
         with_df.verbose = mf.verbose
@@ -114,12 +118,35 @@ def density_fit(mf, auxbasis=None, mesh=None, with_df=None, exxdiv='vcut_ws', om
 class RSGDF_STC(RSGDF):
     omega_dot_Rc = 4.
     exxdiv = 'vcut_ws'
+    Rc_type = 'ws'  # inradius of WS; alternative is 'sph'
     with_df_j = None
+
+    def dump_flags(self, verbose=None):
+        RSGDF.dump_flags(self, verbose)
+
+        log = logger.new_logger(self, verbose)
+        if log.verbose < logger.INFO:
+            return self
+
+        log.info('exxdiv= %s', self.exxdiv)
+        log.info('omega_dot_Rc= %.15g', self.omega_dot_Rc)
+        log.info('Rc_type= %s', self.Rc_type)
+
+        return self
 
     def _rs_build(self):
         cell = self.cell
         nkpts = len(self.kpts)
-        Rc = (3*nkpts*cell.vol/(4*np.pi))**(1./3)
+        if self.Rc_type.lower() == 'sph':
+            Rc = (3*nkpts*cell.vol/(4*np.pi))**(1./3)
+        elif self.Rc_type.lower() == 'ws':
+            from pyscf.pbc.lo.base import get_kmesh
+            from .fft_stc import ws_inradius
+            kmesh = get_kmesh(self.cell, self.kpts)
+            logger.warn(self, 'Using kmesh= %s to calculate WS-inradius Rc', kmesh)
+            Rc = ws_inradius(cell.lattice_vectors(), kmesh)
+        else:
+            raise NotImplementedError
         self.omega = self.omega_j2c = self.omega_dot_Rc / Rc
 
         RSGDF._rs_build(self)
