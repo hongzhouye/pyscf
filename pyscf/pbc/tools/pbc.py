@@ -406,6 +406,13 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             key = tuple(np.round(shift, 12))
             cache = mf._ws_exx['vq_cache']
             if key not in cache:
+                ''' Note: A grid point on the WS boundary can have multiple degenerate r_mic.
+                    The current implementation in `precompute_exx` selects only one of them
+                    deterministically. These boundary points have zero measure in the continuous
+                    integral, so their contribution vanishes as the FFT mesh is refined. Future
+                    implementation may want to collect all degenerate r_mic's and average their
+                    phases (i.e., similar to how Wannier interpolation handles boundary images).
+                '''
                 delta = np.dot(shift, exx_kcell.reciprocal_vectors())
                 phase = np.exp(-1j * np.dot(mf._ws_exx['r_mic'], delta))
                 vG = (exx_kcell.vol / len(phase)) * fftk(
@@ -504,7 +511,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     return coulG
 
 
-def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=None):
+def precompute_exx(cell, kpts=None, precision=None, nimgs=None):
     '''Precompute the Wigner-Seitz truncated EXX kernel.
 
     The long-range part of the kernel is constructed with the minimum-image
@@ -520,15 +527,12 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
             Accuracy threshold used to set the range-separation parameter ``alpha``.
             Defaults to ``min(cell.precision, 1e-11)``, where the default value
             1e-11 follows the PRB paper above.
-        precision_fft : float
-            Accuracy threshold used to set the FFT mesh for the numerical
-            long-range kernel. Defaults to ``__config__.pbc_tools_pbc_vcut_ws_precision_fft``
-            if set, and to ``precision`` otherwise. Smaller values produce denser FFT
-            meshes without changing ``alpha``.
         nimgs : (3,) array_like of int
-            Number of lattice images searched in each direction on both sides
-            of the Born-von Karman cell. Defaults to [3,3,3], which can be overwritten
-            by setting the `__config__` attribute "pbc_tools_pbc_vcut_ws_nimgs".
+            Initial number of lattice images searched in each direction on
+            both sides of the Born-von Karman cell. The search range is
+            automatically enlarged when needed. Defaults to [3,3,3], which
+            can be overwritten by setting the `__config__` attribute
+            "pbc_tools_pbc_vcut_ws_nimgs".
 
     Returns:
         dict
@@ -560,15 +564,6 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
 
     log.debug('# precision = %.15g', precision)
 
-    if precision_fft is None:
-        precision_fft = getattr(__config__, 'pbc_tools_pbc_vcut_ws_precision_fft', None)
-        if precision_fft is None:
-            precision_fft = precision
-    precision_fft = float(precision_fft)
-    assert 0 < precision_fft < 1
-
-    log.debug('# precision_fft = %.15g', precision_fft)
-
     if nimgs is None:
         nimgs = getattr(__config__, 'pbc_tools_pbc_vcut_ws_nimgs', [3, 3, 3])
     nimgs = np.asarray(nimgs, dtype=int)
@@ -591,8 +586,7 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
     alpha = np.sqrt(log_precision) / Rin
     log.debug('# WS alpha = %s', alpha)
 
-    log_precision_fft = -np.log(precision_fft)
-    Gmax = 2 * alpha * np.sqrt(log_precision_fft)
+    Gmax = 2 * alpha * np.sqrt(log_precision)
     kcell.mesh = cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
     log.debug('# kcell.mesh FFT = %s', kcell.mesh)
 
@@ -605,31 +599,26 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
     ])
     images = np.dot(images_coord, kcell.a)
     r = np.full(kngs, np.inf)
-    r_mic = np.empty_like(rs)
     for image in images:
+        np.minimum(r, lib.norm(rs - image, axis=1), out=r)
+
+    # Determine an image search range guaranteed to be exhaustive.
+    Lc = 1. / lib.norm(np.linalg.inv(kcell.a), axis=0)
+    nimgs_ref = np.floor(r.max() / Lc).astype(int) + 1
+    log.debug('# nimgs_ref = %s', nimgs_ref)
+
+    images_ref_coord = lib.cartesian_prod([
+        range(-n, n + 1) for n in nimgs_ref
+    ])
+    r.fill(np.inf)
+    r_mic = np.empty_like(rs)
+    for image_coord in images_ref_coord:
+        image = np.dot(image_coord, kcell.a)
         dr = rs - image
         r1 = lib.norm(dr, axis=1)
         mask = r1 < r
         r[mask] = r1[mask]
         r_mic[mask] = dr[mask]
-
-    # Check the image search against a range guaranteed to be exhaustive.
-    Lc = 1. / lib.norm(np.linalg.inv(kcell.a), axis=0)
-    nimgs_ref = np.floor(r.max() / Lc).astype(int) + 1
-    nimgs_ref = np.maximum(nimgs, nimgs_ref)
-    images_ref_coord = lib.cartesian_prod([
-        range(-n, n + 1) for n in nimgs_ref
-    ])
-    r_ref = r.copy()
-    for image_coord in images_ref_coord:
-        if np.all(abs(image_coord) <= nimgs):
-            continue
-        image = np.dot(image_coord, kcell.a)
-        np.minimum(r_ref, lib.norm(rs - image, axis=1), out=r_ref)
-    if np.max(r - r_ref) > 1e-10:
-        raise RuntimeError(
-            f'nimgs={nimgs} is not large enough for the minimum image '
-            f'convention; a sufficient value is {nimgs_ref}')
 
     vR = scipy.special.erf(alpha*r) / (r+1e-200)
     vR[r<1e-9] = 2*alpha / np.sqrt(np.pi)
