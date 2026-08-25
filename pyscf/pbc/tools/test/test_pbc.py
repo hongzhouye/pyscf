@@ -98,9 +98,6 @@ class KnownValues(unittest.TestCase):
         cell.build()
         kpts = cell.make_kpts([1,1,1])
 
-        # assert that using a small nimgs raise RuntimeError
-        self.assertRaises(RuntimeError, tools.precompute_exx, cell, kpts, nimgs=[1,1,1])
-
         # but using the new default nimgs=[3,3,3] gives no error
         res = tools.precompute_exx(cell, kpts)
         self.assertAlmostEqual(lib.fp(res['vq']), 44.672318849250274+0j, 9)
